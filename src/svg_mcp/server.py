@@ -19,7 +19,7 @@ from weakref import WeakKeyDictionary
 from fastmcp import Context, FastMCP
 from fastmcp.server.dependencies import get_context
 from mcp.server.session import ServerSession
-from pydantic import AnyUrl
+from pydantic import AnyUrl, BaseModel
 
 from . import ops
 from .model.document import Document
@@ -77,6 +77,10 @@ WORKFLOW
 4. `outline(document_id)` shows the current tree; `render_document(document_id)` returns the
    rendered PNG so you can visually verify. Iterate.
 5. `export_svg(document_id)` returns the final SVG source.
+6. WHEN THE ARTWORK IS COMPLETE (after you've iterated and verified it): if the user hasn't
+   already said what they want done with the result, ASK before finishing — e.g. save to a file
+   and where (`export_render` → png/jpeg/webp/pdf/ps/eps/svg), hand back the SVG source, or just
+   leave it as the live document. Don't assume; don't silently stop with only an inline preview.
 
 ACTIVE DOCUMENT
 - The store tracks an *active* document (the most recently created or touched one). Omit
@@ -191,6 +195,61 @@ def _store() -> DocumentStore:
 Point = tuple[float, float]
 
 
+class VariableWidthStroke(BaseModel):
+    """One variable-width ribbon for the bulk `add_variable_width_paths` tool."""
+
+    points: list[Point]
+    widths: list[float] | float
+    closed: bool = False
+    cap: Literal["butt", "round"] = "butt"
+    interpolation: Literal["linear", "cubic"] = "linear"
+    samples: int = 8
+    style: ShapeStyle | None = None
+    name: str | None = None
+
+
+class RectSpec(BaseModel):
+    """One rectangle for the bulk `add_rects` tool."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+    rx: float | None = None
+    ry: float | None = None
+    style: ShapeStyle | None = None
+    name: str | None = None
+
+
+class CircleSpec(BaseModel):
+    """One circle for the bulk `add_circles` tool."""
+
+    cx: float
+    cy: float
+    r: float
+    style: ShapeStyle | None = None
+    name: str | None = None
+
+
+class LineSpec(BaseModel):
+    """One line segment for the bulk `add_lines` tool."""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    style: ShapeStyle | None = None
+    name: str | None = None
+
+
+class PathSpec(BaseModel):
+    """One path for the bulk `add_paths` tool."""
+
+    d: str
+    style: ShapeStyle | None = None
+    name: str | None = None
+
+
 def _doc(document_id: str | None) -> Document:
     return _store().get(document_id)
 
@@ -261,6 +320,25 @@ def create_document(
     """
     document_id, _ = _store().create(width, height, viewbox)
     return {"document_id": document_id, "width": width, "height": height, "active": True}
+
+
+@mcp.tool
+@emits_change
+def import_svg(*, svg: str | None = None, path: str | None = None) -> dict[str, str | bool]:
+    """Load an existing SVG into a new session document, so you can render/inspect/edit it.
+
+    Provide the source EITHER inline via `svg` OR from a file via `path` (preferred for large
+    documents — avoids inlining the whole string). The imported document becomes active.
+
+    Args:
+        svg: Complete SVG source as a string.
+        path: Filesystem path to an `.svg` file to read instead.
+
+    Returns:
+        {document_id, active}. The new document becomes active.
+    """
+    document_id = _store().register(ops.load_svg_document(svg=svg, path=path))
+    return {"document_id": document_id, "active": True}
 
 
 @mcp.tool
@@ -638,6 +716,218 @@ def add_path(
         style=_style(style),
         transform=transform,
     ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def add_variable_width_path(
+    *,
+    document_id: str | None = None,
+    points: list[Point],
+    widths: list[float] | float,
+    closed: bool = False,
+    cap: Literal["butt", "round"] = "butt",
+    interpolation: Literal["linear", "cubic"] = "linear",
+    samples: int = 8,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Expand a polyline into a VARIABLE-WIDTH line — a filled ribbon that swells and tapers.
+
+    SVG `stroke-width` is constant per element, so true variable-width lines (calligraphy,
+    engraving, brush strokes, tapered arrows) must be drawn as a FILL. This offsets the centerline
+    by ±half-width at each vertex and emits the closed ribbon outline. Set `style.fill` to the ink
+    color (stroke is not used for the body).
+
+    Args:
+        points: Centerline vertices as [[x, y], ...] in user units (≥ 2 points).
+        widths: Full stroke width at each vertex — a list matching `points`, or a single number
+            for a constant width.
+        closed: Treat the centerline as a loop (annular ribbon); otherwise open with end caps.
+        cap: End cap for open ribbons — "butt" (flat) or "round" (semicircular).
+        interpolation: "linear" (straight segments) or "cubic" — a Catmull-Rom spline through the
+            vertices that smooths BOTH the path and the width (turns jagged input into flowing
+            strokes; great for hand-traced or sparse centerlines).
+        samples: Sub-segments per span for cubic interpolation (higher = smoother, default 8).
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label.
+        style: Fill/etc; fill may be a color or paint ref (url(#id) or @name).
+        transform: Optional SVG transform string.
+
+    Returns:
+        The new node's {id, tag, name}.
+    """
+    width_list = [float(widths)] * len(points) if isinstance(widths, int | float) else widths
+    return ops.add_variable_width_path(
+        _doc(document_id),
+        points=points,
+        widths=width_list,
+        closed=closed,
+        cap=cap,
+        interpolation=interpolation,
+        samples=samples,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def add_variable_width_paths(
+    *,
+    document_id: str | None = None,
+    strokes: list[VariableWidthStroke],
+    parent: str | None = None,
+) -> dict[str, int | list[str]]:
+    """Add MANY variable-width ribbons in ONE call — a bulk version of add_variable_width_path.
+
+    Construction tools never auto-render (they return handles; rendering is on-demand via
+    render_document), so the per-shape cost is just a round-trip. This batches many ribbons into a
+    single call to avoid N round-trips — ideal for procedural art (engraving, hatching, fields of
+    strokes). Each stroke is its own filled path node.
+
+    Args:
+        strokes: A list of {points, widths, closed?, cap?, style?, name?} — each as in
+            add_variable_width_path. `widths` may be a list (per vertex) or a single number.
+        parent: Group/layer id (or name) to nest all of them under; omit for the document root.
+
+    Returns:
+        {count, ids}: how many were added and their node ids (in order).
+    """
+    doc = _doc(document_id)
+    ids: list[str] = []
+    for s in strokes:
+        widths = (
+            [float(s.widths)] * len(s.points) if isinstance(s.widths, int | float) else s.widths
+        )
+        ref = ops.add_variable_width_path(
+            doc,
+            points=s.points,
+            widths=widths,
+            closed=s.closed,
+            cap=s.cap,
+            interpolation=s.interpolation,
+            samples=s.samples,
+            parent=parent,
+            name=s.name,
+            style=_style(s.style),
+        )
+        ids.append(ref.id)
+    return {"count": len(ids), "ids": ids}
+
+
+@mcp.tool
+@emits_change
+def add_rects(
+    *, document_id: str | None = None, rects: list[RectSpec], parent: str | None = None
+) -> dict[str, int | list[str]]:
+    """Add MANY rectangles in one call (bulk add_rect) — one round-trip instead of N.
+
+    Args:
+        rects: A list of {x, y, width, height, rx?, ry?, style?, name?}.
+        parent: Group/layer id (or name) to nest them all under; omit for the document root.
+
+    Returns:
+        {count, ids} — how many were added and their node ids, in order.
+    """
+    doc = _doc(document_id)
+    ids = [
+        ops.add_rect(
+            doc,
+            x=r.x,
+            y=r.y,
+            width=r.width,
+            height=r.height,
+            rx=r.rx,
+            ry=r.ry,
+            parent=parent,
+            name=r.name,
+            style=_style(r.style),
+        ).id
+        for r in rects
+    ]
+    return {"count": len(ids), "ids": ids}
+
+
+@mcp.tool
+@emits_change
+def add_circles(
+    *, document_id: str | None = None, circles: list[CircleSpec], parent: str | None = None
+) -> dict[str, int | list[str]]:
+    """Add MANY circles in one call (bulk add_circle) — ideal for dot fields / scatter plots.
+
+    Args:
+        circles: A list of {cx, cy, r, style?, name?}.
+        parent: Group/layer id (or name) to nest them all under; omit for the document root.
+
+    Returns:
+        {count, ids} — how many were added and their node ids, in order.
+    """
+    doc = _doc(document_id)
+    ids = [
+        ops.add_circle(
+            doc, cx=c.cx, cy=c.cy, r=c.r, parent=parent, name=c.name, style=_style(c.style)
+        ).id
+        for c in circles
+    ]
+    return {"count": len(ids), "ids": ids}
+
+
+@mcp.tool
+@emits_change
+def add_lines(
+    *, document_id: str | None = None, lines: list[LineSpec], parent: str | None = None
+) -> dict[str, int | list[str]]:
+    """Add MANY line segments in one call (bulk add_line) — grids, hatching, axes.
+
+    Args:
+        lines: A list of {x1, y1, x2, y2, style?, name?}.
+        parent: Group/layer id (or name) to nest them all under; omit for the document root.
+
+    Returns:
+        {count, ids} — how many were added and their node ids, in order.
+    """
+    doc = _doc(document_id)
+    ids = [
+        ops.add_line(
+            doc,
+            x1=ln.x1,
+            y1=ln.y1,
+            x2=ln.x2,
+            y2=ln.y2,
+            parent=parent,
+            name=ln.name,
+            style=_style(ln.style),
+        ).id
+        for ln in lines
+    ]
+    return {"count": len(ids), "ids": ids}
+
+
+@mcp.tool
+@emits_change
+def add_paths(
+    *, document_id: str | None = None, paths: list[PathSpec], parent: str | None = None
+) -> dict[str, int | list[str]]:
+    """Add MANY paths in one call (bulk add_path) — procedural/vector art with one round-trip.
+
+    Args:
+        paths: A list of {d, style?, name?} where d is SVG path data.
+        parent: Group/layer id (or name) to nest them all under; omit for the document root.
+
+    Returns:
+        {count, ids} — how many were added and their node ids, in order.
+    """
+    doc = _doc(document_id)
+    ids = [
+        ops.add_path(doc, d=p.d, parent=parent, name=p.name, style=_style(p.style)).id
+        for p in paths
+    ]
+    return {"count": len(ids), "ids": ids}
 
 
 @mcp.tool

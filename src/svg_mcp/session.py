@@ -31,6 +31,13 @@ class DocumentStore:
         self._active = document_id
         return document_id, document
 
+    def register(self, document: Document) -> str:
+        """Register an externally built document, make it active; returns its new id."""
+        document_id = f"doc{next(self._counter)}"
+        self._docs[document_id] = document
+        self._active = document_id
+        return document_id
+
     def resolve_id(self, document_id: str | None) -> str:
         """Resolve an explicit id, or the active document when ``document_id`` is None."""
         if document_id is not None:

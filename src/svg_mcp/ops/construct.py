@@ -17,6 +17,7 @@ from pathlib import Path
 import inkex
 from inkex import BaseElement
 
+from ..geom import variable_width_outline
 from ..model.document import Document
 from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef
@@ -190,6 +191,43 @@ def add_path(
     )
 
 
+def add_variable_width_path(
+    doc: Document,
+    *,
+    points: list[Point],
+    widths: list[float],
+    closed: bool = False,
+    cap: str = "butt",
+    interpolation: str = "linear",
+    samples: int = 8,
+    parent: str | None = None,
+    name: str | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Expand a polyline centerline with per-vertex widths into a filled variable-width ribbon.
+
+    The classic Power-Stroke operation: SVG strokes are constant-width, so swelling/tapering
+    lines are drawn as a fill. ``widths`` is the full stroke width at each point (same length as
+    ``points``). A closed centerline yields an annular ribbon (fill-rule evenodd). Set
+    ``interpolation="cubic"`` to smooth the centerline and width via a Catmull-Rom spline.
+    """
+    if len(widths) != len(points):
+        raise InvalidArgument("widths must have the same length as points")
+    try:
+        d = variable_width_outline(
+            points, widths, closed=closed, cap=cap, interpolation=interpolation, samples=samples
+        )
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+    if closed:
+        style = {"fill-rule": "evenodd", **(style or {})}
+    element = inkex.PathElement.new(d)
+    return _place(
+        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    )
+
+
 def add_text(
     doc: Document,
     *,
@@ -337,6 +375,18 @@ def add_image(
     return _place(
         doc, element, prefix="image", parent=parent, name=name, style=None, transform=transform
     )
+
+
+def load_svg_document(*, svg: str | None = None, path: str | None = None) -> Document:
+    """Build a :class:`Document` from SVG source given inline ``svg`` OR a file ``path``.
+
+    Exactly one source must be provided. Reading from a path is preferred for large documents.
+    """
+    if (svg is None) == (path is None):
+        raise InvalidArgument("provide exactly one of svg or path")
+    text = Path(path).read_text(encoding="utf-8") if path is not None else svg
+    assert text is not None  # narrowed by the xor check above
+    return Document.from_svg(text)
 
 
 def add_use(
