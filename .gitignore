@@ -20,4 +20,5 @@ venv/
 # Renders / scratch artifacts
 *.png
 !docs/**/*.png
+!logo.png
 scratch/

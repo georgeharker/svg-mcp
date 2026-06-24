@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./logo.png" alt="svg-mcp" width="460">
+</p>
+
 # svg-mcp
 
 A [FastMCP](https://github.com/jlowin/fastmcp) server that exposes **structured, hierarchical
@@ -6,27 +10,77 @@ raster, reusable styles — built around an **inkex-backed document model** the 
 query, and manipulate as groups, layers, transforms, and masks, with a fast
 **construct → render → see → iterate** loop.
 
+> The logo above was authored entirely through these tools — see [Usage](#usage).
+
 See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 [`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md) catalog for the inkex → tool mapping.
 
+## Quickstart (Claude)
+
+1. **Prerequisites** — Python ≥ 3.12 and the [resvg](https://github.com/linebender/resvg)
+   renderer:
+
+   ```bash
+   brew install resvg          # macOS (or: cargo install resvg)
+   ```
+
+2. **Install** the server from a clone of this repo (pulls fastmcp, inkex, fontTools, …):
+
+   ```bash
+   uv venv && uv pip install -e .     # entrypoint lands at .venv/bin/svg-mcp
+   # or: python -m venv .venv && .venv/bin/pip install -e .
+   ```
+
+3. **Connect Claude:**
+
+   - **Claude Code** — from the repo directory:
+
+     ```bash
+     claude mcp add svg-mcp -- "$(pwd)/.venv/bin/svg-mcp"
+     ```
+
+     (Or just open the project — it ships a [`.mcp.json`](./.mcp.json) you can approve.)
+
+   - **Claude Desktop** — add to `claude_desktop_config.json` (use the **absolute** path) and
+     restart the app:
+
+     ```json
+     { "mcpServers": { "svg-mcp": { "command": "/ABSOLUTE/PATH/TO/svg-mcp/.venv/bin/svg-mcp" } } }
+     ```
+
+4. **Try it** — ask Claude:
+
+   > Use svg-mcp to make a 320×120 badge that says "hello" on a blue gradient, then show me the
+   > render.
+
+   Claude creates a document, adds the shapes and text, and calls `render_document` to show you
+   the image inline — then you iterate in plain language ("bigger text", "add a drop shadow",
+   "outline the text to paths"). See [Usage](#usage) for the conventions and a worked example.
+
 ## Status
 
-The full inkex catalog is mapped through to **91 MCP tools** (all three tiers — see
+The full inkex catalog is mapped through to **97 MCP tools** (see
 [`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md)), with ruff/mypy clean and the test suite green.
 
-- **Document model** (inkex-backed, multi-document): shapes, paths (+ arc/star factories and
-  path-data ops), text + tspan runs + text-on-path + flowed text, images (base64/file embed),
-  groups (+ ungroup, z-order, duplicate, world-preserving reparent), **layers** (+ visible/
-  locked/opacity), symbols/use, hyperlinks.
+- **Document model** (inkex-backed, multi-document with an active-document default): shapes,
+  paths (+ arc/star factories and path-data ops), text + tspan runs + text-on-path + flowed
+  text, images (base64/file embed), groups (+ ungroup, z-order, duplicate, world-preserving
+  reparent), **layers** (+ visible/locked/opacity), symbols/use, hyperlinks.
+- **Text → paths** (`text_to_path`): pure-Python glyph outlining (fontTools) — flattens tspans,
+  honors bold/italic/per-run fill, and walks text **along a curve** (`<textPath>`). `list_fonts`
+  enumerates installed families.
 - **Reusable resources**: named styles (CSS classes + `@name` paint refs), linear/radial/mesh
   gradients, patterns, markers, **clip + mask**, and **filters** (blur, drop-shadow,
   color-matrix/overlay, blend, morphology, component-transfer, turbulence, displacement, plus a
   raw filter-graph builder).
 - **Transforms** as primitives: translate, rotate-about-center, scale-about-anchor, skew, raw.
-- **Queries**: outline, bbox, computed style, transform/CTM, unit conversion, selectors
-  (`find`/`get_subtree`), image extraction; metadata (title/desc/RDF); guides & pages.
+- **Queries / context**: `current_context`, `describe_node`, `list_resources`, `outline`, bbox,
+  computed style, transform/CTM, unit conversion, selectors (`find`/`get_subtree`), image
+  extraction; metadata (title/desc/RDF); guides & pages.
 - **Render-and-see loop**: serialize-then-rasterize via the **resvg** CLI; the image is handed
-  back directly as base64 image content (optional downscale cap).
+  back directly as base64 image content. Documents are also published as readable MCP
+  **resources** (`svg://documents`, `svg://{id}/svg`, `svg://{id}/render`) with change
+  notifications.
 
 ## Install
 
@@ -125,3 +179,62 @@ uv run fastmcp dev src/svg_mcp/server.py:mcp
 The model's loop is: `create_document` → add nodes / resources → `render_document` to see the
 result inline → iterate → `export_svg`. The server's `instructions` describe the full workflow
 and conventions; each tool carries its own description.
+
+## Usage
+
+The tools are called by an LLM over MCP. The core loop is **create → build → render-and-see →
+iterate → export**. A minimal session (arguments shown as the JSON each tool receives):
+
+```text
+create_document(width=320, height=120)                 # → {document_id:"doc1", active:true}
+
+# define a reusable gradient, then paint with it by name (@name) or url(#id)
+define_linear_gradient(x1=0, y1=0, x2=1, y2=0,
+    stops=[{offset:0, color:"#7dd3fc"}, {offset:1, color:"#1e3a8a"}], name="brand")
+add_rect(x=0, y=0, width=320, height=120, rx=16, style={fill:"@brand"})
+
+add_text(x=160, y=72, content="svg-mcp", name="title",
+    style={font_family:"Helvetica", font_size:"40px", font_weight:"bold",
+           text_anchor:"middle", fill:"#ffffff"})
+apply_drop_shadow(target="title", dx=0, dy=2, blur=3, color="#000", opacity=0.4)
+
+render_document(scale=2)        # returns the rendered PNG inline — look, then adjust
+export_svg()                    # final SVG source string
+```
+
+### Conventions
+
+- **Active document.** `create_document` returns a `document_id` and makes it active; you may
+  **omit `document_id`** on later calls to target it. Pass it explicitly to switch, or use
+  `set_active_document`. Call `current_context()` to re-anchor (active id, open docs, outline).
+- **Targets by id or name.** Every `target`/`parent`/`content` arg takes a node's returned id
+  **or** the friendly `name` you gave it. Name things you'll revisit; reason via `find(name=…)`
+  and `outline`.
+- **Coordinates.** User units, origin top-left, y increases downward.
+- **Style.** A structured object — `fill`, `stroke`, `stroke_width`, `opacity`, plus typography
+  (`font_family`, `font_size`, `font_weight`, `font_style`, `text_anchor`). Colors accept hex /
+  `rgb()` / CSS names / `none`, **or** a paint reference `url(#id)` / `@name` to a defined
+  gradient or pattern.
+- **Resources** follow *create → define → reference/apply*: `define_*` returns an id you use as
+  a fill (`url(#id)`/`@name`) or attach via `apply_*` (clip/mask/marker/filter). Clip/mask/
+  symbol/pattern definitions **move** the listed content nodes into the resource, so build those
+  shapes first. `list_resources()` shows what's defined.
+- **Transforms** compose: `translate_node`, `rotate_node` (optional center), `scale_node`
+  (optional anchor), `skew_node`, or `apply_transform("rotate(45 100 100)")`.
+- **Text.** `add_text` + `add_text_run` for multi-line/styled spans; `add_text_on_path` to flow
+  along a path. Judge text size with `render_document` (geometry queries are empty for live
+  text). `text_to_path` outlines text to glyph paths — **font-independent**, flattens tspans,
+  and walks `<textPath>` along its curve; `list_fonts` lists installable families.
+
+### Resources
+
+Open documents are also exposed as readable MCP resources, so a host can surface live state:
+`svg://documents` (index + which is active), `svg://{id}/svg` (source), `svg://{id}/render`
+(PNG). Mutations emit `resources/updated` notifications.
+
+### Example: the logo
+
+The header logo (`logo.svg`) was built with these tools — a blue gradient wordmark, an
+orange→white starfield clipped into the glyphs via a mask, the `<svg>` tags under a translucent
+white veil, and a drop shadow — then `text_to_path` outlined the glyphs so the final file is
+font-independent. `scripts/demo.py` shows a smaller end-to-end build you can run directly.
