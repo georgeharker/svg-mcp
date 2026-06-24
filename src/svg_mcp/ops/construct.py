@@ -22,21 +22,10 @@ from ..model.document import Document
 from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef
 from ..typeset import FontNotFound, glyph_run, is_bold, parse_font_size, text_on_path_d
+from .paint import resolve_paint_refs as _resolve_paint_refs
 
 Style = dict[str, str]
 Point = tuple[float, float]
-
-
-def _resolve_paint_refs(doc: Document, style: Style | None) -> Style | None:
-    """Rewrite ``@name`` paint shorthands on fill/stroke to ``url(#id)`` of a named def."""
-    if not style:
-        return style
-    resolved = dict(style)
-    for key in ("fill", "stroke"):
-        value = resolved.get(key)
-        if value and value.startswith("@"):
-            resolved[key] = doc.resolve(value[1:]).get_id(as_url=2)
-    return resolved
 
 
 def _apply_style(element: BaseElement, style: Style | None) -> None:

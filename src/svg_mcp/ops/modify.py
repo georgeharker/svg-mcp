@@ -8,6 +8,7 @@ import inkex
 
 from ..model.document import Document
 from ..model.handles import NodeRef
+from .paint import resolve_paint_refs
 
 Style = dict[str, str]
 Point = tuple[float, float]
@@ -35,13 +36,17 @@ def delete_node(doc: Document, target: str) -> str:
 
 
 def restyle(doc: Document, target: str, style: Style, *, replace: bool = False) -> NodeRef:
-    """Merge ``style`` into the node's presentation (or replace it wholesale)."""
+    """Merge ``style`` into the node's presentation (or replace it wholesale).
+
+    ``@name`` paint shorthands on fill/stroke are resolved to ``url(#id)``, just like at creation.
+    """
     element = doc.resolve(target)
+    resolved = resolve_paint_refs(doc, style) or {}
     if replace:
-        element.style = inkex.Style(style)
+        element.style = inkex.Style(resolved)
     else:
         merged = element.style
-        merged.update(style)
+        merged.update(resolved)
         element.style = merged
     return _ref(element)
 

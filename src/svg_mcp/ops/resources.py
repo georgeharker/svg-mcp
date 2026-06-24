@@ -15,6 +15,7 @@ from lxml import etree
 
 from ..model.document import Document
 from ..model.handles import NodeRef
+from .paint import resolve_paint_refs
 
 Style = dict[str, str]
 Stop = tuple[float, str, float]  # (offset, color, opacity)
@@ -53,8 +54,12 @@ def _sync_stylesheet(doc: Document) -> None:
 
 
 def define_style(doc: Document, name: str, props: Style) -> str:
-    """Define (or redefine) a named style, emitted as a CSS class ``.name``."""
-    doc.styles[name] = props
+    """Define (or redefine) a named style, emitted as a CSS class ``.name``.
+
+    ``@name`` paint shorthands on fill/stroke are resolved to ``url(#id)`` so a class may
+    reference a defined gradient/pattern.
+    """
+    doc.styles[name] = resolve_paint_refs(doc, props) or {}
     _sync_stylesheet(doc)
     return name
 

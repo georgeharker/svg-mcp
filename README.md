@@ -253,7 +253,8 @@ Open documents are also exposed as readable MCP resources, so a host can surface
 
 ### Example: the logo
 
-The header logo (`logo.svg`) was built with these tools — a blue gradient wordmark, an
-orange→white starfield clipped into the glyphs via a mask, the `<svg>` tags under a translucent
-white veil, and a drop shadow — then `text_to_path` outlined the glyphs so the final file is
+The header logo (`logo.svg`) was built with these tools — `<mcp>svg</mcp>` as a blue gradient
+wordmark, an orange→white starfield clipped into the glyphs, the inner `svg` word under a
+translucent white veil (so the `<mcp>` tags read as starry space and `svg` as frosted white), all
+under one drop shadow — then `text_to_path` outlined the glyphs so the final file is
 font-independent. `scripts/demo.py` shows a smaller end-to-end build you can run directly.
