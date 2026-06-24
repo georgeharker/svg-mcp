@@ -40,6 +40,7 @@ from .render.feedback import MCPImage
 from .schemas import FilterPrimitive, GradientStop, ShapeStyle
 from .serialize import export_svg as _export_svg
 from .session import DocumentStore
+from .typeset import list_font_families as _list_font_families
 
 
 def _to_fe(primitive: FilterPrimitive) -> ops.FePrimitive:
@@ -1617,6 +1618,34 @@ def list_resources(*, document_id: str | None = None) -> dict[str, list[dict[str
         `url(#id)` or `@name`; attach clips/masks/filters/markers with the matching apply_* tool.
     """
     return _list_resources(_doc(document_id))
+
+
+@mcp.tool
+def list_fonts() -> list[str]:
+    """List the font families installed on this system, usable as a text style's font-family.
+
+    Returns:
+        Sorted proper-case family names (e.g. "Helvetica", "Menlo"). Set one via a text node's
+        style font-family when creating text.
+    """
+    return _list_font_families()
+
+
+@mcp.tool
+@emits_change
+def text_to_path(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+    """Convert a text node into an outlined <path> (font-independent, usable in clips/booleans).
+
+    Bakes the glyph geometry in place, preserving the node's id/name/transform/paint. Pure
+    Python (fontTools). Outlines a single run's direct text; tspans aren't flattened.
+
+    Args:
+        target: The text node id or name to outline.
+
+    Returns:
+        The new path's {id, tag, name}.
+    """
+    return ops.text_to_path(_doc(document_id), target).as_dict()
 
 
 # --- path factories & path ops ---------------------------------------------

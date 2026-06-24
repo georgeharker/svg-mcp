@@ -18,6 +18,8 @@ dependencies = [
   "pydantic-settings>=2.2",
   "lxml>=5.0",
   "pillow>=10.0",
+  # Pure-Python font handling for text_to_path (glyph outlines + family lookup via name tables).
+  "fonttools>=4.50",
   # inkex is the SVG DOM (transforms, styles, layers, masks, bbox, composed_transform).
   # PyPI 1.4.1: flat `inkex.colors` module and NO Image.embed_image() (we embed raster
   # manually). All element classes + bbox/CTM/specified_style/Transform@ are present.
@@ -55,7 +57,7 @@ ignore_missing_imports = true
 # inkex ships no type information; treat it as an opaque untyped module rather than
 # analyzing its dynamic star-exports. Boundary returns are narrowed explicitly in our code.
 [[tool.mypy.overrides]]
-module = ["inkex", "inkex.*", "numpy", "numpy.*"]
+module = ["inkex", "inkex.*", "numpy", "numpy.*", "fontTools", "fontTools.*"]
 ignore_missing_imports = true
 ignore_errors = true
 follow_imports = "skip"

@@ -6,6 +6,7 @@ Each ``define_*`` returns the new resource's id; ``apply_*`` wires a target node
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import inkex
@@ -177,15 +178,37 @@ def apply_mask(doc: Document, target: str, mask: str) -> NodeRef:
     return _ref(element)
 
 
+def _prune_def(doc: Document, url_value: str | None) -> None:
+    """Delete the referenced ``<defs>`` resource if nothing else still references it."""
+    if not url_value:
+        return
+    match = re.search(r"#([^)\s]+)", str(url_value))
+    if not match:
+        return
+    rid = match.group(1)
+    for element in doc.svg.iter():
+        for value in element.attrib.values():
+            text = str(value)
+            if f"#{rid})" in text or text == f"#{rid}":  # url(#rid) or href="#rid"
+                return  # still referenced
+    resource = doc.svg.getElementById(rid)
+    if resource is not None:
+        resource.delete()
+
+
 def clear_clip(doc: Document, target: str) -> NodeRef:
     element = doc.resolve(target)
+    previous = element.get("clip-path")
     element.pop("clip-path", None)
+    _prune_def(doc, previous)
     return _ref(element)
 
 
 def clear_mask(doc: Document, target: str) -> NodeRef:
     element = doc.resolve(target)
+    previous = element.get("mask")
     element.pop("mask", None)
+    _prune_def(doc, previous)
     return _ref(element)
 
 

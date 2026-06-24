@@ -18,6 +18,7 @@ from .construct import (
     add_use,
     create_group,
     create_layer,
+    text_to_path,
     unlink_use,
     wrap_in_link,
 )
@@ -96,6 +97,7 @@ __all__ = [
     "unlink_use",
     "add_flowed_text",
     "wrap_in_link",
+    "text_to_path",
     "create_group",
     "create_layer",
     # paths

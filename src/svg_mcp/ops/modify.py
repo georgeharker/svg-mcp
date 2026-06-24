@@ -184,9 +184,16 @@ def lower_node(doc: Document, target: str) -> NodeRef:
 
 
 def duplicate(doc: Document, target: str, into: str | None = None) -> NodeRef:
-    """Duplicate a node (with a fresh id); optionally move the copy into another parent."""
+    """Duplicate a node (fresh id, name suffixed ``-copy``); optionally move it into a parent.
+
+    The copy's friendly name gets a ``-copy`` suffix so it doesn't collide with the original
+    under name-based resolution.
+    """
     element = doc.resolve(target)
     copy = element.duplicate()
+    label = getattr(copy, "label", None)
+    if label:
+        copy.label = f"{label}-copy"
     if into is not None:
         doc.resolve_parent(into).add(copy)
     return _ref(copy)
