@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from svg_mcp import ops
+from svg_mcp.schemas import ShapeStyle
 from svg_mcp.serialize import export_svg
 from svg_mcp.session import DocumentStore
-from svg_mcp.typeset import list_font_families, text_to_path_d
+from svg_mcp.typeset import list_font_families, measure_text, text_to_path_d
 
 _PREFERRED = ["Helvetica", "Arial", "Menlo", "Courier New", "Times New Roman", "Verdana"]
 
@@ -87,6 +88,30 @@ def test_clear_clip_prunes_orphan_def() -> None:
     assert "clipPath" in export_svg(doc)
     ops.clear_clip(doc, rect.id)
     assert "clipPath" not in export_svg(doc)  # orphaned def removed
+
+
+def test_measure_text_scales_with_content_and_size() -> None:
+    font = _a_text_font()
+    w1, h1 = measure_text("AAAA", font_family=font, font_size=40)
+    w2, h2 = measure_text("AA", font_family=font, font_size=40)
+    assert w1 > w2 > 0  # more glyphs -> wider
+    assert h1 == h2 > 0  # line height is independent of content
+    w_big, h_big = measure_text("AA", font_family=font, font_size=80)
+    assert w_big > w2 and h_big > h2  # both scale with font size
+
+
+def test_style_dict_emits_new_typography_props() -> None:
+    style = ShapeStyle(
+        word_spacing="2px",
+        text_decoration="underline",
+        dominant_baseline="middle",
+        paint_order="stroke fill",
+    )
+    out = style.to_style_dict()
+    assert out["word-spacing"] == "2px"
+    assert out["text-decoration"] == "underline"
+    assert out["dominant-baseline"] == "middle"
+    assert out["paint-order"] == "stroke fill"
 
 
 def test_duplicate_adds_suffix() -> None:

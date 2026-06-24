@@ -74,8 +74,14 @@ def _scan_fonts() -> tuple[_Record, ...]:
                         if not display:
                             continue
                         records.append(
-                            (display, display.lower(), "bold" in sub,
-                             "italic" in sub or "oblique" in sub, path, number)
+                            (
+                                display,
+                                display.lower(),
+                                "bold" in sub,
+                                "italic" in sub or "oblique" in sub,
+                                path,
+                                number,
+                            )
                         )
                 finally:
                     for face in faces:
@@ -213,6 +219,32 @@ def text_on_path_d(
             glyph_set[gname].draw(TransformPen(pen, matrix))
         distance += advance
     return str(pen.getCommands())
+
+
+def measure_text(
+    text: str,
+    *,
+    font_family: str,
+    font_size: float,
+    bold: bool = False,
+    italic: bool = False,
+) -> tuple[float, float]:
+    """Return (width, height) in user units for a single run — its advance width and line
+    height (ascender − descender). Lets a caller fit/center text without a render round-trip."""
+    font = _load_font(font_family, bold, italic)
+    scale = font_size / font["head"].unitsPerEm
+    cmap = font.getBestCmap()
+    metrics = font["hmtx"].metrics
+    width = 0.0
+    for char in text:
+        gname = cmap.get(ord(char), ".notdef")
+        width += metrics[gname][0] if gname in metrics else 0.0
+    try:
+        hhea = font["hhea"]
+        height = (hhea.ascent - hhea.descent) * scale
+    except Exception:
+        height = font_size
+    return width * scale, height
 
 
 def parse_font_size(value: str | None, default: float = 16.0) -> float:

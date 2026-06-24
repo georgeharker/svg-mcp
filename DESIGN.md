@@ -37,6 +37,8 @@ computed styles, and operations that extract and rewrite subtrees.
 
 ## 2. Architecture / layering
 
+![svg-mcp architecture](./docs/architecture.png)
+
 ```
 svg_mcp/
   server.py        FastMCP app. Thin: pydantic-validated tool I/O -> ops/query -> structured result (+Image).

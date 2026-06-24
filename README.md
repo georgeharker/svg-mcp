@@ -59,7 +59,7 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
 ## Status
 
-The full inkex catalog is mapped through to **97 MCP tools** (see
+The full inkex catalog is mapped through to **100 MCP tools** (see
 [`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md)), with ruff/mypy clean and the test suite green.
 
 - **Document model** (inkex-backed, multi-document with an active-document default): shapes,
@@ -68,7 +68,8 @@ The full inkex catalog is mapped through to **97 MCP tools** (see
   reparent), **layers** (+ visible/locked/opacity), symbols/use, hyperlinks.
 - **Text → paths** (`text_to_path`): pure-Python glyph outlining (fontTools) — flattens tspans,
   honors bold/italic/per-run fill, and walks text **along a curve** (`<textPath>`). `list_fonts`
-  enumerates installed families.
+  enumerates installed families; `measure_text` returns a run's width/height from font metrics so
+  you can fit and center text **without a render round-trip**.
 - **Reusable resources**: named styles (CSS classes + `@name` paint refs), linear/radial/mesh
   gradients, patterns, markers, **clip + mask**, and **filters** (blur, drop-shadow,
   color-matrix/overlay, blend, morphology, component-transfer, turbulence, displacement, plus a
@@ -81,6 +82,24 @@ The full inkex catalog is mapped through to **97 MCP tools** (see
   back directly as base64 image content. Documents are also published as readable MCP
   **resources** (`svg://documents`, `svg://{id}/svg`, `svg://{id}/render`) with change
   notifications.
+- **File export** (`export_render`): faithful raster (png/jpeg/webp via resvg) and **true vector**
+  (pdf/ps/eps via librsvg). cairo is intentionally avoided — it silently drops SVG filters (a drop
+  shadow renders blank), so it is not faithful to the document.
+
+## Architecture
+
+<p align="center">
+  <img src="./docs/architecture.png" alt="svg-mcp architecture" width="900">
+</p>
+
+> Authored entirely through the svg-mcp tools and rendered via the server's resvg backend
+> ([`docs/architecture.svg`](./docs/architecture.svg) is the live serialized source).
+
+Three layers: an **interface & contract** tier (the FastMCP server, pydantic input schemas, and
+per-session document stores), a **document-operations** tier (inkex-facing construction/edit,
+read-only introspection, and the document model), and a **rendering & output** tier (pure-Python
+typesetting, the render/export backends, and SVG serialization). See [`DESIGN.md`](./DESIGN.md)
+for the full layering rationale.
 
 ## Install
 

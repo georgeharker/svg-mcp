@@ -12,6 +12,7 @@ import contextlib
 import functools
 import inspect
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Literal
 from weakref import WeakKeyDictionary
 
@@ -34,13 +35,23 @@ from .query import get_transform as _get_transform
 from .query import list_resources as _list_resources
 from .query import outline as _outline
 from .query.outline import OutlineNode
-from .render import available_backends, build_feedback, get_renderer
+from .render import (
+    SUPPORTED_FORMATS,
+    available_backends,
+    build_feedback,
+    export_bytes,
+    get_renderer,
+    rsvg_available,
+)
 from .render.base import RenderRequest
 from .render.feedback import MCPImage
 from .schemas import FilterPrimitive, GradientStop, ShapeStyle
 from .serialize import export_svg as _export_svg
 from .session import DocumentStore
+from .typeset import is_bold as _is_bold
 from .typeset import list_font_families as _list_font_families
+from .typeset import measure_text as _measure_text
+from .typeset import parse_font_size as _parse_font_size
 
 
 def _to_fe(primitive: FilterPrimitive) -> ops.FePrimitive:
@@ -122,15 +133,28 @@ FILTERS & EFFECTS
   `apply_filter`. (SVG has no native feDropShadow — `apply_drop_shadow` synthesizes one.)
 
 TEXT
-- `add_text(x, y, content)` for a text block; `add_text_run` appends `<tspan>` runs (new lines /
-  styled spans); `add_text_on_path` flows text along an existing path (pass the path's id).
-- Text shaping happens at render time. Use `render_document` to judge text size/fit — geometric
-  bbox queries return empty for text because inkex does not shape glyphs.
+- `add_text(x, y, content)` for a text block; `add_text_run` appends `<tspan>` runs. For multiple
+  LINES, append runs with an absolute `x` and an incremental `dy` (e.g. `dy="1.2em"`) per line.
+  `add_text_on_path` flows text along an existing path (pass the path's id).
+- Fonts: `list_fonts()` returns the family names installed on this machine — pick one and set it
+  via `style.font_family`. `font_size`, `font_weight` (`bold`/`700`), `font_style` (`italic`),
+  `text_anchor` (start/middle/end), `letter_spacing`, `word_spacing`, `text_decoration`,
+  `dominant_baseline` (vertical align), and `paint_order` are all settable on `style`.
+- `measure_text(content, style)` returns `{width, height}` in user units from the font's own
+  metrics — use it to fit/center text and size boxes BEFORE rendering (no render round-trip).
+  inkex does not shape glyphs, so geometric bbox queries return empty for text; `measure_text`
+  fills that gap (Latin-accurate; no kerning/complex shaping).
+- `text_to_path(target)` converts a text/textPath node into a real outlined `<path>` (pure-Python
+  via fontTools, honoring family/weight/italic/anchor and text-on-path). Use it to make output
+  font-independent (renders identically anywhere) or to then manipulate the glyph geometry.
 
-RENDERING NOTES
+RENDERING & EXPORT
 - `render_document` returns a short summary plus the rendered image (base64), via the resvg
   engine. Flowed text (`add_flowed_text`) and mesh gradients have limited/no rendering support;
   prefer `add_text`+`add_text_run` and linear/radial gradients for reliable output.
+- `export_render(format, path)` writes a FILE: png/jpeg/webp (faithful raster via resvg),
+  pdf/ps/eps (true vector via librsvg), or svg (source). `export_formats()` lists them and reports
+  whether vector export is available. cairo is intentionally unused (it drops SVG filters).
 
 RESOURCES
 - The server also publishes read-only resources the host may surface as context:
@@ -2509,6 +2533,74 @@ def render_backends() -> dict[str, bool]:
         A map of backend name -> availability, e.g. {"resvg": true, "cairo": false}.
     """
     return available_backends()
+
+
+@mcp.tool
+def export_render(
+    *,
+    document_id: str | None = None,
+    format: str = "png",
+    scale: float = 1.0,
+    path: str | None = None,
+    background: str | None = None,
+) -> dict[str, str | int]:
+    """Export a document to a file on disk in a chosen format (raster or true vector).
+
+    Engines: raster (png/jpeg/webp) is rendered faithfully via resvg; vector (pdf/ps/eps) via
+    librsvg's ``rsvg-convert``; ``svg`` writes the serialized source. cairo is intentionally not
+    used — it silently drops SVG filters (e.g. drop shadows render blank).
+
+    Args:
+        format: One of png, jpeg, webp, pdf, ps, eps, svg.
+        scale: Zoom factor on the document's natural size (raster) or page (vector).
+        path: Output file path; defaults to ``render.<format>`` in the working directory.
+        background: Optional CSS background color; omit for transparent (raster) / white (vector).
+
+    Returns:
+        ``{path, format, bytes}`` — the absolute path written and the file size.
+    """
+    svg = _export_svg(_doc(document_id))
+    data = export_bytes(svg, format, scale=scale, background=background)
+    out = Path(path) if path else Path(f"render.{format.lower()}")
+    out.write_bytes(data)
+    return {"path": str(out.resolve()), "format": format.lower(), "bytes": len(data)}
+
+
+@mcp.tool
+def export_formats() -> dict[str, list[str] | bool]:
+    """List the file formats ``export_render`` can write, and whether vector export is available.
+
+    Returns:
+        ``{formats, vector_available}`` — vector (pdf/ps/eps) needs the librsvg ``rsvg-convert``
+        binary (macOS: ``brew install librsvg``).
+    """
+    return {"formats": list(SUPPORTED_FORMATS), "vector_available": rsvg_available()}
+
+
+@mcp.tool
+def measure_text(content: str, style: ShapeStyle | None = None) -> dict[str, float]:
+    """Measure a single text run without rendering — its advance width and line height.
+
+    Uses the system font's own metrics (via fontTools) so you can fit, center, or wrap text and
+    size boxes around it before drawing. Latin-accurate (per-glyph advances; no kerning/shaping).
+
+    Args:
+        content: The text to measure.
+        style: Font properties (font_family, font_size, font_weight, font_style); defaults to
+            sans-serif at 16px when omitted.
+
+    Returns:
+        ``{width, height}`` in user units.
+    """
+    style = style or ShapeStyle()
+    family = (style.font_family or "sans-serif").split(",")[0].strip().strip("'\"")
+    size = _parse_font_size(style.font_size)
+    bold = _is_bold(style.font_weight)
+    italic = (style.font_style or "").strip().lower() in ("italic", "oblique")
+    width, height = _measure_text(
+        content, font_family=family, font_size=size, bold=bold, italic=italic
+    )
+    return {"width": width, "height": height}
 
 
 # --- resources (readable ambient context) ----------------------------------

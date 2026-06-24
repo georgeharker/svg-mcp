@@ -53,6 +53,12 @@ class ShapeStyle(BaseModel):
     font_style: Literal["normal", "italic", "oblique"] | None = None
     text_anchor: Literal["start", "middle", "end"] | None = None
     letter_spacing: str | None = None
+    word_spacing: str | None = None
+    text_decoration: str | None = None
+    # Vertical text alignment, e.g. "middle"/"central"/"hanging" (renderer support varies).
+    dominant_baseline: str | None = None
+    # Paint order, e.g. "stroke fill" to draw the stroke behind the fill.
+    paint_order: str | None = None
 
     def to_style_dict(self) -> dict[str, str]:
         """Render to SVG presentation properties (omitting unset fields)."""
@@ -72,5 +78,9 @@ class ShapeStyle(BaseModel):
             "font-style": self.font_style,
             "text-anchor": self.text_anchor,
             "letter-spacing": self.letter_spacing,
+            "word-spacing": self.word_spacing,
+            "text-decoration": self.text_decoration,
+            "dominant-baseline": self.dominant_baseline,
+            "paint-order": self.paint_order,
         }
         return {key: str(value) for key, value in mapping.items() if value is not None}

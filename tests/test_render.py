@@ -10,10 +10,10 @@ import io
 
 import pytest
 
-from svg_mcp.render import get_renderer
-from svg_mcp.render.base import RenderRequest
+from svg_mcp.render import SUPPORTED_FORMATS, export_bytes, get_renderer, rsvg_available
+from svg_mcp.render.base import RenderError, RenderRequest
 from svg_mcp.render.feedback import downscale_png
-from svg_mcp.render.resvg import _png_dimensions
+from svg_mcp.render.resvg import ResvgCliRenderer, _png_dimensions
 
 SAMPLE_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
@@ -56,3 +56,35 @@ def test_resvg_smoke() -> None:
     assert result.png[:8] == b"\x89PNG\r\n\x1a\n"
     assert (result.width, result.height) == (100, 100)
     assert result.backend == "resvg"
+
+
+def test_export_svg_passthrough() -> None:
+    assert export_bytes(SAMPLE_SVG, "svg") == SAMPLE_SVG.encode("utf-8")
+
+
+def test_export_unknown_format_raises() -> None:
+    with pytest.raises(RenderError):
+        export_bytes(SAMPLE_SVG, "tiff")
+
+
+def test_supported_formats_cover_raster_and_vector() -> None:
+    for fmt in ("png", "jpeg", "webp", "pdf", "ps", "eps", "svg"):
+        assert fmt in SUPPORTED_FORMATS
+
+
+def test_export_raster_formats() -> None:
+    if not ResvgCliRenderer().available():
+        pytest.skip("resvg binary not installed")
+    png = export_bytes(SAMPLE_SVG, "png")
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    jpeg = export_bytes(SAMPLE_SVG, "jpeg")
+    assert jpeg[:3] == b"\xff\xd8\xff"  # JPEG SOI
+    webp = export_bytes(SAMPLE_SVG, "webp")
+    assert webp[:4] == b"RIFF" and webp[8:12] == b"WEBP"
+
+
+def test_export_pdf_when_rsvg_available() -> None:
+    if not rsvg_available():
+        pytest.skip("rsvg-convert not installed")
+    pdf = export_bytes(SAMPLE_SVG, "pdf")
+    assert pdf[:5] == b"%PDF-"
