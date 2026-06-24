@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "svg-mcp"
+version = "0.0.1"
+description = "A FastMCP server exposing structured, hierarchical SVG authoring with a render-and-see feedback loop."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "George Harker", email = "george@georgeharker.com" }]
+keywords = ["svg", "mcp", "fastmcp", "inkex", "vector", "graphics"]
+
+dependencies = [
+  "fastmcp>=2.3",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.2",
+  "lxml>=5.0",
+  "pillow>=10.0",
+  # inkex is the SVG DOM (transforms, styles, layers, masks, bbox, composed_transform).
+  # PyPI 1.4.1: flat `inkex.colors` module and NO Image.embed_image() (we embed raster
+  # manually). All element classes + bbox/CTM/specified_style/Transform@ are present.
+  "inkex>=1.4.1",
+]
+
+[project.optional-dependencies]
+# Default render backend shells out to the `resvg` CLI binary (see README). This optional
+# extra adds an in-process PyO3 binding if/when we want to skip the subprocess.
+resvg = ["resvg-py>=0.1"]
+# Secondary vector/raster backend (PDF/PS/SVG out, in-process). Needs Homebrew cairo + pango.
+cairo = ["cairocffi>=1.6", "pangocffi>=0.12", "pangocairocffi>=0.7"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5", "mypy>=1.10"]
+
+[project.scripts]
+svg-mcp = "svg_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/svg_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+# Minimum supported version (3.12); also lets mypy parse modern dependency stubs (e.g.
+# numpy's `type` aliases). Developed/run on 3.14.
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+# inkex ships no type information; treat it as an opaque untyped module rather than
+# analyzing its dynamic star-exports. Boundary returns are narrowed explicitly in our code.
+[[tool.mypy.overrides]]
+module = ["inkex", "inkex.*", "numpy", "numpy.*"]
+ignore_missing_imports = true
+ignore_errors = true
+follow_imports = "skip"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
