@@ -24,12 +24,13 @@ dependencies = [
   # PyPI 1.4.1: flat `inkex.colors` module and NO Image.embed_image() (we embed raster
   # manually). All element classes + bbox/CTM/specified_style/Transform@ are present.
   "inkex>=1.4.1",
+  # In-process resvg binding (PyO3) — the default renderer, so the package is self-contained
+  # with no external binary. Same engine as the `resvg` CLI (pixel-identical); the CLI is used
+  # automatically instead when present (marginally faster), but is not required.
+  "resvg-py>=0.1",
 ]
 
 [project.optional-dependencies]
-# Default render backend shells out to the `resvg` CLI binary (see README). This optional
-# extra adds an in-process PyO3 binding if/when we want to skip the subprocess.
-resvg = ["resvg-py>=0.1"]
 # Secondary vector/raster backend (PDF/PS/SVG out, in-process). Needs Homebrew cairo + pango.
 cairo = ["cairocffi>=1.6", "pangocffi>=0.12", "pangocairocffi>=0.7"]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5", "mypy>=1.10"]

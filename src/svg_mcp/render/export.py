@@ -20,7 +20,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from .base import RenderError, RenderRequest
-from .resvg import ResvgCliRenderer
+from .resvg_py import resvg_renderer
 
 _RASTER = ("png", "jpeg", "jpg", "webp")
 _VECTOR = ("pdf", "ps", "eps")
@@ -40,9 +40,7 @@ def export_bytes(svg: str, fmt: str, *, scale: float = 1.0, background: str | No
 
     if fmt in _RASTER:
         png = (
-            ResvgCliRenderer()
-            .render(RenderRequest(svg=svg, scale=scale, background=background))
-            .png
+            resvg_renderer().render(RenderRequest(svg=svg, scale=scale, background=background)).png
         )
         if fmt == "png":
             return png

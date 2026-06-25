@@ -15,11 +15,16 @@ from .export import SUPPORTED_FORMATS, export_bytes, rsvg_available
 from .feedback import Feedback, build_feedback, downscale_png
 from .inkscape import InkscapeRenderer
 from .resvg import ResvgCliRenderer
+from .resvg_py import ResvgPyRenderer, resvg_renderer
 
 # Map of backend name -> zero-arg factory. Typing the values as factories (rather than
 # type[Renderer]) keeps it precise while sidestepping protocol-instantiation concerns.
+# "resvg" prefers the CLI when present and falls back to the in-process resvg-py binding, so a
+# bare install renders with no external binary; "resvg-cli"/"resvg-py" force a specific one.
 _BACKENDS: dict[str, Callable[[], Renderer]] = {
-    "resvg": ResvgCliRenderer,
+    "resvg": resvg_renderer,
+    "resvg-cli": ResvgCliRenderer,
+    "resvg-py": ResvgPyRenderer,
     "cairo": CairoRenderer,
     "inkscape": InkscapeRenderer,
 }

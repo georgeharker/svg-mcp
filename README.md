@@ -17,11 +17,13 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
 ## Quickstart (Claude)
 
-1. **Prerequisites** — Python ≥ 3.12 and the [resvg](https://github.com/linebender/resvg)
-   renderer:
+1. **Prerequisites** — just **Python ≥ 3.12**. Rendering happens **in-process** (the
+   [resvg](https://github.com/linebender/resvg) engine ships as the `resvg-py` dependency), so
+   there's no separate renderer to install. *Optionally*, install the resvg **CLI** for a small
+   per-render speedup — it's used automatically when on `PATH`:
 
    ```bash
-   brew install resvg          # macOS (or: cargo install resvg)
+   brew install resvg          # OPTIONAL (macOS; or: cargo install resvg)
    ```
 
 2. **Install** the server from a clone of this repo (pulls fastmcp, inkex, fontTools, …). The
@@ -157,16 +159,21 @@ embedding is done manually (base64 data URI). All element classes plus `bounding
 
 ### resvg (the default renderer)
 
-The default backend shells out to the `resvg` binary — a deterministic, cross-platform static
-renderer with native text-on-path and broad filter support, no system libs:
+resvg is a deterministic, cross-platform renderer with native text-on-path and broad filter
+support and no system libs. It renders **in-process** via the bundled **`resvg-py`** binding
+(same engine — verified pixel-identical to the CLI), so a bare install is self-contained with no
+external binary.
+
+If the resvg **CLI** is on `PATH` it's used automatically instead — marginally faster, entirely
+optional:
 
 ```bash
-brew install resvg          # macOS
-# or: cargo install resvg
+brew install resvg          # OPTIONAL (macOS; or: cargo install resvg)
 ```
 
-Override the path with `SVG_MCP_RESVG_BINARY=/path/to/resvg`. An optional in-process binding
-is available via the `resvg` extra (`pip install -e ".[resvg]"`).
+Override the CLI path with `SVG_MCP_RESVG_BINARY=/path/to/resvg`, or force a backend with
+`SVG_MCP_RENDERER=resvg-py` (in-process) / `resvg-cli`. Vector export (`pdf/ps/eps`) still needs
+the librsvg `rsvg-convert` binary; raster output never does.
 
 ### Optional backends
 
@@ -181,7 +188,7 @@ All settings are env vars prefixed `SVG_MCP_` (or a `.env` file):
 
 | Var | Default | Meaning |
 |---|---|---|
-| `SVG_MCP_RENDERER` | `resvg` | Default render backend (`resvg`/`cairo`/`inkscape`) |
+| `SVG_MCP_RENDERER` | `resvg` | Render backend: `resvg` (CLI if present, else in-process) · `resvg-py` · `resvg-cli` · `cairo` · `inkscape` |
 | `SVG_MCP_RESVG_BINARY` | auto | Path to the resvg CLI |
 | `SVG_MCP_INKSCAPE_BINARY` | auto | Path to the Inkscape CLI |
 | `SVG_MCP_FEEDBACK_MAX_EDGE` | unset | Optional long-edge cap (px); unset = raw image handed back directly as base64 |
