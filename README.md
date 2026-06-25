@@ -273,6 +273,8 @@ All settings are env vars prefixed `SVG_MCP_` (or a `.env` file):
 | `SVG_MCP_RENDER_TIMEOUT_S` | `30` | Per-render subprocess timeout |
 | `SVG_MCP_TRANSPORT` | `stdio` | Server transport: `stdio` · `http` · `streamable-http` · `sse` |
 | `SVG_MCP_HOST` / `SVG_MCP_PORT` | `127.0.0.1` / `8000` | Bind address for the http transports |
+| `SVG_MCP_PREVIEW` | unset | Auto-start the [live preview](#live-preview) web server on boot (`1`/`true`) |
+| `SVG_MCP_PREVIEW_HOST` / `SVG_MCP_PREVIEW_PORT` | `127.0.0.1` / `8808` | Bind address for the live preview |
 
 Transport, host, and port can also be set with CLI flags (which take precedence over the env
 vars): `svg-mcp --transport streamable-http --host 127.0.0.1 --port 7731`.
@@ -295,6 +297,28 @@ svg-mcp --transport streamable-http --port 7731  # or streamable HTTP at 127.0.0
 
 A long-running HTTP server is handy for a shared/persistent endpoint a bridge can connect to
 (the server runs as a single process; each client connection gets its own isolated documents).
+
+## Live preview
+
+Rendering each step back into the chat costs tokens and, in a terminal, the model sees the image
+but you don't. The live preview solves both: a tiny loopback web page that mirrors the active
+document and **auto-refreshes on every edit** over Server-Sent Events — so you watch the drawing
+build in a browser while the model keeps working, with no render bytes spent on the conversation.
+
+<p align="center">
+  <img src="./docs/preview.png" alt="svg-mcp live preview" width="720">
+</p>
+
+- **Start it:** ask the model to *"show me"* (or *"open a preview"*) and it calls the
+  `start_preview` tool, then hands you the URL. Or set `SVG_MCP_PREVIEW=1` to auto-start on boot.
+- **Watch it:** open the URL once and leave it — it repaints on each change. Toggle **PNG**
+  (faithful resvg output) vs **SVG** (crisp vector), zoom, drag to pan, and **Save** the current
+  frame as PNG/SVG/WebP/JPEG/PDF straight from the page.
+- **Per-chat:** the URL carries a session token (`/<token>/`), so each chat gets its own isolated
+  preview even though they share one server and port — one chat's edits never appear in another's.
+
+The page just mirrors the read-only [`svg://` resources](#resources): `GET /<token>/active/render`
+is the same render as the `svg://{id}/render` resource, refreshed by the same change signal.
 
 ## Experiment with an LLM
 
