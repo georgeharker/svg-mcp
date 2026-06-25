@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import hashlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable
@@ -180,9 +181,11 @@ RESOURCES
 
 LIVE PREVIEW
 - When the user asks to *see* the work — "show me", "let me see it", "open a preview", "can I
-  watch", "I want to see that" — call `start_preview` and then give them the returned `url` in
-  your reply (e.g. "Live preview: http://127.0.0.1:8808/ — it refreshes on every change"). Do this
-  once; if a preview is already running, just remind them of the URL.
+  watch", "I want to see that" — call `start_preview` and then give them the EXACT `url` it
+  returns in your reply (e.g. "Live preview: <url> — it refreshes on every change"). The URL is
+  per-chat (it carries a session token like `/a1b2c3.../`), so always surface the value returned
+  by the tool rather than a guessed address. Do this once; if a preview is already running, just
+  remind them of that URL.
 - The preview tracks the ACTIVE document and refreshes automatically on each edit, so you do NOT
   need to call `render_document` for the user's benefit — keep building and let the preview update.
   Reserve `render_document` for when YOU need to inspect the result, and prefer batching the
@@ -226,6 +229,19 @@ def _session_id() -> str | None:
         return get_context().session_id
     except Exception:
         return None
+
+
+def _session_token() -> str:
+    """A short, stable, URL-safe token identifying the current session's preview.
+
+    Each chat connects as its own MCP session and gets its own per-session DocumentStore; the live
+    preview is partitioned by this token so one chat's edits never appear in another's preview.
+    Outside a request (direct/programmatic use) all callers share the ``default`` bucket.
+    """
+    sid = _session_id()
+    if sid is None:
+        return "default"
+    return hashlib.sha1(sid.encode()).hexdigest()[:12]
 
 
 Point = tuple[float, float]
@@ -310,6 +326,7 @@ def _publish_preview() -> None:
     active = _store().active_id
     sources = {active: _export_svg(_store().peek(active))} if active is not None else {}
     _preview.server.publish(
+        _session_token(),
         active_id=active,
         sources=sources,
         index_json=json.dumps(_documents_index()),
@@ -2998,7 +3015,8 @@ def start_preview(
     this, give the returned ``url`` to the user (e.g. "Live preview: <url> — refreshes on each
     change").
     """
-    url, bound = _preview.server.ensure_running(host=host, port=port)
+    _base, bound = _preview.server.ensure_running(host=host, port=port)
+    url = _preview.server.url_for(_session_token())  # per-session URL: /<token>/
     with contextlib.suppress(Exception):
         _publish_preview()  # prime so the page isn't blank on first open
     return {"url": url, "port": bound, "running": True}
