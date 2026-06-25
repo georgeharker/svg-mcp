@@ -26,6 +26,18 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
    brew install resvg          # OPTIONAL (macOS; or: cargo install resvg)
    ```
 
+   **Linux build headers.** On macOS the install is pure wheels. On Linux, two dependencies —
+   **lxml** and **PyGObject** (the latter pulled in by `inkex`) — sometimes have **no matching
+   wheel** for a recent interpreter and are compiled from source by pip, which needs C headers.
+   Install them up front (see [System packages (Linux)](#system-packages-linux) for the full
+   per-library mapping and other distros). On **Debian 13 (trixie) / Ubuntu**:
+
+   ```bash
+   sudo apt-get install build-essential python3-dev pkg-config \
+       libxml2-dev libxslt1-dev \
+       libgirepository-2.0-dev gir1.2-girepository-2.0
+   ```
+
 2. **Install** the server from a clone of this repo (pulls fastmcp, inkex, fontTools, …). The
    commands below use [uv](https://docs.astral.sh/uv/) — if you don't have it yet, install it
    first ([full install docs](https://docs.astral.sh/uv/getting-started/installation/)):
@@ -150,6 +162,55 @@ for the full layering rationale.
 pip install -e ".[dev]"
 ```
 
+### System packages (Linux)
+
+macOS installs entirely from wheels — nothing extra. On Linux, pip falls back to building a
+couple of dependencies **from source** whenever no wheel matches your interpreter (common on
+**Debian 13 “trixie”** and other recent/edge distros), and those builds need C headers and
+build tooling. Which library needs what:
+
+| Python dependency | Why | Debian/Ubuntu packages |
+|---|---|---|
+| (all C-extension builds) | compiler, headers, `pkg-config` | `build-essential` · `python3-dev` · `pkg-config` |
+| **lxml** | the XML/XSLT C libs it binds | `libxml2-dev` · `libxslt1-dev` |
+| **PyGObject** (pulled in by `inkex` on Linux) | GObject-introspection bindings (`girepository`) | `libgirepository-2.0-dev` · `gir1.2-girepository-2.0` (drags in `libglib2.0-dev`) |
+| **cairocffi / pangocffi / pangocairocffi** (`cairo` extra only) | the cairo + pango C libs | `libcairo2-dev` · `libpango1.0-dev` · `libffi-dev` |
+
+Core install (everything except the optional `cairo` extra) on **Debian/Ubuntu** — verified on
+Debian 13 (trixie):
+
+```bash
+sudo apt-get install build-essential python3-dev pkg-config \
+    libxml2-dev libxslt1-dev \
+    libgirepository-2.0-dev gir1.2-girepository-2.0
+```
+
+> On trixie the **GObject-introspection** dev package is the new **`libgirepository-2.0-dev`**
+> (it pulls in `libglib2.0-dev`); on older releases it is `libgirepository1.0-dev`. Likewise
+> the XSLT headers are `libxslt1-dev` (the bare `libxslt-dev` name is only a virtual alias).
+
+If you also install the **`cairo` extra** (`pip install -e ".[cairo]"`), add:
+
+```bash
+sudo apt-get install libcairo2-dev libpango1.0-dev libffi-dev
+```
+
+Equivalents on other distros (same libraries, distro-specific names):
+
+```bash
+# Fedora / RHEL
+sudo dnf install gcc python3-devel pkgconf-pkg-config \
+    libxml2-devel libxslt-devel \
+    gobject-introspection-devel glib2-devel \
+    cairo-devel pango-devel libffi-devel        # last line = cairo extra
+# Arch
+sudo pacman -S base-devel libxml2 libxslt gobject-introspection \
+    cairo pango libffi                          # cairo/pango/libffi = cairo extra
+```
+
+If pip instead finds wheels for every dependency on your platform/interpreter, none of the
+above is needed — the build-from-source fallback is the only thing that pulls these in.
+
 ### inkex (the SVG DOM)
 
 Depends on the released **PyPI `inkex>=1.4.1`**. Note its API shape (verified against the
@@ -178,7 +239,8 @@ the librsvg `rsvg-convert` binary; raster output never does.
 ### Optional backends
 
 - `cairo` extra — secondary vector/raster backend (PDF/PS/SVG out) via cairocffi + pango;
-  needs Homebrew `cairo` + `pango`. Stub today.
+  needs the cairo + pango system libs (macOS: Homebrew `cairo` + `pango`; Linux: see
+  [System packages (Linux)](#system-packages-linux)). Stub today.
 - Headless Inkscape — reference renderer + heavy ops, driven via `--shell` (no D-Bus on
   macOS). Stub today.
 
