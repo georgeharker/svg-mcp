@@ -11,6 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # On Linux there are no wheels for pycairo/PyGObject (pulled in transitively by inkex),
+      # so they build from source and need the C headers below. lxml may also build from source.
+      - name: System build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3-dev pkg-config \
+            libxml2-dev libxslt1-dev \
+            libglib2.0-dev libgirepository-2.0-dev gir1.2-girepository-2.0 \
+            libcairo2-dev
+
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:

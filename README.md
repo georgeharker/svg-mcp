@@ -34,8 +34,8 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
     ```bash
     sudo apt-get install build-essential python3-dev pkg-config \
-    libxml2-dev libxslt1-dev \
-    libgirepository-2.0-dev gir1.2-girepository-2.0
+        libxml2-dev libxslt1-dev libglib2.0-dev \
+        libgirepository-2.0-dev gir1.2-girepository-2.0 libcairo2-dev
     ```
 
 2. **Install.** You need [uv](https://docs.astral.sh/uv/) — install it first if you don't have it
@@ -186,8 +186,8 @@ build tooling. Which library needs what:
 |---|---|---|
 | (all C-extension builds) | compiler, headers, `pkg-config` | `build-essential` · `python3-dev` · `pkg-config` |
 | **lxml** | the XML/XSLT C libs it binds | `libxml2-dev` · `libxslt1-dev` |
-| **PyGObject** (pulled in by `inkex` on Linux) | GObject-introspection bindings (`girepository`) | `libgirepository-2.0-dev` · `gir1.2-girepository-2.0` (drags in `libglib2.0-dev`) |
-| **cairocffi / pangocffi / pangocairocffi** (`cairo` extra only) | the cairo + pango C libs | `libcairo2-dev` · `libpango1.0-dev` · `libffi-dev` |
+| **PyGObject + pycairo** (both pulled in by `inkex` on Linux) | GObject-introspection (`girepository`) **and** the cairo C lib (PyGObject depends on pycairo) | `libgirepository-2.0-dev` · `gir1.2-girepository-2.0` · `libcairo2-dev` (drag in `libglib2.0-dev`) |
+| **pangocffi / pangocairocffi** (`cairo` extra only) | the pango C lib (cairo is already covered above) | `libpango1.0-dev` · `libffi-dev` |
 
 Core install (everything except the optional `cairo` extra) on **Debian/Ubuntu** — verified on
 Debian 13 (trixie):
@@ -195,17 +195,19 @@ Debian 13 (trixie):
 ```bash
 sudo apt-get install build-essential python3-dev pkg-config \
     libxml2-dev libxslt1-dev \
-    libgirepository-2.0-dev gir1.2-girepository-2.0
+    libglib2.0-dev libgirepository-2.0-dev gir1.2-girepository-2.0 \
+    libcairo2-dev
 ```
 
 > On trixie the **GObject-introspection** dev package is the new **`libgirepository-2.0-dev`**
 > (it pulls in `libglib2.0-dev`); on older releases it is `libgirepository1.0-dev`. Likewise
 > the XSLT headers are `libxslt1-dev` (the bare `libxslt-dev` name is only a virtual alias).
 
-If you also install the **`cairo` extra** (`pip install -e ".[cairo]"`), add:
+If you also install the **`cairo` extra** (`pip install -e ".[cairo]"`), add pango (cairo is
+already in the core set above):
 
 ```bash
-sudo apt-get install libcairo2-dev libpango1.0-dev libffi-dev
+sudo apt-get install libpango1.0-dev libffi-dev
 ```
 
 Equivalents on other distros (same libraries, distro-specific names):
@@ -214,11 +216,11 @@ Equivalents on other distros (same libraries, distro-specific names):
 # Fedora / RHEL
 sudo dnf install gcc python3-devel pkgconf-pkg-config \
     libxml2-devel libxslt-devel \
-    gobject-introspection-devel glib2-devel \
-    cairo-devel pango-devel libffi-devel        # last line = cairo extra
+    gobject-introspection-devel glib2-devel cairo-devel \
+    pango-devel libffi-devel                    # last line = cairo extra
 # Arch
-sudo pacman -S base-devel libxml2 libxslt gobject-introspection \
-    cairo pango libffi                          # cairo/pango/libffi = cairo extra
+sudo pacman -S base-devel libxml2 libxslt gobject-introspection cairo \
+    pango libffi                                # pango/libffi = cairo extra
 ```
 
 If pip instead finds wheels for every dependency on your platform/interpreter, none of the
