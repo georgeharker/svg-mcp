@@ -155,12 +155,14 @@ def variable_width_outline(
     half0, halfn = widths[0] / 2.0, widths[-1] / 2.0
     parts = ["M" + _fmt(left[0])]
     parts += ["L" + _fmt(p) for p in left[1:]]
+    # Sweep flag 0 bulges the cap OUTWARD (a convex semicircle past the endpoint); the path
+    # always walks the left edge forward then the right edge back, so this orientation is fixed.
     if cap == "round" and halfn > 0:
-        parts.append(f"A{halfn:.2f},{halfn:.2f} 0 0 1 {_fmt(right[-1])}")
+        parts.append(f"A{halfn:.2f},{halfn:.2f} 0 0 0 {_fmt(right[-1])}")
     else:
         parts.append("L" + _fmt(right[-1]))
     parts += ["L" + _fmt(p) for p in reversed(right[:-1])]
     if cap == "round" and half0 > 0:
-        parts.append(f"A{half0:.2f},{half0:.2f} 0 0 1 {_fmt(left[0])}")
+        parts.append(f"A{half0:.2f},{half0:.2f} 0 0 0 {_fmt(left[0])}")
     parts.append("Z")
     return " ".join(parts)

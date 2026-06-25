@@ -15,5 +15,9 @@ class NodeNotFound(SvgMcpError):
     """No node matched the given id or name within a document."""
 
 
+class AmbiguousReference(SvgMcpError):
+    """A friendly name matched more than one node; qualify by hierarchy or use the id."""
+
+
 class InvalidArgument(SvgMcpError):
     """A tool/op argument was structurally valid but semantically wrong."""

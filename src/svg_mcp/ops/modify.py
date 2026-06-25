@@ -7,6 +7,7 @@ from typing import Literal
 import inkex
 
 from ..model.document import Document
+from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef
 from .paint import resolve_paint_refs
 
@@ -57,19 +58,36 @@ def reparent(
     new_parent: str | None,
     index: int | None = None,
     keep_world_position: bool = False,
+    above: str | None = None,
+    below: str | None = None,
 ) -> NodeRef:
     """Move a node under a new parent (root if None), optionally at a child index.
+
+    For stacking, prefer ``above``/``below`` (a sibling node id/name) over counting indices:
+    SVG paints later siblings on top, so ``below=bezel`` places the node just before ``bezel``
+    (rendered beneath it) and ``above=bezel`` just after (rendered on top). When ``above``/``below``
+    is given the parent is taken from that reference node; ``new_parent``/``index`` are ignored.
 
     With ``keep_world_position``, the node's local transform is recomputed so it does not
     visually jump despite the change of ancestor transforms.
     """
     element = doc.resolve(target)
-    parent_element = doc.resolve_parent(new_parent)
+    if above is not None or below is not None:
+        reference = doc.resolve(above if above is not None else below)  # type: ignore[arg-type]
+        parent_element = reference.getparent()
+        if parent_element is None:
+            raise InvalidArgument("cannot place relative to the document root")
+    else:
+        parent_element = doc.resolve_parent(new_parent)
     if keep_world_position:
         world = element.composed_transform()
         parent_ctm = parent_element.composed_transform()
         element.transform = (-parent_ctm) @ world
-    if index is None:
+    if above is not None:
+        reference.addnext(element)
+    elif below is not None:
+        reference.addprevious(element)
+    elif index is None:
         parent_element.add(element)
     else:
         parent_element.insert(index, element)

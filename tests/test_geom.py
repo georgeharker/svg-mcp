@@ -41,9 +41,11 @@ def test_taper_widens_the_band_toward_the_thick_end() -> None:
     assert math.isclose(y1, 60.0, abs_tol=0.01)
 
 
-def test_round_cap_emits_arcs() -> None:
+def test_round_cap_emits_outward_arcs() -> None:
     d = variable_width_outline([(0.0, 0.0), (50.0, 0.0)], [10.0, 10.0], cap="round")
     assert "A" in d  # arc commands for the semicircular caps
+    # Sweep flag 0 → the cap bulges OUTWARD (a pill), not inward (a bite). Regression guard.
+    assert "0 0 0" in d and "0 0 1" not in d
 
 
 def test_closed_ribbon_is_two_subpaths() -> None:

@@ -14,6 +14,7 @@ from inkex import BaseElement
 from lxml import etree
 
 from ..model.document import Document
+from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef
 from .paint import resolve_paint_refs
 
@@ -34,6 +35,37 @@ def _ref(element: BaseElement) -> NodeRef:
     return NodeRef(
         id=str(element.get_id()), tag=str(element.TAG), name=getattr(element, "label", None)
     )
+
+
+# Elements that live in <defs> / are not rendered on their own. Applying a clip, mask, filter,
+# or marker to one is meaningless (a common footgun when a paint and a shape share a name).
+_NON_RENDERABLE = frozenset(
+    {
+        "linearGradient",
+        "radialGradient",
+        "meshgradient",
+        "pattern",
+        "clipPath",
+        "mask",
+        "filter",
+        "marker",
+        "symbol",
+        "stop",
+        "style",
+        "defs",
+    }
+)
+
+
+def _ensure_renderable(element: BaseElement, op: str) -> None:
+    """Reject applying ``op`` to a non-rendered definition element (gradient, clipPath, …)."""
+    tag = str(element.TAG)
+    local = tag.rsplit("}", 1)[-1]  # strip any namespace
+    if local in _NON_RENDERABLE:
+        raise InvalidArgument(
+            f"{op} cannot target <{local}> {element.get_id()!r}: it is a definition, not a "
+            "rendered shape (did a paint/resource and a shape share a name?)"
+        )
 
 
 def _set_prop(element: BaseElement, key: str, value: str) -> None:
@@ -173,12 +205,14 @@ def define_mask(
 
 def apply_clip(doc: Document, target: str, clip: str) -> NodeRef:
     element = doc.resolve(target)
+    _ensure_renderable(element, "apply_clip")
     element.set("clip-path", doc.resolve(clip).get_id(as_url=2))
     return _ref(element)
 
 
 def apply_mask(doc: Document, target: str, mask: str) -> NodeRef:
     element = doc.resolve(target)
+    _ensure_renderable(element, "apply_mask")
     element.set("mask", doc.resolve(mask).get_id(as_url=2))
     return _ref(element)
 
@@ -409,6 +443,7 @@ def apply_filter(doc: Document, target: str, filter: str) -> NodeRef:
 
 def _attach_filter_element(doc: Document, target: str, flt: BaseElement) -> NodeRef:
     element = doc.resolve(target)
+    _ensure_renderable(element, "apply_filter")
     _set_prop(element, "filter", flt.get_id(as_url=2))
     return _ref(element)
 
@@ -484,6 +519,7 @@ def apply_marker(doc: Document, target: str, marker: str, position: str = "end")
     """Attach a marker to a path/line at ``start`` | ``mid`` | ``end``."""
     prop = {"start": "marker-start", "mid": "marker-mid", "end": "marker-end"}[position]
     element = doc.resolve(target)
+    _ensure_renderable(element, "apply_marker")
     _set_prop(element, prop, doc.resolve(marker).get_id(as_url=2))
     return _ref(element)
 
