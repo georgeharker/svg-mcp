@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./logo-variant.png" alt="svg-mcp" width="460">
+  <img src="./logo.png" alt="svg-mcp" width="460">
 </p>
 
 # svg-mcp
@@ -24,16 +24,49 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
    brew install resvg          # macOS (or: cargo install resvg)
    ```
 
-2. **Install** the server from a clone of this repo (pulls fastmcp, inkex, fontTools, …):
+2. **Install** the server from a clone of this repo (pulls fastmcp, inkex, fontTools, …). The
+   commands below use [uv](https://docs.astral.sh/uv/) — if you don't have it yet, install it
+   first ([full install docs](https://docs.astral.sh/uv/getting-started/installation/)):
 
    ```bash
-   uv venv && uv pip install -e .     # entrypoint lands at .venv/bin/svg-mcp
-   # or: python -m venv .venv && .venv/bin/pip install -e .
+   curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
+   # alternatives: brew install uv  ·  pipx install uv  ·  winget install astral-sh.uv (Windows)
    ```
 
-3. **Connect Claude:**
+   Then pick **one** of two install layouts — this choice decides the path you point Claude at
+   in step 3:
 
-   - **Claude Code** — from the repo directory:
+   **a) Project-local venv (recommended, self-contained).** Creates `./.venv` inside the repo and
+   installs svg-mcp editable into it — nothing touches your other environments:
+
+   ```bash
+   uv sync                             # → ./.venv with svg-mcp + deps (from pyproject/uv.lock)
+   # equivalently, without uv.lock:  uv venv && uv pip install -e .
+   # no uv at all:                   python -m venv .venv && .venv/bin/pip install -e .
+   ```
+
+   → entrypoint: **`./.venv/bin/svg-mcp`** (absolute: `$(pwd)/.venv/bin/svg-mcp`).
+
+   **b) Into your own existing venv.** Activate the venv you want first, then install editable:
+
+   ```bash
+   source /path/to/your/venv/bin/activate      # or otherwise have VIRTUAL_ENV set
+   uv pip install -e .                          # or: pip install -e .
+   ```
+
+   → entrypoint: **`/path/to/your/venv/bin/svg-mcp`**.
+
+   > ⚠️ **`uv sync` always targets the project's `./.venv`**, but **`uv pip install` / `pip
+   > install` target whichever venv is currently active.** If you already have one active, svg-mcp
+   > **and its dependencies** (fastmcp, inkex, fontTools, numpy, Pillow, …) get installed into it.
+   > Use option (a) — or an explicit fresh venv — unless you deliberately want it in an existing
+   > environment.
+
+3. **Connect Claude** — point it at the **entrypoint path from step 2** (`./.venv/bin/svg-mcp`
+   for option a, or `/path/to/your/venv/bin/svg-mcp` for option b; always use the **absolute**
+   path in configs):
+
+   - **Claude Code** — from the repo directory (option a shown):
 
      ```bash
      claude mcp add svg-mcp -- "$(pwd)/.venv/bin/svg-mcp"
@@ -41,11 +74,10 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
      (Or just open the project — it ships a [`.mcp.json`](./.mcp.json) you can approve.)
 
-   - **Claude Desktop** — add to `claude_desktop_config.json` (use the **absolute** path) and
-     restart the app:
+   - **Claude Desktop** — add to `claude_desktop_config.json` and restart the app:
 
      ```json
-     { "mcpServers": { "svg-mcp": { "command": "/ABSOLUTE/PATH/TO/svg-mcp/.venv/bin/svg-mcp" } } }
+     { "mcpServers": { "svg-mcp": { "command": "/ABSOLUTE/PATH/TO/<venv>/bin/svg-mcp" } } }
      ```
 
 4. **Try it** — ask Claude:
@@ -59,7 +91,7 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
 ## Status
 
-The full inkex catalog is mapped through to **100 MCP tools** (see
+The full inkex catalog is mapped through to **107 MCP tools** (see
 [`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md)), with ruff/mypy clean and the test suite green.
 
 - **Document model** (inkex-backed, multi-document with an active-document default): shapes,
@@ -70,6 +102,15 @@ The full inkex catalog is mapped through to **100 MCP tools** (see
   honors bold/italic/per-run fill, and walks text **along a curve** (`<textPath>`). `list_fonts`
   enumerates installed families; `measure_text` returns a run's width/height from font metrics so
   you can fit and center text **without a render round-trip**.
+- **Variable-width strokes** (`add_variable_width_path`): SVG has no native variable stroke-width,
+  so swelling/tapering lines — calligraphy, engraving, brushes, tapered arrows — are expanded into
+  a filled ribbon, with butt/round caps and optional **cubic** (Catmull-Rom) smoothing of both the
+  path and the width.
+- **Bulk constructors** (`add_rects`/`add_circles`/`add_lines`/`add_paths`/
+  `add_variable_width_paths`): add many shapes in one call (one round-trip) — for procedural art,
+  hatching/engraving fields, and data viz.
+- **Import** existing SVG (`import_svg`, inline or from a file) into a session document to render,
+  inspect, or edit.
 - **Reusable resources**: named styles (CSS classes + `@name` paint refs), linear/radial/mesh
   gradients, patterns, markers, **clip + mask**, and **filters** (blur, drop-shadow,
   color-matrix/overlay, blend, morphology, component-transfer, turbulence, displacement, plus a
@@ -146,8 +187,11 @@ All settings are env vars prefixed `SVG_MCP_` (or a `.env` file):
 | `SVG_MCP_FEEDBACK_MAX_EDGE` | unset | Optional long-edge cap (px); unset = raw image handed back directly as base64 |
 | `SVG_MCP_DEFAULT_BACKGROUND` | transparent | Default render background (CSS color) |
 | `SVG_MCP_RENDER_TIMEOUT_S` | `30` | Per-render subprocess timeout |
-| `SVG_MCP_TRANSPORT` | `stdio` | Server transport: `stdio` or `http` |
-| `SVG_MCP_HOST` / `SVG_MCP_PORT` | `127.0.0.1` / `8000` | Bind address for the http transport |
+| `SVG_MCP_TRANSPORT` | `stdio` | Server transport: `stdio` · `http` · `streamable-http` · `sse` |
+| `SVG_MCP_HOST` / `SVG_MCP_PORT` | `127.0.0.1` / `8000` | Bind address for the http transports |
+
+Transport, host, and port can also be set with CLI flags (which take precedence over the env
+vars): `svg-mcp --transport streamable-http --host 127.0.0.1 --port 7731`.
 
 ## Develop
 
@@ -160,9 +204,13 @@ mypy src        # types (no Any / object — precise types only)
 ## Run
 
 ```bash
-svg-mcp                              # FastMCP server over stdio (default)
-SVG_MCP_TRANSPORT=http svg-mcp       # or over HTTP at 127.0.0.1:8000
+svg-mcp                                          # FastMCP server over stdio (default)
+svg-mcp --transport streamable-http --port 7731  # or streamable HTTP at 127.0.0.1:7731/mcp
+# env vars work too: SVG_MCP_TRANSPORT=http SVG_MCP_PORT=7731 svg-mcp
 ```
+
+A long-running HTTP server is handy for a shared/persistent endpoint a bridge can connect to
+(the server runs as a single process; each client connection gets its own isolated documents).
 
 ## Experiment with an LLM
 
@@ -228,7 +276,12 @@ export_svg()                    # final SVG source string
   `set_active_document`. Call `current_context()` to re-anchor (active id, open docs, outline).
 - **Targets by id or name.** Every `target`/`parent`/`content` arg takes a node's returned id
   **or** the friendly `name` you gave it. Name things you'll revisit; reason via `find(name=…)`
-  and `outline`.
+  and `outline`. **Names should be unique** — a name matching several nodes is rejected (no silent
+  guess); disambiguate with a hierarchy path `ancestor/name` (each segment an id or name) or the
+  id. Each chat/connection has its own isolated set of documents (`current_context` reports the
+  `session_id`).
+- **Stacking.** Later siblings paint on top. Restack relative to a sibling with
+  `reparent(target, above=<node>)` / `below=<node>` instead of counting child indices.
 - **Coordinates.** User units, origin top-left, y increases downward.
 - **Style.** A structured object — `fill`, `stroke`, `stroke_width`, `opacity`, plus typography
   (`font_family`, `font_size`, `font_weight`, `font_style`, `text_anchor`). Colors accept hex /
