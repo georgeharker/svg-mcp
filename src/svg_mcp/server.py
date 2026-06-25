@@ -116,10 +116,16 @@ COORDINATES
 
 STYLING & PAINT
 - `style` is a structured object: `fill`, `stroke`, `stroke_width`, `opacity`, `fill_opacity`,
-  `stroke_opacity`, `stroke_dasharray`, `stroke_linecap`, `stroke_linejoin`.
+  `stroke_opacity`, `stroke_dasharray`, `stroke_linecap`, `stroke_linejoin`, plus typography
+  (`font_family`, `font_size`, `font_weight`, `font_style`, `text_anchor`, `letter_spacing`, …).
+- Keys accept **either** snake_case (`font_size`) **or** the CSS name (`font-size`); `font_size`
+  also takes a bare number (px). Unknown/misspelled keys are REJECTED with an error (not dropped),
+  so set the whole style in one call and trust it stuck.
 - Colors accept hex (`#ff0000`), `rgb()/rgba()`, CSS names (`tomato`), or `none`.
 - A fill/stroke may also reference a defined resource: `url(#<id>)` or the shorthand `@<name>`
   (e.g. a gradient/pattern you defined). Define the resource first, then use its id as the paint.
+- `restyle` MERGES by default — it only changes the properties you pass, keeping the rest. Pass
+  `replace=true` to discard the node's current style and set exactly what you provide.
 
 REUSABLE RESOURCES (defs)
 - `define_linear_gradient`/`define_radial_gradient`/`define_pattern` return an id — use it as a
@@ -1081,13 +1087,18 @@ def delete_node(*, document_id: str | None = None, target: str) -> str:
 def restyle(
     *, document_id: str | None = None, target: str, style: ShapeStyle, replace: bool = False
 ) -> dict[str, str | None]:
-    """Update a node's presentation style.
+    """Update a node's presentation style — MERGE by default, or REPLACE.
+
+    By default (`replace=false`) this is a partial edit: only the properties you pass are changed,
+    and every other existing style property is kept. Pass `replace=true` to discard the node's
+    entire current style and set it to exactly what you provide here.
 
     Args:
         target: Node id or name.
-        style: Properties to set (fill, stroke, stroke_width, opacity, ...). Fill/stroke may be a
-            color or a paint ref (url(#id) or @name).
-        replace: If true, replace the node's style entirely; otherwise merge into it (default).
+        style: The properties to set/override (fill, stroke, stroke_width, opacity, …). Fill/stroke
+            may be a color or a paint ref (url(#id) or @name). Properties you omit are left as-is
+            when merging, or dropped when replacing.
+        replace: false (default) = merge into the existing style; true = replace it wholesale.
 
     Returns:
         The node's {id, tag, name}.

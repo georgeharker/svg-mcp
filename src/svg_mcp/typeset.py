@@ -247,10 +247,12 @@ def measure_text(
     return width * scale, height
 
 
-def parse_font_size(value: str | None, default: float = 16.0) -> float:
-    """Parse an SVG font-size like '78px' or '24' into a pixel float."""
-    if not value:
+def parse_font_size(value: str | float | None, default: float = 16.0) -> float:
+    """Parse an SVG font-size ('78px' / '24' / a bare number) into a pixel float."""
+    if value is None:
         return default
+    if isinstance(value, int | float):
+        return float(value) if value > 0 else default
     text = value.strip().lower()
     for unit in ("px", "pt", "em", "%"):
         if text.endswith(unit):

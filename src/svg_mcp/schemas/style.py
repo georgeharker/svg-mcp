@@ -10,9 +10,14 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 import inkex
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 _PAINT_KEYWORDS = {"none", "currentColor", "transparent"}
+
+
+def _css_alias(field_name: str) -> str:
+    """Map a snake_case field to its CSS property name (``stroke_width`` -> ``stroke-width``)."""
+    return field_name.replace("_", "-")
 
 
 def _validate_color(value: str) -> str:
@@ -35,7 +40,18 @@ Color = Annotated[str, AfterValidator(_validate_color)]
 
 
 class ShapeStyle(BaseModel):
-    """A presentation-attribute bundle for a shape, validated then flattened to a style dict."""
+    """A presentation-attribute bundle for a shape, validated then flattened to a style dict.
+
+    Accepts each property by **either** its snake_case name (``font_size``) **or** the CSS
+    hyphenated name (``font-size``) — so natural CSS-style input is honored, not silently dropped.
+    Genuinely unknown / misspelled keys raise a validation error instead of being ignored.
+    """
+
+    model_config = ConfigDict(
+        alias_generator=_css_alias,  # field `font_size` is also accepted as `font-size`
+        populate_by_name=True,  # ...and still as `font_size`
+        extra="forbid",  # reject unknown keys loudly rather than dropping them
+    )
 
     fill: Color | None = None
     stroke: Color | None = None
@@ -48,7 +64,7 @@ class ShapeStyle(BaseModel):
     stroke_linejoin: Literal["miter", "round", "bevel"] | None = None
     # Typography (apply to text/tspan/textPath; ignored by other shapes).
     font_family: str | None = None
-    font_size: str | None = None  # e.g. "80px", "2em", "80"
+    font_size: str | float | None = None  # "80px"/"2em"/"80", or a bare number (px)
     font_weight: str | None = None  # e.g. "bold", "400", "700"
     font_style: Literal["normal", "italic", "oblique"] | None = None
     text_anchor: Literal["start", "middle", "end"] | None = None
