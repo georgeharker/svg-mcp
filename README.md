@@ -26,29 +26,40 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
    brew install resvg          # OPTIONAL (macOS; or: cargo install resvg)
    ```
 
-   **Linux build headers.** On macOS the install is pure wheels. On Linux, two dependencies —
-   **lxml** and **PyGObject** (the latter pulled in by `inkex`) — sometimes have **no matching
-   wheel** for a recent interpreter and are compiled from source by pip, which needs C headers.
-   Install them up front (see [System packages (Linux)](#system-packages-linux) for the full
-   per-library mapping and other distros). On **Debian 13 (trixie) / Ubuntu**:
+    **Linux build headers.** On macOS the install is pure wheels. On Linux, two dependencies —
+    **lxml** and **PyGObject** (the latter pulled in by `inkex`) — sometimes have **no matching
+    wheel** for a recent interpreter and are compiled from source by pip, which needs C headers.
+    Install them up front (see [System packages (Linux)](#system-packages-linux) for the full
+    per-library mapping and other distros). On **Debian 13 (trixie) / Ubuntu**:
 
-   ```bash
-   sudo apt-get install build-essential python3-dev pkg-config \
-       libxml2-dev libxslt1-dev \
-       libgirepository-2.0-dev gir1.2-girepository-2.0
-   ```
+    ```bash
+    sudo apt-get install build-essential python3-dev pkg-config \
+    libxml2-dev libxslt1-dev \
+    libgirepository-2.0-dev gir1.2-girepository-2.0
+    ```
 
-2. **Install** the server from a clone of this repo (pulls fastmcp, inkex, fontTools, …). The
-   commands below use [uv](https://docs.astral.sh/uv/) — if you don't have it yet, install it
-   first ([full install docs](https://docs.astral.sh/uv/getting-started/installation/)):
+2. **Install.** You need [uv](https://docs.astral.sh/uv/) — install it first if you don't have it
+   ([docs](https://docs.astral.sh/uv/getting-started/installation/)):
 
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
    # alternatives: brew install uv  ·  pipx install uv  ·  winget install astral-sh.uv (Windows)
    ```
 
-   Then pick **one** of two install layouts — this choice decides the path you point Claude at
-   in step 3:
+   **Easiest — no clone.** `uvx` fetches svg-mcp and **all** its dependencies (including the
+   in-process renderer) into a cached, isolated environment and runs it — nothing to manage:
+
+   ```bash
+   uvx svg-mcp --help                                                # once published to PyPI
+   uvx --from "git+https://github.com/georgeharker/svg-mcp" svg-mcp  # before PyPI / track main
+   ```
+
+   Use that command as the MCP server command in step 3 (then skip the rest of this step).
+
+   <details>
+   <summary><b>Alternative: install from a clone (for development)</b></summary>
+
+   Pick **one** of two install layouts — this choice decides the path you point Claude at:
 
    **a) Project-local venv (recommended, self-contained).** Creates `./.venv` inside the repo and
    installs svg-mcp editable into it — nothing touches your other environments:
@@ -75,6 +86,8 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
    > **and its dependencies** (fastmcp, inkex, fontTools, numpy, Pillow, …) get installed into it.
    > Use option (a) — or an explicit fresh venv — unless you deliberately want it in an existing
    > environment.
+
+   </details>
 
 3. **Connect Claude** — point it at the **entrypoint path from step 2** (`./.venv/bin/svg-mcp`
    for option a, or `/path/to/your/venv/bin/svg-mcp` for option b; always use the **absolute**
@@ -133,10 +146,10 @@ The full inkex catalog is mapped through to **107 MCP tools** (see
 - **Queries / context**: `current_context`, `describe_node`, `list_resources`, `outline`, bbox,
   computed style, transform/CTM, unit conversion, selectors (`find`/`get_subtree`), image
   extraction; metadata (title/desc/RDF); guides & pages.
-- **Render-and-see loop**: serialize-then-rasterize via the **resvg** CLI; the image is handed
-  back directly as base64 image content. Documents are also published as readable MCP
-  **resources** (`svg://documents`, `svg://{id}/svg`, `svg://{id}/render`) with change
-  notifications.
+- **Render-and-see loop**: serialize-then-rasterize via the **resvg** engine — in-process by
+  default (bundled `resvg-py`), or the CLI when present; the image is handed back directly as
+  base64 image content. Documents are also published as readable MCP **resources**
+  (`svg://documents`, `svg://{id}/svg`, `svg://{id}/render`) with change notifications.
 - **File export** (`export_render`): faithful raster (png/jpeg/webp via resvg) and **true vector**
   (pdf/ps/eps via librsvg). cairo is intentionally avoided — it silently drops SVG filters (a drop
   shadow renders blank), so it is not faithful to the document.
@@ -380,3 +393,10 @@ wordmark, an orange→white starfield clipped into the glyphs, the inner `svg` w
 translucent white veil (so the `<mcp>` tags read as starry space and `svg` as frosted white), all
 under one drop shadow — then `text_to_path` outlined the glyphs so the final file is
 font-independent. `scripts/demo.py` shows a smaller end-to-end build you can run directly.
+
+## License
+
+**GPL-2.0-or-later.** svg-mcp's document model is built on [inkex](https://pypi.org/project/inkex/)
+(the Inkscape extensions library), which is **GPL-2.0-or-later** — a strong copyleft license that
+extends to works that import it. svg-mcp is therefore licensed under the GNU General Public License
+v2 or later; see [`LICENSE`](./LICENSE).
