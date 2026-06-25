@@ -104,7 +104,12 @@ TARGETING NODES & NAMING
 - **Name the things you'll refer back to.** Give meaningful nodes and every group/layer a
   `name`, and reason in terms of names via `find(name=…)` / `outline`. Names are stable and
   legible; random ids (`rect_8f3a`) are easy to lose track of across a long session.
+- **Keep names unique.** A name that matches more than one node is rejected (it won't silently
+  pick one) — e.g. don't name a gradient and a shape the same thing. Disambiguate with a hierarchy
+  path `ancestor/name` (each segment an id or name, matched down the ancestor chain) or the id.
 - Omitting `parent` places a node at the document root. Pass a group/layer id to nest it.
+- **Stacking:** later siblings paint on top. To order a node relative to another, use
+  `reparent(target, above=<node>)` / `below=<node>` instead of counting child indices.
 
 COORDINATES
 - User units, origin at top-left, x→right, y→down. The viewBox defaults to `0 0 width height`.
@@ -172,14 +177,19 @@ explicitly to target a specific document.
 mcp: FastMCP = FastMCP(name="svg-mcp", instructions=_INSTRUCTIONS)
 
 _DEFAULT_STORE = DocumentStore()
+# Per-connection document stores, keyed by the MCP session OBJECT. MCP exposes no session-close
+# hook, so we lean on GC: when the connection ends and the session object is collected, its store
+# entry is released automatically — that is what the WeakKeyDictionary buys us. The stable
+# `session_id` string identifies the same connection for logging/observability (see
+# `_session_id`); we deliberately do NOT key on it, to keep the automatic cleanup.
 _SESSION_STORES: WeakKeyDictionary[ServerSession, DocumentStore] = WeakKeyDictionary()
 
 
 def _store() -> DocumentStore:
     """Resolve the DocumentStore for the current MCP session (per-connection isolation).
 
-    Each client session gets its own store, keyed by the session object and released when the
-    connection ends. Outside a request (e.g. direct/programmatic use) a shared default is used.
+    Each client connection gets its own store, keyed by the session object and released by GC when
+    the connection ends. Outside a request (direct/programmatic use) a shared default is used.
     """
     try:
         session = get_context().session
@@ -190,6 +200,14 @@ def _store() -> DocumentStore:
         store = DocumentStore()
         _SESSION_STORES[session] = store
     return store
+
+
+def _session_id() -> str | None:
+    """The stable MCP session id for the current connection (for logging/observability)."""
+    try:
+        return get_context().session_id
+    except Exception:
+        return None
 
 
 Point = tuple[float, float]
@@ -370,12 +388,14 @@ def current_context() -> dict[str, str | list[str] | OutlineNode | None]:
     """Report the working context so you can re-anchor (e.g. after a long conversation).
 
     Returns:
-        {active_document, open_documents, active_outline}: the active document id (or None),
+        {session_id, active_document, open_documents, active_outline}: the stable id of this
+        connection (each chat is isolated to its own documents), the active document id (or None),
         all open document ids, and a depth-limited outline of the active document (or None).
     """
     active = _store().active_id
     outline_summary = _outline(_store().get(active), depth=2) if active is not None else None
     return {
+        "session_id": _session_id(),
         "active_document": active,
         "open_documents": _store().list_ids(),
         "active_outline": outline_summary,
@@ -1085,8 +1105,10 @@ def reparent(
     new_parent: str | None = None,
     index: int | None = None,
     keep_world_position: bool = False,
+    above: str | None = None,
+    below: str | None = None,
 ) -> dict[str, str | None]:
-    """Move a node under a different parent, changing its place in the hierarchy.
+    """Move a node under a different parent and/or restack it in the hierarchy.
 
     Args:
         target: Node id or name to move.
@@ -1094,11 +1116,24 @@ def reparent(
         index: Optional child index to insert at (controls stacking order within the parent).
         keep_world_position: If true, recompute the node's transform so it stays visually fixed
             despite the change of ancestor transforms.
+        above: Place the node directly ON TOP OF this sibling (id/name) — SVG paints later
+            siblings last, so the node is inserted just after it. Parent is taken from this node.
+        below: Place the node directly BENEATH this sibling (id/name) — inserted just before it.
+            Prefer `above`/`below` over counting `index`; they take precedence over
+            new_parent/index.
 
     Returns:
         The node's {id, tag, name}.
     """
-    return ops.reparent(_doc(document_id), target, new_parent, index, keep_world_position).as_dict()
+    return ops.reparent(
+        _doc(document_id),
+        target,
+        new_parent,
+        index,
+        keep_world_position,
+        above=above,
+        below=below,
+    ).as_dict()
 
 
 @mcp.tool
@@ -2923,18 +2958,41 @@ def document_render_resource(document_id: str) -> bytes:
 def main() -> None:
     """Console-script entrypoint (`svg-mcp`).
 
-    Transport is chosen by ``SVG_MCP_TRANSPORT`` (``stdio`` default, or ``http``); for http,
-    ``SVG_MCP_HOST``/``SVG_MCP_PORT`` configure the bind address (default 127.0.0.1:8000).
+    Transport and bind address come from CLI flags, falling back to env vars, then defaults:
+
+        --transport / SVG_MCP_TRANSPORT   stdio (default) | http | streamable-http | sse
+        --host      / SVG_MCP_HOST        bind host for http transports (default 127.0.0.1)
+        --port      / SVG_MCP_PORT        bind port for http transports (default 8000)
+
+    The http / streamable-http transports serve streamable HTTP at ``/mcp``.
     """
+    import argparse
     import os
 
-    transport = os.environ.get("SVG_MCP_TRANSPORT", "stdio")
-    if transport == "http":
-        host = os.environ.get("SVG_MCP_HOST", "127.0.0.1")
-        port = int(os.environ.get("SVG_MCP_PORT", "8000"))
-        mcp.run(transport="http", host=host, port=port)
-    else:
+    parser = argparse.ArgumentParser(prog="svg-mcp", description="svg-mcp MCP server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http", "streamable-http", "sse"],
+        default=os.environ.get("SVG_MCP_TRANSPORT", "stdio"),
+        help="MCP transport (default: stdio)",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("SVG_MCP_HOST", "127.0.0.1"),
+        help="Bind host for http transports (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("SVG_MCP_PORT", "8000")),
+        help="Bind port for http transports (default: 8000)",
+    )
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
         mcp.run()
+    else:
+        mcp.run(transport=args.transport, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
