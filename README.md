@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./logo.png" alt="svg-mcp" width="460">
+  <img src="./logo-variant.png" alt="svg-mcp" width="460">
 </p>
 
 # svg-mcp

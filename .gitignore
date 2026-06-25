@@ -21,4 +21,5 @@ venv/
 *.png
 !docs/**/*.png
 !logo.png
+!logo-variant.png
 scratch/
