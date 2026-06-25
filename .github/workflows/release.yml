@@ -1,0 +1,58 @@
+name: Release
+
+# Publishes to PyPI when a version tag is pushed, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Two auth options — pick one in the `publish` job below:
+#
+#   A) Trusted Publishing (OIDC) — DEFAULT, no secrets. One-time PyPI setup at
+#      https://pypi.org/manage/account/publishing/ (pending publisher), with:
+#         PyPI project:  svg-mcp
+#         owner/repo:    georgeharker/svg-mcp
+#         workflow:      release.yml
+#         environment:   pypi
+#
+#   B) API token — set a repo secret `PYPI_API_TOKEN` (Settings → Secrets and variables →
+#      Actions → New repository secret; value = a PyPI token starting `pypi-…`). Then uncomment
+#      the `password:` line in the publish step. Simpler to set up; trusted publishing is safer.
+#
+# Create a GitHub environment named "pypi" (repo Settings → Environments) to gate releases with
+# required reviewers (recommended for both options).
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+      - name: Build sdist + wheel
+        run: uv build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write          # required for option A (Trusted Publishing / OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Option A (trusted publishing): leave `password` unset — OIDC is used automatically.
+          # Option B (API token): uncomment the next line and set the PYPI_API_TOKEN secret.
+          # password: ${{ secrets.PYPI_API_TOKEN }}
+          # TestPyPI instead? add:  repository-url: https://test.pypi.org/legacy/
+          attestations: true
