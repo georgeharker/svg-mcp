@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import inspect
+import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal
@@ -22,6 +23,7 @@ from mcp.server.session import ServerSession
 from pydantic import AnyUrl, BaseModel
 
 from . import ops
+from . import preview as _preview
 from .model.document import Document
 from .query import convert_units as _convert_units
 from .query import describe_document as _describe_document
@@ -176,6 +178,16 @@ RESOURCES
   `svg://documents` (index of open docs + which is active), `svg://{document_id}/svg` (live SVG
   source), and `svg://{document_id}/render` (a PNG preview). Reading them never changes state.
 
+LIVE PREVIEW
+- When the user asks to *see* the work — "show me", "let me see it", "open a preview", "can I
+  watch", "I want to see that" — call `start_preview` and then give them the returned `url` in
+  your reply (e.g. "Live preview: http://127.0.0.1:8808/ — it refreshes on every change"). Do this
+  once; if a preview is already running, just remind them of the URL.
+- The preview tracks the ACTIVE document and refreshes automatically on each edit, so you do NOT
+  need to call `render_document` for the user's benefit — keep building and let the preview update.
+  Reserve `render_document` for when YOU need to inspect the result, and prefer batching the
+  primitives you already know you need before you stop to look.
+
 Multiple documents can be open at once; omit `document_id` for the active one, or pass it
 explicitly to target a specific document.
 """
@@ -278,6 +290,32 @@ def _doc(document_id: str | None) -> Document:
     return _store().get(document_id)
 
 
+def _documents_index() -> dict[str, str | list[dict[str, str | int | None]] | None]:
+    """Index of open documents: id, size, counts, and which one is active."""
+    active = _store().active_id
+    docs: list[dict[str, str | int | None]] = []
+    for did in _store().list_ids():
+        info = _describe_document(_store().peek(did))
+        docs.append({"id": did, "active": did == active, **info})
+    return {"active": active, "documents": docs}
+
+
+def _publish_preview() -> None:
+    """Hand the live-preview server a fresh snapshot of the active document.
+
+    Runs inside MCP-request context (where the document tree is consistent): it serializes the
+    active document to an immutable SVG string the preview's HTTP handlers render from, so browser
+    requests never touch the live tree. Cheap no-op cost is only paid while a preview is running.
+    """
+    active = _store().active_id
+    sources = {active: _export_svg(_store().peek(active))} if active is not None else {}
+    _preview.server.publish(
+        active_id=active,
+        sources=sources,
+        index_json=json.dumps(_documents_index()),
+    )
+
+
 def _style(style: ShapeStyle | None) -> dict[str, str] | None:
     return style.to_style_dict() if style is not None else None
 
@@ -290,6 +328,9 @@ async def _emit_change(ctx: Context) -> None:
         await session.send_resource_updated(AnyUrl(f"svg://{active}/svg"))
         await session.send_resource_updated(AnyUrl(f"svg://{active}/render"))
     await session.send_resource_updated(AnyUrl("svg://documents"))
+    if _preview.server.running:
+        with contextlib.suppress(Exception):
+            _publish_preview()
 
 
 def emits_change[**P, R](fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
@@ -2939,18 +2980,37 @@ def measure_text(content: str, style: ShapeStyle | None = None) -> dict[str, flo
     return {"width": width, "height": height}
 
 
+# --- live preview ----------------------------------------------------------
+
+
+@mcp.tool
+def start_preview(
+    *, host: str = "127.0.0.1", port: int | None = None
+) -> dict[str, str | int | bool]:
+    """Open a live preview window the USER can watch as you build the drawing.
+
+    Starts a small local web server (loopback only) and returns its ``url``. The page shows the
+    ACTIVE document and refreshes automatically on every change, so the user sees progress without
+    you spending tokens or calls on ``render_document`` for their benefit. Reserve
+    ``render_document`` for when YOU need to inspect the result.
+
+    Idempotent: if a preview is already running it just returns the existing URL. After calling
+    this, give the returned ``url`` to the user (e.g. "Live preview: <url> — refreshes on each
+    change").
+    """
+    url, bound = _preview.server.ensure_running(host=host, port=port)
+    with contextlib.suppress(Exception):
+        _publish_preview()  # prime so the page isn't blank on first open
+    return {"url": url, "port": bound, "running": True}
+
+
 # --- resources (readable ambient context) ----------------------------------
 
 
 @mcp.resource("svg://documents", mime_type="application/json")
 def documents_resource() -> dict[str, str | list[dict[str, str | int | None]] | None]:
     """Index of open documents: id, size, counts, and which one is active."""
-    active = _store().active_id
-    docs: list[dict[str, str | int | None]] = []
-    for did in _store().list_ids():
-        info = _describe_document(_store().peek(did))
-        docs.append({"id": did, "active": did == active, **info})
-    return {"active": active, "documents": docs}
+    return _documents_index()
 
 
 @mcp.resource("svg://{document_id}/svg", mime_type="image/svg+xml")
@@ -2999,6 +3059,18 @@ def main() -> None:
         help="Bind port for http transports (default: 8000)",
     )
     args = parser.parse_args()
+
+    # Opt-in live preview (loopback web page that auto-refreshes as the drawing is built).
+    # Enabled by SVG_MCP_PREVIEW; the model can also start it on demand via `start_preview`.
+    if os.environ.get("SVG_MCP_PREVIEW", "").strip().lower() not in ("", "0", "false", "no"):
+        import sys
+
+        preview_port = os.environ.get("SVG_MCP_PREVIEW_PORT")
+        url, _ = _preview.server.ensure_running(
+            host=os.environ.get("SVG_MCP_PREVIEW_HOST", "127.0.0.1"),
+            port=int(preview_port) if preview_port else None,
+        )
+        print(f"svg-mcp live preview: {url}", file=sys.stderr)  # stdout is the stdio transport
 
     if args.transport == "stdio":
         mcp.run()
