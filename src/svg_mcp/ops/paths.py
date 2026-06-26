@@ -132,9 +132,16 @@ def edit_star(
     rounded_attr = inkex.addNS("inkscape:rounded", "inkscape")
     flat_attr = inkex.addNS("inkscape:flatsided", "inkscape")
     cur = _required_params(
-        element, target,
-        ("sodipodi:cx", "sodipodi:cy", "sodipodi:r1", "sodipodi:r2",
-         "sodipodi:sides", rounded_attr),
+        element,
+        target,
+        (
+            "sodipodi:cx",
+            "sodipodi:cy",
+            "sodipodi:r1",
+            "sodipodi:r2",
+            "sodipodi:sides",
+            rounded_attr,
+        ),
         "star",
     )
     flat_raw = element.get(flat_attr)
@@ -144,10 +151,14 @@ def edit_star(
             "edit it as a plain path with edit_path"
         )
     fresh = inkex.PathElement.star(
-        (cx if cx is not None else cur["sodipodi:cx"],
-         cy if cy is not None else cur["sodipodi:cy"]),
-        (outer_radius if outer_radius is not None else cur["sodipodi:r1"],
-         inner_radius if inner_radius is not None else cur["sodipodi:r2"]),
+        (
+            cx if cx is not None else cur["sodipodi:cx"],
+            cy if cy is not None else cur["sodipodi:cy"],
+        ),
+        (
+            outer_radius if outer_radius is not None else cur["sodipodi:r1"],
+            inner_radius if inner_radius is not None else cur["sodipodi:r2"],
+        ),
         sides=sides if sides is not None else int(cur["sodipodi:sides"]),
         rounded=rounded if rounded is not None else cur[rounded_attr],
         flatsided=flatsided if flatsided is not None else (flat_raw == "true"),
@@ -183,8 +194,10 @@ def edit_arc(
         element, target, ("sodipodi:cx", "sodipodi:cy", "sodipodi:rx", "sodipodi:ry"), "arc"
     )
     fresh = inkex.PathElement.arc(
-        (cx if cx is not None else cur["sodipodi:cx"],
-         cy if cy is not None else cur["sodipodi:cy"]),
+        (
+            cx if cx is not None else cur["sodipodi:cx"],
+            cy if cy is not None else cur["sodipodi:cy"],
+        ),
         rx if rx is not None else cur["sodipodi:rx"],
         ry if ry is not None else cur["sodipodi:ry"],
         arctype=arctype if arctype is not None else (element.get("sodipodi:arc-type") or "arc"),

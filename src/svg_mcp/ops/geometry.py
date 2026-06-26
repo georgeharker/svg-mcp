@@ -99,10 +99,24 @@ def edit_path(
 # honest plain path rather than parameters that disagree with the geometry. Covers Inkscape's
 # native star/arc attrs plus our own variable-width-path spec (``data-vwp``).
 _PARAMETRIC_ATTRS = (
-    "sodipodi:type", "sodipodi:sides", "sodipodi:cx", "sodipodi:cy", "sodipodi:r1",
-    "sodipodi:r2", "sodipodi:arg1", "sodipodi:arg2", "sodipodi:rx", "sodipodi:ry",
-    "sodipodi:start", "sodipodi:end", "sodipodi:open", "sodipodi:arc-type",
-    "inkscape:rounded", "inkscape:randomized", "inkscape:flatsided", "data-vwp",
+    "sodipodi:type",
+    "sodipodi:sides",
+    "sodipodi:cx",
+    "sodipodi:cy",
+    "sodipodi:r1",
+    "sodipodi:r2",
+    "sodipodi:arg1",
+    "sodipodi:arg2",
+    "sodipodi:rx",
+    "sodipodi:ry",
+    "sodipodi:start",
+    "sodipodi:end",
+    "sodipodi:open",
+    "sodipodi:arc-type",
+    "inkscape:rounded",
+    "inkscape:randomized",
+    "inkscape:flatsided",
+    "data-vwp",
 )
 
 

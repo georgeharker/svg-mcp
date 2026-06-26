@@ -1206,9 +1206,12 @@ def edit_rect(
 ) -> dict[str, str | None]:
     """Edit a `<rect>` in place (mirrors add_rect). Errors if `target` is not a rect."""
     return ops.edit_shape(
-        _doc(document_id), target, expect_tag="rect",
+        _doc(document_id),
+        target,
+        expect_tag="rect",
         attrs={"x": x, "y": y, "width": width, "height": height, "rx": rx, "ry": ry},
-        style=style.to_style_dict() if style else None, transform=transform,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
     ).as_dict()
 
 
@@ -1226,9 +1229,12 @@ def edit_circle(
 ) -> dict[str, str | None]:
     """Edit a `<circle>` in place (mirrors add_circle). Errors if `target` is not a circle."""
     return ops.edit_shape(
-        _doc(document_id), target, expect_tag="circle",
+        _doc(document_id),
+        target,
+        expect_tag="circle",
         attrs={"cx": cx, "cy": cy, "r": r},
-        style=style.to_style_dict() if style else None, transform=transform,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
     ).as_dict()
 
 
@@ -1247,9 +1253,12 @@ def edit_ellipse(
 ) -> dict[str, str | None]:
     """Edit an `<ellipse>` in place (mirrors add_ellipse). Errors if `target` is not an ellipse."""
     return ops.edit_shape(
-        _doc(document_id), target, expect_tag="ellipse",
+        _doc(document_id),
+        target,
+        expect_tag="ellipse",
         attrs={"cx": cx, "cy": cy, "rx": rx, "ry": ry},
-        style=style.to_style_dict() if style else None, transform=transform,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
     ).as_dict()
 
 
@@ -1268,9 +1277,12 @@ def edit_line(
 ) -> dict[str, str | None]:
     """Edit a `<line>` in place (mirrors add_line). Errors if `target` is not a line."""
     return ops.edit_shape(
-        _doc(document_id), target, expect_tag="line",
+        _doc(document_id),
+        target,
+        expect_tag="line",
         attrs={"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-        style=style.to_style_dict() if style else None, transform=transform,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
     ).as_dict()
 
 
@@ -1290,9 +1302,12 @@ def edit_polyline(
 ) -> dict[str, str | None]:
     """Edit a `<polyline>` in place (mirrors add_polyline). Errors if `target` is not a polyline."""
     return ops.edit_shape(
-        _doc(document_id), target, expect_tag="polyline",
+        _doc(document_id),
+        target,
+        expect_tag="polyline",
         attrs={"points": _points_attr(points)},
-        style=style.to_style_dict() if style else None, transform=transform,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
     ).as_dict()
 
 
@@ -1308,9 +1323,12 @@ def edit_polygon(
 ) -> dict[str, str | None]:
     """Edit a `<polygon>` in place (mirrors add_polygon). Errors if `target` is not a polygon."""
     return ops.edit_shape(
-        _doc(document_id), target, expect_tag="polygon",
+        _doc(document_id),
+        target,
+        expect_tag="polygon",
         attrs={"points": _points_attr(points)},
-        style=style.to_style_dict() if style else None, transform=transform,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
     ).as_dict()
 
 
@@ -1336,8 +1354,11 @@ def edit_path(
         d: Optional new SVG path data, validated before applying.
     """
     return ops.edit_path(
-        _doc(document_id), target, d,
-        style=style.to_style_dict() if style else None, transform=transform,
+        _doc(document_id),
+        target,
+        d,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
     ).as_dict()
 
 
@@ -1364,9 +1385,17 @@ def edit_star(
     `edit_path`. Read current params with `get_params`.
     """
     return ops.edit_star(
-        _doc(document_id), target, cx=cx, cy=cy, outer_radius=outer_radius,
-        inner_radius=inner_radius, sides=sides, rounded=rounded, flatsided=flatsided,
-        style=style.to_style_dict() if style else None, transform=transform,
+        _doc(document_id),
+        target,
+        cx=cx,
+        cy=cy,
+        outer_radius=outer_radius,
+        inner_radius=inner_radius,
+        sides=sides,
+        rounded=rounded,
+        flatsided=flatsided,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
     ).as_dict()
 
 
@@ -1390,8 +1419,15 @@ def edit_arc(
     Read current params with `get_params`.
     """
     return ops.edit_arc(
-        _doc(document_id), target, cx=cx, cy=cy, rx=rx, ry=ry, arctype=arctype,
-        style=style.to_style_dict() if style else None, transform=transform,
+        _doc(document_id),
+        target,
+        cx=cx,
+        cy=cy,
+        rx=rx,
+        ry=ry,
+        arctype=arctype,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
     ).as_dict()
 
 
@@ -1418,9 +1454,16 @@ def edit_variable_width_path(
     Read current params with `get_params`.
     """
     return ops.edit_variable_width_path(
-        _doc(document_id), target, points=points, widths=widths, closed=closed, cap=cap,
-        interpolation=interpolation, samples=samples,
-        style=style.to_style_dict() if style else None, transform=transform,
+        _doc(document_id),
+        target,
+        points=points,
+        widths=widths,
+        closed=closed,
+        cap=cap,
+        interpolation=interpolation,
+        samples=samples,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
     ).as_dict()
 
 

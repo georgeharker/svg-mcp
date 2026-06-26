@@ -106,8 +106,21 @@ def _transform_bbox(
 
 
 _GEOMETRY_KEYS = (
-    "x", "y", "width", "height", "rx", "ry", "cx", "cy", "r",
-    "x1", "y1", "x2", "y2", "points", "d",
+    "x",
+    "y",
+    "width",
+    "height",
+    "rx",
+    "ry",
+    "cx",
+    "cy",
+    "r",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "points",
+    "d",
 )
 
 
@@ -183,35 +196,47 @@ def _read_params(element: inkex.BaseElement) -> tuple[str, bool, ShapeParams]:
     sodipodi = element.get("sodipodi:type")
     if sodipodi == "star":
         flat = element.get(inkex.addNS("inkscape:flatsided", "inkscape")) == "true"
-        return "star", True, {
-            "cx": _gf(element, "sodipodi:cx"),
-            "cy": _gf(element, "sodipodi:cy"),
-            "outer_radius": _gf(element, "sodipodi:r1"),
-            "inner_radius": _gf(element, "sodipodi:r2"),
-            "sides": _gi(element, "sodipodi:sides", 0),
-            "rounded": _gf(element, inkex.addNS("inkscape:rounded", "inkscape")),
-            "flatsided": flat,
-        }
+        return (
+            "star",
+            True,
+            {
+                "cx": _gf(element, "sodipodi:cx"),
+                "cy": _gf(element, "sodipodi:cy"),
+                "outer_radius": _gf(element, "sodipodi:r1"),
+                "inner_radius": _gf(element, "sodipodi:r2"),
+                "sides": _gi(element, "sodipodi:sides", 0),
+                "rounded": _gf(element, inkex.addNS("inkscape:rounded", "inkscape")),
+                "flatsided": flat,
+            },
+        )
     if sodipodi == "arc":
-        return "arc", True, {
-            "cx": _gf(element, "sodipodi:cx"),
-            "cy": _gf(element, "sodipodi:cy"),
-            "rx": _gf(element, "sodipodi:rx"),
-            "ry": _gf(element, "sodipodi:ry"),
-            "arctype": element.get("sodipodi:arc-type") or "arc",
-        }
+        return (
+            "arc",
+            True,
+            {
+                "cx": _gf(element, "sodipodi:cx"),
+                "cy": _gf(element, "sodipodi:cy"),
+                "rx": _gf(element, "sodipodi:rx"),
+                "ry": _gf(element, "sodipodi:ry"),
+                "arctype": element.get("sodipodi:arc-type") or "arc",
+            },
+        )
     vwp = element.get("data-vwp")
     if vwp is not None:
         try:
             spec = json.loads(vwp)
-            return "variable_width_path", True, {
-                "points": [[float(x), float(y)] for x, y in spec["points"]],
-                "widths": [float(w) for w in spec["widths"]],
-                "closed": bool(spec["closed"]),
-                "cap": str(spec["cap"]),
-                "interpolation": str(spec["interpolation"]),
-                "samples": int(spec["samples"]),
-            }
+            return (
+                "variable_width_path",
+                True,
+                {
+                    "points": [[float(x), float(y)] for x, y in spec["points"]],
+                    "widths": [float(w) for w in spec["widths"]],
+                    "closed": bool(spec["closed"]),
+                    "cap": str(spec["cap"]),
+                    "interpolation": str(spec["interpolation"]),
+                    "samples": int(spec["samples"]),
+                },
+            )
         except (ValueError, TypeError, KeyError):
             pass  # corrupt spec → fall through and report it as a plain path
 

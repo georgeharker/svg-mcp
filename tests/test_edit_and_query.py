@@ -33,8 +33,12 @@ def test_fill_rule_and_clip_rule_flatten() -> None:
 def test_edit_shape_in_place_keeps_identity_and_merges_style() -> None:
     doc = _doc()
     ref = ops.edit_shape(
-        doc, "bx", expect_tag="rect", attrs={"width": 80, "rx": 4},
-        style={"fill": "#f00"}, transform="rotate(10)",
+        doc,
+        "bx",
+        expect_tag="rect",
+        attrs={"width": 80, "rx": 4},
+        style={"fill": "#f00"},
+        transform="rotate(10)",
     )
     assert ref.id == "bx"  # same node — id/clip/filter/z-order preserved
     el = doc.resolve("bx")
@@ -139,9 +143,7 @@ def test_edit_star_asserts_when_params_incomplete() -> None:
 
 def test_variable_width_path_edit_roundtrip() -> None:
     _, doc = DocumentStore().create(100, 100)
-    vwp = ops.add_variable_width_path(
-        doc, points=[(0, 50), (50, 50), (100, 50)], widths=[2, 10, 2]
-    )
+    vwp = ops.add_variable_width_path(doc, points=[(0, 50), (50, 50), (100, 50)], widths=[2, 10, 2])
     before = doc.resolve(vwp.id).get("d")
     ops.edit_variable_width_path(doc, vwp.id, widths=20)  # uniform width
     after = doc.resolve(vwp.id)

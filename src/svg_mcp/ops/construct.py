@@ -247,8 +247,13 @@ def add_variable_width_path(
         style = {"fill-rule": "evenodd", **(style or {})}
     element = inkex.PathElement.new(d)
     _store_vwp_spec(
-        element, points=points, widths=widths, closed=closed, cap=cap,
-        interpolation=interpolation, samples=samples,
+        element,
+        points=points,
+        widths=widths,
+        closed=closed,
+        cap=cap,
+        interpolation=interpolation,
+        samples=samples,
     )
     return _place(
         doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
@@ -308,15 +313,24 @@ def edit_variable_width_path(
         raise InvalidArgument("widths must have the same length as points")
     try:
         d = variable_width_outline(
-            new_points, new_widths, closed=new_closed, cap=new_cap,
-            interpolation=new_interp, samples=new_samples,
+            new_points,
+            new_widths,
+            closed=new_closed,
+            cap=new_cap,
+            interpolation=new_interp,
+            samples=new_samples,
         )
     except ValueError as exc:
         raise InvalidArgument(str(exc)) from exc
     element.set("d", d)
     _store_vwp_spec(
-        element, points=new_points, widths=new_widths, closed=new_closed, cap=new_cap,
-        interpolation=new_interp, samples=new_samples,
+        element,
+        points=new_points,
+        widths=new_widths,
+        closed=new_closed,
+        cap=new_cap,
+        interpolation=new_interp,
+        samples=new_samples,
     )
     merged = {"fill-rule": "evenodd", **(style or {})} if new_closed else style
     _merge_style_and_transform(doc, element, merged, transform)
