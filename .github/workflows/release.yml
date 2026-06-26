@@ -56,3 +56,21 @@ jobs:
           # password: ${{ secrets.PYPI_API_TOKEN }}
           # TestPyPI instead? add:  repository-url: https://test.pypi.org/legacy/
           attestations: true
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # required to create the GitHub Release
+    steps:
+      - uses: actions/checkout@v4   # for --generate-notes (needs the tag + history)
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # --generate-notes auto-builds notes from merged PRs/commits since the previous tag;
+        # the built sdist + wheel are attached as downloadable assets.
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --generate-notes
