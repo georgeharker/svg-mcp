@@ -19,11 +19,13 @@ from .construct import (
     add_variable_width_path,
     create_group,
     create_layer,
+    edit_variable_width_path,
     load_svg_document,
     text_to_path,
     unlink_use,
     wrap_in_link,
 )
+from .geometry import edit_path, edit_shape
 from .layers import list_layers, move_to_layer, rename_layer, set_layer_state
 from .meta import set_description, set_document_metadata, set_title
 from .modify import (
@@ -47,6 +49,8 @@ from .pages import add_guide, add_page, list_guides, list_pages
 from .paths import (
     add_arc,
     add_star,
+    edit_arc,
+    edit_star,
     path_bbox,
     path_to_absolute,
     path_to_relative,
@@ -107,6 +111,9 @@ __all__ = [
     # paths
     "add_arc",
     "add_star",
+    "edit_star",
+    "edit_arc",
+    "edit_variable_width_path",
     "path_transform",
     "path_to_absolute",
     "path_to_relative",
@@ -116,6 +123,8 @@ __all__ = [
     "reparent",
     "restyle",
     "set_name",
+    "edit_shape",
+    "edit_path",
     "ungroup",
     "duplicate",
     "to_front",

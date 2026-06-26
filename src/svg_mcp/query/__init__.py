@@ -7,6 +7,8 @@ from .inspect import (
     describe_document,
     describe_node,
     get_computed_style,
+    get_geometry,
+    get_params,
     get_transform,
     list_resources,
 )
@@ -22,6 +24,8 @@ __all__ = [
     "list_resources",
     "get_computed_style",
     "get_transform",
+    "get_geometry",
+    "get_params",
     "convert_units",
     "find",
     "get_subtree",

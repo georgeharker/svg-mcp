@@ -72,7 +72,9 @@ class Document:
         """Resolve a target to a single node by id or friendly name (``inkscape:label``).
 
         A bare name that matches several nodes is rejected with :class:`AmbiguousReference`
-        (rather than silently picking one). Disambiguate with a hierarchy path
+        (rather than silently picking one) — except when exactly one match is a *renderable* node
+        (not under ``<defs>``); that one is preferred, so a shape sharing a label with a gradient
+        or clip definition still resolves. Otherwise disambiguate with a hierarchy path
         ``ancestor/.../name`` — each segment is an id or name, matched down the ancestor chain —
         or by the node's unique id.
         """
@@ -86,11 +88,24 @@ class Document:
             return matches[0]
         if not matches:
             raise NodeNotFound(f"no node with id or name {target!r}")
+        renderable = [n for n in matches if not self._in_defs(n)]
+        if len(renderable) == 1:
+            return renderable[0]
         hints = "; ".join(self._qualify(m, target) for m in matches)
         raise AmbiguousReference(
             f"name {target!r} matches {len(matches)} nodes — qualify by hierarchy "
             f"(e.g. {self._qualify(matches[0], target)}) or use the node id. Candidates: {hints}"
         )
+
+    @staticmethod
+    def _in_defs(node: BaseElement) -> bool:
+        """True if ``node`` is inside a ``<defs>`` (a non-rendered definition like a gradient)."""
+        ancestor = node.getparent()
+        while ancestor is not None:
+            if str(getattr(ancestor, "TAG", "")) == "defs":
+                return True
+            ancestor = ancestor.getparent()
+        return False
 
     @staticmethod
     def _matches(node: BaseElement, token: str) -> bool:

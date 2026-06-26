@@ -33,10 +33,15 @@ from .query import extract_image as _extract_image
 from .query import find as _find
 from .query import get_bbox as _get_bbox
 from .query import get_computed_style as _get_computed_style
+from .query import get_geometry as _get_geometry
+from .query import get_params as _get_params
 from .query import get_subtree as _get_subtree
 from .query import get_transform as _get_transform
 from .query import list_resources as _list_resources
 from .query import outline as _outline
+from .query.inspect import Geometry as _Geometry
+from .query.inspect import ShapeParams as _ShapeParams
+from .query.inspect import TransformEntry as _TransformEntry
 from .query.outline import OutlineNode
 from .render import (
     SUPPORTED_FORMATS,
@@ -129,6 +134,18 @@ STYLING & PAINT
   (e.g. a gradient/pattern you defined). Define the resource first, then use its id as the paint.
 - `restyle` MERGES by default — it only changes the properties you pass, keeping the rest. Pass
   `replace=true` to discard the node's current style and set exactly what you provide.
+
+EDITING GEOMETRY IN PLACE
+- To change an existing node, edit it IN PLACE — do NOT delete + re-add (that drops its clip,
+  mask, filters, and z-order). Each `edit_*` mirrors its `add_*` twin (same params + inline
+  `style`/`transform`, only what you pass is changed): `edit_rect`/`edit_circle`/`edit_ellipse`/
+  `edit_line`/`edit_polyline`/`edit_polygon`/`edit_path`. For a star/arc, `edit_star`/`edit_arc`
+  re-derive the shape from its parameters; editing such a node's raw `d` (via `edit_path`) demotes
+  it to a plain path. To reshape a clipPath/mask outline, target the shape inside it by id.
+- To read a node, `get_params(target)` returns its current settings under the same names the
+  `add_*`/`edit_*` tools use (a circle's cx/cy/r, a star's sides/outer_radius/…). `get_geometry(
+  target, relative_to=...)` gives x/y/width/height in a chosen frame — `world` (default), `local`,
+  `parent`, or another node's id/name — and `get_transform` adds the per-ancestor transform `stack`.
 
 REUSABLE RESOURCES (defs)
 - `define_linear_gradient`/`define_radial_gradient`/`define_pattern` return an id — use it as a
@@ -1165,6 +1182,248 @@ def restyle(
     return ops.restyle(_doc(document_id), target, style_dict, replace=replace).as_dict()
 
 
+# --- in-place geometry edits (mirror the add_* constructors) ----------------
+#
+# Each edit_* mirrors its add_* twin: same geometry params, plus inline `style` (merged, like
+# restyle) and `transform` (sets the node's local transform). Editing in place keeps the node's
+# id, clip, mask, filters, and z-order — unlike delete + re-add. Pass only what you want changed.
+
+
+@mcp.tool
+@emits_change
+def edit_rect(
+    *,
+    document_id: str | None = None,
+    target: str,
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    rx: float | None = None,
+    ry: float | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a `<rect>` in place (mirrors add_rect). Errors if `target` is not a rect."""
+    return ops.edit_shape(
+        _doc(document_id), target, expect_tag="rect",
+        attrs={"x": x, "y": y, "width": width, "height": height, "rx": rx, "ry": ry},
+        style=style.to_style_dict() if style else None, transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_circle(
+    *,
+    document_id: str | None = None,
+    target: str,
+    cx: float | None = None,
+    cy: float | None = None,
+    r: float | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a `<circle>` in place (mirrors add_circle). Errors if `target` is not a circle."""
+    return ops.edit_shape(
+        _doc(document_id), target, expect_tag="circle",
+        attrs={"cx": cx, "cy": cy, "r": r},
+        style=style.to_style_dict() if style else None, transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_ellipse(
+    *,
+    document_id: str | None = None,
+    target: str,
+    cx: float | None = None,
+    cy: float | None = None,
+    rx: float | None = None,
+    ry: float | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit an `<ellipse>` in place (mirrors add_ellipse). Errors if `target` is not an ellipse."""
+    return ops.edit_shape(
+        _doc(document_id), target, expect_tag="ellipse",
+        attrs={"cx": cx, "cy": cy, "rx": rx, "ry": ry},
+        style=style.to_style_dict() if style else None, transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_line(
+    *,
+    document_id: str | None = None,
+    target: str,
+    x1: float | None = None,
+    y1: float | None = None,
+    x2: float | None = None,
+    y2: float | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a `<line>` in place (mirrors add_line). Errors if `target` is not a line."""
+    return ops.edit_shape(
+        _doc(document_id), target, expect_tag="line",
+        attrs={"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+        style=style.to_style_dict() if style else None, transform=transform,
+    ).as_dict()
+
+
+def _points_attr(points: list[Point] | None) -> str | None:
+    return None if points is None else " ".join(f"{px},{py}" for px, py in points)
+
+
+@mcp.tool
+@emits_change
+def edit_polyline(
+    *,
+    document_id: str | None = None,
+    target: str,
+    points: list[Point] | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a `<polyline>` in place (mirrors add_polyline). Errors if `target` is not a polyline."""
+    return ops.edit_shape(
+        _doc(document_id), target, expect_tag="polyline",
+        attrs={"points": _points_attr(points)},
+        style=style.to_style_dict() if style else None, transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_polygon(
+    *,
+    document_id: str | None = None,
+    target: str,
+    points: list[Point] | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a `<polygon>` in place (mirrors add_polygon). Errors if `target` is not a polygon."""
+    return ops.edit_shape(
+        _doc(document_id), target, expect_tag="polygon",
+        attrs={"points": _points_attr(points)},
+        style=style.to_style_dict() if style else None, transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_path(
+    *,
+    document_id: str | None = None,
+    target: str,
+    d: str | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a `<path>` in place (mirrors add_path): replace `d` and/or merge style / set transform.
+
+    Use this to reshape an existing path instead of delete+re-add (which drops its clip/mask/filter
+    and stacking). To reshape a clipPath/mask outline, target the shape inside it by id. Editing the
+    `d` of a parametric star/arc demotes it to a plain path (its parameters are dropped, so geometry
+    and parameters can't disagree) — use `edit_star`/`edit_arc` to keep it parametric.
+
+    Args:
+        target: Node id or name (a path or any node with path data).
+        d: Optional new SVG path data, validated before applying.
+    """
+    return ops.edit_path(
+        _doc(document_id), target, d,
+        style=style.to_style_dict() if style else None, transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_star(
+    *,
+    document_id: str | None = None,
+    target: str,
+    cx: float | None = None,
+    cy: float | None = None,
+    outer_radius: float | None = None,
+    inner_radius: float | None = None,
+    sides: int | None = None,
+    rounded: float | None = None,
+    flatsided: bool | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a parametric star/polygon by its PARAMETERS (mirrors add_star), re-deriving the path.
+
+    Changes only the params you pass and regenerates the shape, keeping its id/style/clip/z-order.
+    Errors if `target` isn't a parametric star (e.g. a raw `d` edit demoted it) — then use
+    `edit_path`. Read current params with `get_params`.
+    """
+    return ops.edit_star(
+        _doc(document_id), target, cx=cx, cy=cy, outer_radius=outer_radius,
+        inner_radius=inner_radius, sides=sides, rounded=rounded, flatsided=flatsided,
+        style=style.to_style_dict() if style else None, transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_arc(
+    *,
+    document_id: str | None = None,
+    target: str,
+    cx: float | None = None,
+    cy: float | None = None,
+    rx: float | None = None,
+    ry: float | None = None,
+    arctype: Literal["arc", "slice", "chord"] | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a parametric arc/slice/chord by its PARAMETERS (mirrors add_arc), re-deriving the path.
+
+    Errors if `target` isn't a parametric arc (e.g. demoted to a plain path) — then use `edit_path`.
+    Read current params with `get_params`.
+    """
+    return ops.edit_arc(
+        _doc(document_id), target, cx=cx, cy=cy, rx=rx, ry=ry, arctype=arctype,
+        style=style.to_style_dict() if style else None, transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_variable_width_path(
+    *,
+    document_id: str | None = None,
+    target: str,
+    points: list[Point] | None = None,
+    widths: list[float] | float | None = None,
+    closed: bool | None = None,
+    cap: Literal["butt", "round"] | None = None,
+    interpolation: Literal["linear", "cubic"] | None = None,
+    samples: int | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a variable-width ribbon by its SOURCE (mirrors add_variable_width_path), re-deriving it.
+
+    Re-runs the power-stroke expansion from the stored centerline + widths with your overrides, so
+    the fill stays a coherent ribbon. `widths` may be one number (uniform). Errors if `target` has
+    no stored spec (not a variable-width path, or a raw `d` edit demoted it) — then use `edit_path`.
+    Read current params with `get_params`.
+    """
+    return ops.edit_variable_width_path(
+        _doc(document_id), target, points=points, widths=widths, closed=closed, cap=cap,
+        interpolation=interpolation, samples=samples,
+        style=style.to_style_dict() if style else None, transform=transform,
+    ).as_dict()
+
+
 @mcp.tool
 @emits_change
 def reparent(
@@ -1983,17 +2242,63 @@ def get_computed_style(*, document_id: str | None = None, target: str) -> dict[s
 
 
 @mcp.tool
-def get_transform(*, document_id: str | None = None, target: str) -> dict[str, str | list[float]]:
-    """Return a node's local transform and its composed transform-to-root (CTM).
+def get_transform(
+    *, document_id: str | None = None, target: str
+) -> dict[str, str | list[float] | list[_TransformEntry]]:
+    """Return a node's local transform, its composed CTM, and the full per-ancestor stack.
 
     Args:
         target: Node id or name.
 
     Returns:
-        {local, composed} as transform strings, plus {local_matrix, composed_matrix} as
-        [a, b, c, d, e, f] hexads.
+        {local, composed} as transform strings, {local_matrix, composed_matrix} as
+        [a, b, c, d, e, f] hexads, and `stack`: each ancestor (node-first up to the root) as
+        {id, name, tag, transform, matrix} — the chain whose product is the composed CTM.
     """
     return _get_transform(_doc(document_id), target)
+
+
+@mcp.tool
+def get_geometry(
+    *, document_id: str | None = None, target: str, relative_to: str = "world"
+) -> _Geometry | None:
+    """A node's position and size in a chosen coordinate frame, plus its raw local attributes.
+
+    Where the same x/y means different things, this answers "where is X, measured against what?"
+
+    Args:
+        target: Node id or name.
+        relative_to: The frame to measure in —
+            `world` (default) = document/global coordinates (full CTM applied);
+            `local` = the node's own coordinate system (before its own transforms);
+            `parent` = coordinates within its immediate parent (its own transform only);
+            or another node's id/name = this node's box expressed in THAT node's frame.
+
+    Returns:
+        {frame, x, y, width, height, center:[cx,cy], local:{…raw geometry attrs…}} — or null if
+        the node has no bounding box.
+    """
+    return _get_geometry(_doc(document_id), target, relative_to)
+
+
+@mcp.tool
+def get_params(
+    *, document_id: str | None = None, target: str
+) -> dict[str, str | bool | _ShapeParams | dict[str, str]]:
+    """Read a shape's current settings under the SAME names the add_*/edit_* tools use.
+
+    Read-then-edit: e.g. `get_params` a star → {sides, outer_radius, inner_radius, …}, tweak one,
+    pass it to `edit_star`. Recognizes parametric stars/arcs and variable-width paths (with their
+    generator params and `parametric: true`); basic shapes return their geometry; a plain path its
+    `d`.
+
+    Args:
+        target: Node id or name.
+
+    Returns:
+        {kind, parametric, params} — `params` keyed by the friendly create/edit parameter names.
+    """
+    return _get_params(_doc(document_id), target)
 
 
 @mcp.tool

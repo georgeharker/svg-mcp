@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import bisect
+import json
 import math
 import mimetypes
 from collections.abc import Callable
@@ -22,10 +23,43 @@ from ..model.document import Document
 from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef
 from ..typeset import FontNotFound, glyph_run, is_bold, parse_font_size, text_on_path_d
+from .geometry import _merge_style_and_transform
 from .paint import resolve_paint_refs as _resolve_paint_refs
 
 Style = dict[str, str]
 Point = tuple[float, float]
+
+# A variable-width ribbon is a *generated* fill with no native parametric type, so we stash the
+# centerline + widths + options here, the same way stars/arcs carry their sodipodi params, so
+# `edit_variable_width_path` can re-derive it. A raw `d` edit strips it (see `_demote_parametric`).
+_VWP_ATTR = "data-vwp"
+
+
+def _vwp_ref(element: BaseElement) -> NodeRef:
+    return NodeRef(
+        id=str(element.get_id()), tag=str(element.TAG), name=getattr(element, "label", None)
+    )
+
+
+def _store_vwp_spec(
+    element: BaseElement,
+    *,
+    points: list[Point],
+    widths: list[float],
+    closed: bool,
+    cap: str,
+    interpolation: str,
+    samples: int,
+) -> None:
+    spec = {
+        "points": [list(p) for p in points],
+        "widths": list(widths),
+        "closed": closed,
+        "cap": cap,
+        "interpolation": interpolation,
+        "samples": samples,
+    }
+    element.set(_VWP_ATTR, json.dumps(spec, separators=(",", ":")))
 
 
 def _apply_style(element: BaseElement, style: Style | None) -> None:
@@ -212,9 +246,81 @@ def add_variable_width_path(
     if closed:
         style = {"fill-rule": "evenodd", **(style or {})}
     element = inkex.PathElement.new(d)
+    _store_vwp_spec(
+        element, points=points, widths=widths, closed=closed, cap=cap,
+        interpolation=interpolation, samples=samples,
+    )
     return _place(
         doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
     )
+
+
+def edit_variable_width_path(
+    doc: Document,
+    target: str,
+    *,
+    points: list[Point] | None = None,
+    widths: list[float] | float | None = None,
+    closed: bool | None = None,
+    cap: str | None = None,
+    interpolation: str | None = None,
+    samples: int | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Edit a variable-width ribbon by its SOURCE (centerline + widths), re-deriving the fill.
+
+    Re-runs the power-stroke expansion from the stored centerline/widths with your overrides, so the
+    fill stays a coherent ribbon (unlike hand-editing its outline ``d``). ``widths`` may be a single
+    number (uniform). Errors if ``target`` has no stored spec — i.e. it isn't a variable-width path,
+    or a raw ``d`` edit demoted it to a plain path; use ``edit_path`` for those.
+    """
+    element = doc.resolve(target)
+    raw = element.get(_VWP_ATTR)
+    if raw is None:
+        raise InvalidArgument(
+            f"{target!r} is not a variable-width path (or was demoted to a plain path); "
+            "use edit_path for plain paths"
+        )
+    try:
+        spec = json.loads(raw)
+        stored_points = [(float(x), float(y)) for x, y in spec["points"]]
+        stored_widths = [float(w) for w in spec["widths"]]
+        stored = (spec["closed"], spec["cap"], spec["interpolation"], spec["samples"])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise InvalidArgument(
+            f"{target!r} has a corrupt variable-width spec ({exc}); "
+            "edit it as a plain path with edit_path"
+        ) from None
+    stored_closed, stored_cap, stored_interp, stored_samples = stored
+    new_points = points if points is not None else stored_points
+    if widths is None:
+        new_widths = stored_widths
+    elif isinstance(widths, (int, float)):
+        new_widths = [float(widths)] * len(new_points)
+    else:
+        new_widths = [float(w) for w in widths]
+    new_closed = closed if closed is not None else bool(stored_closed)
+    new_cap = cap if cap is not None else str(stored_cap)
+    new_interp = interpolation if interpolation is not None else str(stored_interp)
+    new_samples = samples if samples is not None else int(stored_samples)
+    if len(new_widths) != len(new_points):
+        raise InvalidArgument("widths must have the same length as points")
+    try:
+        d = variable_width_outline(
+            new_points, new_widths, closed=new_closed, cap=new_cap,
+            interpolation=new_interp, samples=new_samples,
+        )
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+    element.set("d", d)
+    _store_vwp_spec(
+        element, points=new_points, widths=new_widths, closed=new_closed, cap=new_cap,
+        interpolation=new_interp, samples=new_samples,
+    )
+    merged = {"fill-rule": "evenodd", **(style or {})} if new_closed else style
+    _merge_style_and_transform(doc, element, merged, transform)
+    return _vwp_ref(element)
 
 
 def add_text(

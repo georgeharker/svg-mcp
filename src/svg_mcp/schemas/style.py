@@ -62,6 +62,9 @@ class ShapeStyle(BaseModel):
     stroke_dasharray: str | None = None
     stroke_linecap: Literal["butt", "round", "square"] | None = None
     stroke_linejoin: Literal["miter", "round", "bevel"] | None = None
+    # Winding rule for self-intersecting fills (and clip shapes), e.g. "evenodd" for a hole.
+    fill_rule: Literal["nonzero", "evenodd"] | None = None
+    clip_rule: Literal["nonzero", "evenodd"] | None = None
     # Typography (apply to text/tspan/textPath; ignored by other shapes).
     font_family: str | None = None
     font_size: str | float | None = None  # "80px"/"2em"/"80", or a bare number (px)
@@ -88,6 +91,8 @@ class ShapeStyle(BaseModel):
             "stroke-dasharray": self.stroke_dasharray,
             "stroke-linecap": self.stroke_linecap,
             "stroke-linejoin": self.stroke_linejoin,
+            "fill-rule": self.fill_rule,
+            "clip-rule": self.clip_rule,
             "font-family": self.font_family,
             "font-size": self.font_size,
             "font-weight": self.font_weight,

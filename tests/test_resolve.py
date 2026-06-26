@@ -25,13 +25,14 @@ def test_duplicate_name_raises_ambiguous() -> None:
     assert "sheen" in str(exc.value) and "id" in str(exc.value).lower()
 
 
-def test_name_and_gradient_collision_is_ambiguous() -> None:
-    # The exact reported footgun: a gradient and a shape sharing a name.
+def test_name_and_gradient_collision_prefers_the_shape() -> None:
+    # A gradient (in <defs>) and a shape sharing a name: prefer the renderable shape, since the
+    # def isn't a valid target for visual ops. (Two *shapes* sharing a name stays ambiguous —
+    # see test_duplicate_name_raises_ambiguous.)
     _, doc = DocumentStore().create(100, 100)
     ops.define_linear_gradient(doc, x1=0, y1=0, x2=0, y2=1, stops=STOPS, name="sheen")
-    ops.add_rect(doc, x=0, y=0, width=10, height=10, name="sheen")
-    with pytest.raises(AmbiguousReference):
-        doc.resolve("sheen")
+    rect = ops.add_rect(doc, x=0, y=0, width=10, height=10, name="sheen")
+    assert doc.resolve("sheen").get_id() == rect.id
 
 
 def test_hierarchy_path_disambiguates() -> None:
