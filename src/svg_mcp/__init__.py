@@ -15,4 +15,4 @@ The package is layered (see DESIGN.md):
 Only ``render`` and the package skeleton exist today; the model layer lands next.
 """
 
-__version__ = "0.0.1"
+__version__ = "0.2.0"
