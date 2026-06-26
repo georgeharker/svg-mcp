@@ -22,3 +22,9 @@ venv/
 !docs/**/*.png
 !logo.png
 scratch/
+
+# Quarto docs build (gh-quarto-publish)
+/_site/
+/.quarto/
+
+**/*.quarto_ipynb
