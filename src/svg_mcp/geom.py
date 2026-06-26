@@ -1,5 +1,8 @@
-"""Variable-width stroke expansion (a.k.a. Power Stroke).
+"""Pure-Python path geometry: variable-width stroke expansion and the squircle outline.
 
+No inkex dependency — each helper takes plain numbers and returns an SVG path ``d`` string.
+
+Variable-width stroke expansion (a.k.a. Power Stroke):
 SVG has no native variable ``stroke-width`` — it is constant per element. To draw a line that
 swells and tapers (calligraphy, engraving, a brush stroke, a tapered arrow), you expand the
 centerline into the FILLED outline of the swept ribbon and fill it. This module does that
@@ -166,3 +169,89 @@ def variable_width_outline(
         parts.append(f"A{half0:.2f},{half0:.2f} 0 0 0 {_fmt(left[0])}")
     parts.append("Z")
     return " ".join(parts)
+
+
+def _num(value: float) -> str:
+    """Compact fixed-point number for a path ``d`` (trailing zeros trimmed)."""
+    return f"{value:.3f}".rstrip("0").rstrip(".") or "0"
+
+
+def squircle_outline(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    radius: float,
+    smoothness: float = 0.6,
+) -> str:
+    """Outline a SQUIRCLE — a rounded rectangle whose corners are smoothed superellipse fillets.
+
+    This is the iOS / Figma "corner smoothing" rounded rectangle (Apple's continuous corners):
+    straight edges joined by corners that ease into the arc with cubic Béziers instead of meeting
+    the circular arc abruptly. ``smoothness`` is the corner-smoothing fraction in ``[0, 1]``:
+    ``0`` is a plain circular-corner rounded rect, ``~0.6`` matches Apple's app-icon squircle, and
+    ``1`` is maximally smooth. See https://www.figma.com/blog/desperately-seeking-squircles/.
+
+    Args:
+        x, y: Top-left corner of the bounding box.
+        width, height: Box size (both > 0).
+        radius: Corner radius (≥ 0); ``0`` yields a plain rectangle. Clamped per corner so a
+            smoothed corner never overruns half the shorter side.
+        smoothness: Corner-smoothing fraction in ``[0, 1]`` (clamped).
+
+    Returns:
+        An SVG path ``d`` string of the closed squircle outline.
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError("squircle width and height must be positive")
+    if radius < 0:
+        raise ValueError("squircle radius must be non-negative")
+    smoothness = max(0.0, min(1.0, smoothness))
+    budget = min(width, height) / 2.0
+    # Shrink the radius (never the smoothing) if a smoothed corner would overrun the budget, so
+    # the Bézier control distances below stay consistent and non-negative.
+    r = max(0.0, min(radius, budget / (1.0 + smoothness)))
+
+    # Corner construction, per Figma's "desperately seeking squircles": p is how far from the
+    # corner (along each edge) the smoothing begins; a/b/c/d are the cubic control offsets that
+    # ease the straight edge into the central circular arc of length `arc` × `arc`.
+    p = (1.0 + smoothness) * r
+    arc_measure = 90.0 * (1.0 - smoothness)  # central arc spans 90° at s=0, shrinks toward 0
+    arc = math.sin(math.radians(arc_measure / 2.0)) * r * math.sqrt(2.0)
+    angle_alpha = (90.0 - arc_measure) / 2.0
+    p3_p4 = r * math.tan(math.radians(angle_alpha / 2.0))
+    angle_beta = 45.0 * smoothness
+    c = p3_p4 * math.cos(math.radians(angle_beta))
+    d = c * math.tan(math.radians(angle_beta))
+    b = (p - arc - c - d) / 3.0
+    a = 2.0 * b
+    n = _num
+
+    # Four corners as relative segments, walking clockwise from the top edge. Each corner is
+    # cubic-in → quarter arc → cubic-out; the arc sweep flag 1 curves outward (convex).
+    top_right = (
+        f"c {n(a)} 0 {n(a + b)} 0 {n(a + b + c)} {n(d)} "
+        f"a {n(r)} {n(r)} 0 0 1 {n(arc)} {n(arc)} "
+        f"c {n(d)} {n(c)} {n(d)} {n(b + c)} {n(d)} {n(a + b + c)}"
+    )
+    bottom_right = (
+        f"c 0 {n(a)} 0 {n(a + b)} {n(-d)} {n(a + b + c)} "
+        f"a {n(r)} {n(r)} 0 0 1 {n(-arc)} {n(arc)} "
+        f"c {n(-c)} {n(d)} {n(-(b + c))} {n(d)} {n(-(a + b + c))} {n(d)}"
+    )
+    bottom_left = (
+        f"c {n(-a)} 0 {n(-(a + b))} 0 {n(-(a + b + c))} {n(-d)} "
+        f"a {n(r)} {n(r)} 0 0 1 {n(-arc)} {n(-arc)} "
+        f"c {n(-d)} {n(-c)} {n(-d)} {n(-(b + c))} {n(-d)} {n(-(a + b + c))}"
+    )
+    top_left = (
+        f"c 0 {n(-a)} 0 {n(-(a + b))} {n(d)} {n(-(a + b + c))} "
+        f"a {n(r)} {n(r)} 0 0 1 {n(arc)} {n(-arc)} "
+        f"c {n(c)} {n(-d)} {n(b + c)} {n(-d)} {n(a + b + c)} {n(-d)}"
+    )
+    return (
+        f"M {n(x + width - p)} {n(y)} {top_right} "
+        f"L {n(x + width)} {n(y + height - p)} {bottom_right} "
+        f"L {n(x + p)} {n(y + height)} {bottom_left} "
+        f"L {n(x)} {n(y + p)} {top_left} Z"
+    )

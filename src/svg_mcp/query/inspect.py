@@ -239,6 +239,24 @@ def _read_params(element: inkex.BaseElement) -> tuple[str, bool, ShapeParams]:
             )
         except (ValueError, TypeError, KeyError):
             pass  # corrupt spec → fall through and report it as a plain path
+    squircle = element.get("data-squircle")
+    if squircle is not None:
+        try:
+            spec = json.loads(squircle)
+            return (
+                "squircle",
+                True,
+                {
+                    "x": float(spec["x"]),
+                    "y": float(spec["y"]),
+                    "width": float(spec["width"]),
+                    "height": float(spec["height"]),
+                    "radius": float(spec["radius"]),
+                    "smoothness": float(spec["smoothness"]),
+                },
+            )
+        except (ValueError, TypeError, KeyError):
+            pass  # corrupt spec → fall through and report it as a plain path
 
     tag = str(element.TAG)
     keys = _BASIC_GEOMETRY.get(tag)
@@ -254,8 +272,9 @@ def _read_params(element: inkex.BaseElement) -> tuple[str, bool, ShapeParams]:
 def get_params(doc: Document, target: str) -> dict[str, str | bool | ShapeParams | dict[str, str]]:
     """A node's current settings under the SAME names the ``add_*``/``edit_*`` tools use, + style.
 
-    Lets you read a shape, then edit it with matching params. Recognizes parametric stars/arcs and
-    variable-width paths (returns their generator parameters and ``parametric: true``); for basic
+    Lets you read a shape, then edit it with matching params. Recognizes parametric stars/arcs,
+    variable-width paths, and squircles (returns their generator parameters and
+    ``parametric: true``); for basic
     shapes returns their geometry attributes; for a plain path, its ``d``. ``style`` is the node's
     current presentation properties (fill, stroke, …).
 

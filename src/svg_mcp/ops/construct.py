@@ -18,7 +18,7 @@ from pathlib import Path
 import inkex
 from inkex import BaseElement
 
-from ..geom import variable_width_outline
+from ..geom import squircle_outline, variable_width_outline
 from ..model.document import Document
 from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef
@@ -34,8 +34,12 @@ Point = tuple[float, float]
 # `edit_variable_width_path` can re-derive it. A raw `d` edit strips it (see `_demote_parametric`).
 _VWP_ATTR = "data-vwp"
 
+# A squircle (iOS/Figma corner-smoothed rounded rect) is likewise a generated fill with no native
+# parametric type, so we stash its box + radius + smoothness here for `edit_squircle` to re-derive.
+_SQUIRCLE_ATTR = "data-squircle"
 
-def _vwp_ref(element: BaseElement) -> NodeRef:
+
+def _node_ref(element: BaseElement) -> NodeRef:
     return NodeRef(
         id=str(element.get_id()), tag=str(element.TAG), name=getattr(element, "label", None)
     )
@@ -334,7 +338,129 @@ def edit_variable_width_path(
     )
     merged = {"fill-rule": "evenodd", **(style or {})} if new_closed else style
     _merge_style_and_transform(doc, element, merged, transform)
-    return _vwp_ref(element)
+    return _node_ref(element)
+
+
+def _store_squircle_spec(
+    element: BaseElement,
+    *,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    radius: float,
+    smoothness: float,
+) -> None:
+    spec = {
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "radius": radius,
+        "smoothness": smoothness,
+    }
+    element.set(_SQUIRCLE_ATTR, json.dumps(spec, separators=(",", ":")))
+
+
+def add_squircle(
+    doc: Document,
+    *,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    radius: float,
+    smoothness: float = 0.6,
+    parent: str | None = None,
+    name: str | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Add a SQUIRCLE — a rounded rectangle with iOS/Figma corner smoothing (Apple's icon shape).
+
+    Unlike a plain rounded rect (circular corners), the corners ease into the arc with cubic
+    Béziers, giving the continuous, organic look of Apple app icons. ``smoothness`` is the
+    corner-smoothing fraction in ``[0, 1]``: ``0`` is a plain rounded rect, ``~0.6`` matches
+    Apple's icons, ``1`` is maximally smooth. ``radius`` is clamped per corner to the shorter side.
+    Stored parametrically so ``edit_squircle`` can re-derive it; a raw ``d`` edit demotes it to a
+    plain path.
+    """
+    try:
+        d = squircle_outline(x, y, width, height, radius, smoothness)
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+    element = inkex.PathElement.new(d)
+    _store_squircle_spec(
+        element, x=x, y=y, width=width, height=height, radius=radius, smoothness=smoothness
+    )
+    return _place(
+        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    )
+
+
+def edit_squircle(
+    doc: Document,
+    target: str,
+    *,
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    radius: float | None = None,
+    smoothness: float | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Edit a parametric squircle by its PARAMETERS (mirrors add_squircle), re-deriving the path.
+
+    Changes only the params you pass and regenerates the outline, keeping the node's id/style/
+    z-order. Errors if ``target`` has no stored spec — i.e. it isn't a squircle, or a raw ``d``
+    edit demoted it to a plain path; use ``edit_path`` for those. Read params with ``get_params``.
+    """
+    element = doc.resolve(target)
+    raw = element.get(_SQUIRCLE_ATTR)
+    if raw is None:
+        raise InvalidArgument(
+            f"{target!r} is not a squircle (or was demoted to a plain path); "
+            "use edit_path for plain paths"
+        )
+    try:
+        spec = json.loads(raw)
+        cur = (
+            float(spec["x"]),
+            float(spec["y"]),
+            float(spec["width"]),
+            float(spec["height"]),
+            float(spec["radius"]),
+            float(spec["smoothness"]),
+        )
+    except (ValueError, TypeError, KeyError) as exc:
+        raise InvalidArgument(
+            f"{target!r} has a corrupt squircle spec ({exc}); "
+            "edit it as a plain path with edit_path"
+        ) from None
+    new_x = x if x is not None else cur[0]
+    new_y = y if y is not None else cur[1]
+    new_width = width if width is not None else cur[2]
+    new_height = height if height is not None else cur[3]
+    new_radius = radius if radius is not None else cur[4]
+    new_smoothness = smoothness if smoothness is not None else cur[5]
+    try:
+        d = squircle_outline(new_x, new_y, new_width, new_height, new_radius, new_smoothness)
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+    element.set("d", d)
+    _store_squircle_spec(
+        element,
+        x=new_x,
+        y=new_y,
+        width=new_width,
+        height=new_height,
+        radius=new_radius,
+        smoothness=new_smoothness,
+    )
+    _merge_style_and_transform(doc, element, style, transform)
+    return _node_ref(element)
 
 
 def add_text(

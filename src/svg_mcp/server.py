@@ -878,6 +878,60 @@ def add_variable_width_path(
 
 @mcp.tool
 @emits_change
+def add_squircle(
+    *,
+    document_id: str | None = None,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    radius: float,
+    smoothness: float = 0.6,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Add a SQUIRCLE — a rounded rectangle with iOS/Figma corner smoothing (Apple's icon shape).
+
+    A plain rounded rect joins its straight edges to circular corner arcs abruptly; a squircle eases
+    into the arc with cubic Béziers, giving the continuous, organic corners of Apple app icons. Use
+    it for app-icon shapes, buttons, cards, and badges that want a softer silhouette than `add_rect`
+    with `rx`. The result is a single filled `<path>` stored parametrically, so `edit_squircle` can
+    re-derive it from these params.
+
+    Args:
+        x, y: Top-left corner of the bounding box, in user units.
+        width, height: Box size (both > 0).
+        radius: Corner radius (≥ 0); 0 yields a plain rectangle. Clamped per corner so a smoothed
+            corner never overruns half the shorter side.
+        smoothness: Corner-smoothing fraction in [0, 1] — 0 is a plain (circular-corner) rounded
+            rect, ~0.6 matches Apple's app-icon squircle, 1 is maximally smooth. Default 0.6.
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label.
+        style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
+        transform: Optional SVG transform string.
+
+    Returns:
+        The new node's {id, tag, name}.
+    """
+    return ops.add_squircle(
+        _doc(document_id),
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        radius=radius,
+        smoothness=smoothness,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
 def add_variable_width_paths(
     *,
     document_id: str | None = None,
@@ -1462,6 +1516,41 @@ def edit_variable_width_path(
         cap=cap,
         interpolation=interpolation,
         samples=samples,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_squircle(
+    *,
+    document_id: str | None = None,
+    target: str,
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    radius: float | None = None,
+    smoothness: float | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a parametric squircle by its PARAMETERS (mirrors add_squircle), re-deriving the path.
+
+    Changes only the params you pass and regenerates the outline, keeping the node's id/style/
+    z-order. Errors if `target` isn't a parametric squircle (not a squircle, or a raw `d` edit
+    demoted it) — then use `edit_path`. Read current params with `get_params`.
+    """
+    return ops.edit_squircle(
+        _doc(document_id),
+        target,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        radius=radius,
+        smoothness=smoothness,
         style=style.to_style_dict() if style else None,
         transform=transform,
     ).as_dict()

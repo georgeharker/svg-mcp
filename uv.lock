@@ -1262,7 +1262,7 @@ name = "pygobject"
 version = "3.56.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycairo" },
+    { name = "pycairo", marker = "python_full_version >= '3.15' or sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/da/61/978c5fbca34f10a90df362502fbb5a005637909e7b5a0e9212349ea9d010/pygobject-3.56.3.tar.gz", hash = "sha256:12760e4a0e3d04b6eb95e06f7a27e362c826d567ea613373a92c003b6c70d2d6", size = 1411853, upload-time = "2026-05-08T20:46:39.904Z" }
 
@@ -1729,7 +1729,7 @@ wheels = [
 
 [[package]]
 name = "svg-mcp"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },

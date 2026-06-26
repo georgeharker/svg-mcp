@@ -97,7 +97,8 @@ def edit_path(
 
 # Parametric-shape markers; a direct ``d`` edit invalidates them, so strip them — leaving an
 # honest plain path rather than parameters that disagree with the geometry. Covers Inkscape's
-# native star/arc attrs plus our own variable-width-path spec (``data-vwp``).
+# native star/arc attrs plus our own variable-width-path (``data-vwp``) and squircle
+# (``data-squircle``) specs.
 _PARAMETRIC_ATTRS = (
     "sodipodi:type",
     "sodipodi:sides",
@@ -117,6 +118,7 @@ _PARAMETRIC_ATTRS = (
     "inkscape:randomized",
     "inkscape:flatsided",
     "data-vwp",
+    "data-squircle",
 )
 
 

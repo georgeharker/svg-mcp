@@ -154,6 +154,42 @@ def test_variable_width_path_edit_roundtrip() -> None:
     assert isinstance(params, dict) and params["widths"] == [20.0, 20.0, 20.0]
 
 
+def test_squircle_edit_reparametrizes_and_get_params_roundtrips() -> None:
+    _, doc = DocumentStore().create(200, 200)
+    sq = ops.add_squircle(doc, x=10, y=10, width=120, height=80, radius=24, smoothness=0.6)
+    el = doc.resolve(sq.id)
+    assert el.TAG == "path" and (el.get("d") or "").startswith("M")
+    before = el.get("d")
+    ops.edit_squircle(doc, sq.id, radius=40, smoothness=1.0)  # partial edit
+    after = doc.resolve(sq.id)
+    assert after.get("d") != before  # path re-derived
+    p = get_params(doc, sq.id)
+    assert p["kind"] == "squircle" and p["parametric"] is True
+    params = p["params"]
+    assert isinstance(params, dict)
+    # unchanged params carry over; changed ones take effect
+    assert params["width"] == 120.0 and params["x"] == 10.0
+    assert params["radius"] == 40.0 and params["smoothness"] == 1.0
+
+
+def test_edit_squircle_asserts_when_not_a_squircle() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    path = ops.add_path(doc, d="M0,0 L10,0 L10,10 Z")
+    with pytest.raises(InvalidArgument):
+        ops.edit_squircle(doc, path.id, radius=5)
+
+
+def test_edit_path_demotes_squircle_to_plain_path() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    sq = ops.add_squircle(doc, x=0, y=0, width=60, height=60, radius=12)
+    ops.edit_path(doc, sq.id, "M0,0 L10,0 L10,10 Z")  # raw d edit strips the spec
+    assert doc.resolve(sq.id).get("data-squircle") is None
+    with pytest.raises(InvalidArgument):
+        ops.edit_squircle(doc, sq.id, radius=6)
+    p = get_params(doc, sq.id)
+    assert p["kind"] == "path" and p["parametric"] is False
+
+
 def test_resolve_prefers_shape_over_defs_via_edit_path() -> None:
     # End-to-end: a label shared by a gradient (defs) and a path resolves to the path.
     _, doc = DocumentStore().create(100, 100)

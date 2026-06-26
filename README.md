@@ -118,7 +118,7 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
 ## Status
 
-The full inkex catalog is mapped through to **107 MCP tools** (see
+The full inkex catalog is mapped through to **109 MCP tools** (see
 [`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md)), with ruff/mypy clean and the test suite green.
 
 - **Document model** (inkex-backed, multi-document with an active-document default): shapes,
@@ -133,6 +133,10 @@ The full inkex catalog is mapped through to **107 MCP tools** (see
   so swelling/tapering lines — calligraphy, engraving, brushes, tapered arrows — are expanded into
   a filled ribbon, with butt/round caps and optional **cubic** (Catmull-Rom) smoothing of both the
   path and the width.
+- **Squircles** (`add_squircle`/`edit_squircle`): rounded rectangles with iOS/Figma **corner
+  smoothing** — Apple's continuous-corner app-icon shape, where edges ease into the corner arc with
+  cubic Béziers instead of meeting it abruptly. A `smoothness` 0–1 param (0 = plain rounded rect,
+  ~0.6 = Apple-icon look, 1 = maximally smooth); stored parametrically for re-editing.
 - **Bulk constructors** (`add_rects`/`add_circles`/`add_lines`/`add_paths`/
   `add_variable_width_paths`): add many shapes in one call (one round-trip) — for procedural art,
   hatching/engraving fields, and data viz.

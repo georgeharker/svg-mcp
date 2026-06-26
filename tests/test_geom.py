@@ -7,9 +7,17 @@ import math
 import pytest
 
 from svg_mcp import ops
-from svg_mcp.geom import variable_width_outline
+from svg_mcp.geom import squircle_outline, variable_width_outline
 from svg_mcp.serialize import export_svg
 from svg_mcp.session import DocumentStore
+
+
+def _is_num(token: str) -> bool:
+    try:
+        float(token)
+    except ValueError:
+        return False
+    return True
 
 
 def _bbox(d: str) -> tuple[float, float, float, float]:
@@ -100,6 +108,34 @@ def test_op_creates_filled_path_node() -> None:
     assert ref.tag == "path" and ref.name == "brush"
     svg = export_svg(doc)
     assert "<path" in svg and "#101010" in svg
+
+
+def test_squircle_is_a_closed_path_spanning_the_box() -> None:
+    d = squircle_outline(10.0, 20.0, 120.0, 80.0, 24.0, smoothness=0.6)
+    assert d.startswith("M") and d.strip().endswith("Z")
+    # The outline touches each edge of the bounding box (corners are inset, edges are not).
+    nums = [float(t) for t in d.replace(",", " ").split() if _is_num(t)]
+    # M/L coordinates appear as absolute; the box edges 10/20/130/100 must be present.
+    assert any(math.isclose(v, 10.0, abs_tol=0.5) for v in nums)  # left x
+    assert any(math.isclose(v, 130.0, abs_tol=0.5) for v in nums)  # right x
+
+
+def test_squircle_smoothing_changes_the_outline() -> None:
+    plain = squircle_outline(0.0, 0.0, 100.0, 100.0, 30.0, smoothness=0.0)
+    smooth = squircle_outline(0.0, 0.0, 100.0, 100.0, 30.0, smoothness=1.0)
+    assert plain != smooth  # smoothing actually alters the geometry
+
+
+def test_squircle_radius_clamped_to_box() -> None:
+    # A huge radius can't overrun the box; the path must still be valid and finite.
+    d = squircle_outline(0.0, 0.0, 40.0, 40.0, 1000.0, smoothness=0.6)
+    assert d.startswith("M") and d.strip().endswith("Z")
+    assert "nan" not in d.lower() and "inf" not in d.lower()
+
+
+def test_squircle_rejects_nonpositive_size() -> None:
+    with pytest.raises(ValueError):
+        squircle_outline(0.0, 0.0, 0.0, 50.0, 10.0)
 
 
 def test_op_closed_sets_evenodd_fill_rule() -> None:
