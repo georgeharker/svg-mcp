@@ -59,7 +59,9 @@ def _scan_fonts() -> tuple[_Record, ...]:
         if not os.path.isdir(directory):
             continue
         for ext in ("*.ttc", "*.ttf", "*.otf"):
-            for path in glob.glob(os.path.join(directory, ext)):
+            # Recurse: Linux keeps fonts in nested dirs (e.g. /usr/share/fonts/truetype/dejavu),
+            # so a flat glob of /usr/share/fonts finds nothing. "**" also matches the dir itself.
+            for path in glob.glob(os.path.join(directory, "**", ext), recursive=True):
                 try:
                     faces = _faces(path)
                 except Exception:

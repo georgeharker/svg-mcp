@@ -20,7 +20,8 @@ jobs:
             build-essential python3-dev pkg-config \
             libxml2-dev libxslt1-dev \
             libglib2.0-dev libgirepository-2.0-dev gir1.2-girepository-2.0 \
-            libcairo2-dev
+            libcairo2-dev \
+            fonts-dejavu-core
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6

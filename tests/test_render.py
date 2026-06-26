@@ -50,7 +50,9 @@ def test_downscale_caps_long_edge() -> None:
 
 
 def test_resvg_smoke() -> None:
-    renderer = get_renderer("resvg")
+    # Force the CLI backend (not the "resvg" factory, which falls back to in-process resvg-py);
+    # this test is specifically the CLI smoke test and skips when the binary is absent.
+    renderer = get_renderer("resvg-cli")
     if not renderer.available():
         pytest.skip("resvg binary not installed")
     result = renderer.render(RenderRequest(svg=SAMPLE_SVG))
