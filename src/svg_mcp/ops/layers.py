@@ -5,7 +5,7 @@ from __future__ import annotations
 import inkex
 
 from ..model.document import Document
-from ..model.handles import NodeRef
+from ..model.handles import NodeRef, names_node
 
 
 def _ref(element: object) -> NodeRef:
@@ -53,6 +53,7 @@ def set_layer_state(
     return _ref(element)
 
 
+@names_node
 def rename_layer(doc: Document, target: str, name: str) -> NodeRef:
     """Rename a layer (sets ``inkscape:label``)."""
     element = doc.resolve(target)

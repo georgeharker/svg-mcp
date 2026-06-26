@@ -32,6 +32,53 @@ class Document:
         self.svg = svg
         # Named styles the AI defines, mirrored into a single <style> sheet in <defs>.
         self.styles: dict[str, dict[str, str]] = {}
+        # friendly-name -> set of node ids, built lazily from the tree then kept current by the
+        # naming ops, so a duplicate-name check is an O(1) dict hit instead of a full-tree scan.
+        self._names: dict[str, set[str]] | None = None
+
+    def _name_index(self) -> dict[str, set[str]]:
+        if self._names is None:
+            index: dict[str, set[str]] = {}
+            for node in self.svg.iter():
+                label = getattr(node, "label", None)
+                if label:
+                    index.setdefault(str(label), set()).add(str(node.get_id()))
+            self._names = index
+        return self._names
+
+    def register_name(self, name: str, node_id: str) -> None:
+        """Record that ``node_id`` now carries friendly name ``name`` (keeps the index current)."""
+        self._name_index().setdefault(name, set()).add(str(node_id))
+
+    def name_warning(self, name: str, exclude_id: str | None = None) -> str | None:
+        """A non-fatal advisory if ``name`` collides with another node's name (or id); else None.
+
+        Consults the maintained name index (no full scan) and verifies each candidate against the
+        live tree — stale entries (deleted/renamed elsewhere) are pruned, so they can't cause a
+        false positive.
+        """
+        conflicts: list[str] = []
+        candidates = self._name_index().get(name)
+        if candidates:
+            stale = {
+                nid
+                for nid in candidates
+                if nid != exclude_id
+                and str(getattr(self.svg.getElementById(nid), "label", "") or "") != name
+            }
+            candidates -= stale
+            conflicts.extend(nid for nid in candidates if nid != exclude_id)
+        # A name equal to an existing node's *id* is also ambiguous (resolve matches id first).
+        id_match = self.svg.getElementById(name)
+        if id_match is not None and str(id_match.get_id()) != exclude_id:
+            conflicts.append(name)
+        if not conflicts:
+            return None
+        others = ", ".join(sorted(set(conflicts))[:4])
+        return (
+            f"name {name!r} is already used by {others}; @name and name-based lookups are now "
+            "ambiguous (a renderable node is preferred). Reference this node by id, or rename it."
+        )
 
     def add_def(self, element: BaseElement, prefix: str, name: str | None = None) -> str:
         """Add a reusable resource to ``<defs>``, assign it an id, and return that id."""
@@ -39,6 +86,7 @@ class Document:
         element.set_id(self.new_id(prefix))
         if name is not None:
             element.label = name
+            self.register_name(name, str(element.get_id()))
         return str(element.get_id())
 
     def stylesheet(self) -> BaseElement:

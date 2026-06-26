@@ -8,7 +8,7 @@ import inkex
 
 from ..model.document import Document
 from ..model.errors import InvalidArgument
-from ..model.handles import NodeRef
+from ..model.handles import NodeRef, names_node
 from .paint import resolve_paint_refs
 
 Style = dict[str, str]
@@ -23,6 +23,7 @@ def _ref(element: object) -> NodeRef:
     )
 
 
+@names_node
 def set_name(doc: Document, target: str, name: str) -> NodeRef:
     element = doc.resolve(target)
     element.label = name
@@ -206,6 +207,7 @@ def lower_node(doc: Document, target: str) -> NodeRef:
     return _ref(element)
 
 
+@names_node
 def duplicate(
     doc: Document, target: str, into: str | None = None, style: Style | None = None
 ) -> NodeRef:

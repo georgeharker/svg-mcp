@@ -155,6 +155,53 @@ def test_variable_width_path_edit_roundtrip() -> None:
     assert isinstance(params, dict) and params["widths"] == [20.0, 20.0, 20.0]
 
 
+def test_name_clash_warns_on_create() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    a = ops.add_rect(doc, x=0, y=0, width=10, height=10, name="box")
+    b = ops.add_rect(doc, x=20, y=20, width=10, height=10, name="box")
+    assert a.warning is None  # first use is clean
+    assert b.warning is not None and "box" in b.warning  # the collision is flagged
+    assert "warning" in b.as_dict() and "warning" not in a.as_dict()
+
+
+def test_name_clash_warns_across_shape_and_resource() -> None:
+    # The @name footgun: a gradient and a shape sharing a name make `@name` ambiguous.
+    _, doc = DocumentStore().create(100, 100)
+    ops.define_linear_gradient(doc, x1=0, y1=0, x2=0, y2=1, stops=[(0.0, "#fff", 1.0)], name="body")
+    sq = ops.add_squircle(doc, x=0, y=0, width=50, height=50, radius=8, name="body")
+    assert sq.warning is not None and "body" in sq.warning
+
+
+def test_unique_name_has_no_warning() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    r = ops.add_rect(doc, x=0, y=0, width=10, height=10, name="solo")
+    assert r.warning is None and "warning" not in r.as_dict()
+
+
+def test_name_warning_self_heals_after_delete() -> None:
+    # A reused name is clean again once the prior holder is gone (index prunes stale ids).
+    _, doc = DocumentStore().create(100, 100)
+    ghost = ops.add_rect(doc, x=0, y=0, width=10, height=10, name="ghost")
+    ops.delete_node(doc, ghost.id)
+    again = ops.add_rect(doc, x=20, y=20, width=10, height=10, name="ghost")
+    assert again.warning is None
+
+
+def test_name_equal_to_existing_id_warns() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    a = ops.add_rect(doc, x=0, y=0, width=10, height=10)
+    b = ops.add_rect(doc, x=20, y=20, width=10, height=10, name=a.id)  # name collides with an id
+    assert b.warning is not None
+
+
+def test_set_name_clash_warns() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    ops.add_rect(doc, x=0, y=0, width=10, height=10, name="taken")
+    other = ops.add_rect(doc, x=20, y=20, width=10, height=10, name="free")
+    renamed = ops.set_name(doc, other.id, "taken")
+    assert renamed.warning is not None
+
+
 def test_duplicate_with_style_replaces_only_the_copy() -> None:
     _, doc = DocumentStore().create(100, 100)
     sq = ops.add_squircle(doc, x=10, y=10, width=40, height=40, radius=8, style={"fill": "#ff0000"})

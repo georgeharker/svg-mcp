@@ -15,7 +15,7 @@ from lxml import etree
 
 from ..model.document import Document
 from ..model.errors import InvalidArgument
-from ..model.handles import NodeRef
+from ..model.handles import NodeRef, names_node
 from .paint import resolve_paint_refs
 
 Style = dict[str, str]
@@ -323,6 +323,7 @@ def _reframe(element: BaseElement, dest_ct: inkex.Transform) -> None:
     element.transform = (-dest_ct) @ element.composed_transform()
 
 
+@names_node
 def boolean(doc: Document, *, op: str, targets: list[str], name: str | None = None) -> NodeRef:
     """Combine 2+ shapes with a boolean op, realized via clip/mask/compound path (no new deps).
 

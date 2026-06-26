@@ -28,7 +28,7 @@ from ..geom import (
 )
 from ..model.document import Document
 from ..model.errors import InvalidArgument
-from ..model.handles import NodeRef
+from ..model.handles import NodeRef, names_node
 from ..typeset import FontNotFound, glyph_run, is_bold, parse_font_size, text_on_path_d
 from .geometry import _merge_style_and_transform
 from .paint import resolve_paint_refs as _resolve_paint_refs
@@ -87,6 +87,7 @@ def _apply_style(element: BaseElement, style: Style | None) -> None:
         element.style = inkex.Style(style)
 
 
+@names_node
 def _place(
     doc: Document,
     element: BaseElement,
@@ -960,6 +961,7 @@ def create_layer(
     )
 
 
+@names_node
 def add_text_run(
     doc: Document,
     *,
@@ -1283,6 +1285,7 @@ def _outline_text_on_path(doc: Document, element: BaseElement, text_path: BaseEl
     return NodeRef(id=str(new_path.get_id()), tag=str(new_path.TAG), name=name)
 
 
+@names_node
 def text_to_path(doc: Document, target: str) -> NodeRef:
     """Outline a text node into path geometry (glyphs baked, font-independent).
 
