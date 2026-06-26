@@ -4,6 +4,11 @@
 
 # svg-mcp
 
+> 📖 Rendered documentation:
+> [docs.georgeharker.com/svg-mcp](https://docs.georgeharker.com/svg-mcp/) — with a
+> [gallery](https://docs.georgeharker.com/svg-mcp/main/docs/gallery.html) and
+> [cookbook](https://docs.georgeharker.com/svg-mcp/main/docs/cookbook.html).
+
 A [FastMCP](https://github.com/jlowin/fastmcp) server that exposes **structured, hierarchical
 SVG authoring** to an LLM — all primitives, gradients/patterns, paths, text-on-path, embedded
 raster, reusable styles — built around an **inkex-backed document model** the AI can navigate,
@@ -118,7 +123,7 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
 ## Status
 
-The full inkex catalog is mapped through to **116 MCP tools** (see
+The full inkex catalog is mapped through to **117 MCP tools** (see
 [`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md)), with ruff/mypy clean and the test suite green.
 
 - **Document model** (inkex-backed, multi-document with an active-document default): shapes,
@@ -145,6 +150,11 @@ The full inkex catalog is mapped through to **116 MCP tools** (see
   is `difference` of an outer and inner squircle). Operands may be composite groups. Note: the result
   is a render-time construct, not a re-editable merged path — true geometry-level booleans await an
   engine (lib2geom).
+- **Path offset** (`offset_path`): parallel-curve / inset by a signed distance — concentric rings,
+  even-width bezels, glow outlines, stroke-outlining. A squircle/pill/rounded-polygon is offset
+  EXACTLY by regenerating its params (and stays a re-editable parametric shape); anything else uses
+  an analytic cubic-Bézier offset (adaptive Tiller-Hanson + round/miter/bevel joins) into a new
+  path — approximate, no self-intersection trimming (a large inward offset can fold over itself).
 - **Bulk constructors** (`add_rects`/`add_circles`/`add_lines`/`add_paths`/
   `add_variable_width_paths`): add many shapes in one call (one round-trip) — for procedural art,
   hatching/engraving fields, and data viz.

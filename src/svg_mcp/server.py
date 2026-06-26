@@ -1817,6 +1817,53 @@ def edit_pill(
 
 @mcp.tool
 @emits_change
+def offset_path(
+    *,
+    document_id: str | None = None,
+    target: str,
+    distance: float,
+    join: Literal["round", "miter", "bevel"] = "round",
+    miter_limit: float = 4.0,
+    name: str | None = None,
+) -> dict[str, str | None]:
+    """Offset (parallel-curve / inset) a shape by `distance`, returning a NEW node beside it.
+
+    Positive `distance` grows a closed shape outward, negative insets it; an open path is offset to
+    one side. Great for concentric rings, even-width bezels (offset a squircle to get the inner
+    edge), glow/halo outlines, and outlining a stroke.
+
+    TWO PATHS, by target kind:
+      - A squircle / pill / rounded_polygon is offset EXACTLY by regenerating its parameters, and
+        the result is a new re-editable parametric shape of the SAME kind.
+      - Anything else is offset by the analytic cubic-Bézier method (adaptive Tiller-Hanson, with
+        `join` = round/miter/bevel at corners) into a new plain path. This is APPROXIMATE and does
+        NOT trim self-intersections, so a large inward offset on a high-curvature/concave region can
+        fold over itself — a true geometry engine would clean that up.
+
+    `distance` is in the target's local user units. The original is left untouched.
+
+    Args:
+        target: Node id or name to offset.
+        distance: Signed offset; >0 outward (grow), <0 inward (inset).
+        join: Corner join for the general path case — "round", "miter", or "bevel".
+        miter_limit: Max miter length as a multiple of |distance| before falling back to bevel.
+        name: Friendly label for the new node.
+
+    Returns:
+        The new node's {id, tag, name}.
+    """
+    return ops.offset_path(
+        _doc(document_id),
+        target,
+        distance,
+        join=join,
+        miter_limit=miter_limit,
+        name=name,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
 def reparent(
     *,
     document_id: str | None = None,
@@ -1875,18 +1922,27 @@ def ungroup(*, document_id: str | None = None, target: str) -> list[str]:
 @mcp.tool
 @emits_change
 def duplicate(
-    *, document_id: str | None = None, target: str, into: str | None = None
+    *,
+    document_id: str | None = None,
+    target: str,
+    into: str | None = None,
+    style: ShapeStyle | None = None,
 ) -> dict[str, str | None]:
     """Duplicate a node (and its descendants), producing a copy with a fresh id.
+
+    The deep copy keeps geometry, parametric specs (a copied squircle/star/… stays editable), and
+    transform; descendants get fresh ids automatically. Pass `style` to REPLACE the copy's top-level
+    style in the same call — e.g. clone a shape in a new color. Omit it to keep the original's.
 
     Args:
         target: Node id or name to copy.
         into: Optional parent id/name for the copy; otherwise it sits beside the original.
+        style: Optional replacement style for the copy (fill/stroke/…; paint refs allowed).
 
     Returns:
         The new copy's {id, tag, name}.
     """
-    return ops.duplicate(_doc(document_id), target, into).as_dict()
+    return ops.duplicate(_doc(document_id), target, into, _style(style)).as_dict()
 
 
 @mcp.tool

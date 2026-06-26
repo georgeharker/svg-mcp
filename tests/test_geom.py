@@ -8,6 +8,7 @@ import pytest
 
 from svg_mcp import ops
 from svg_mcp.geom import (
+    offset_cubic_subpath,
     rounded_polygon_outline,
     squircle_outline,
     superellipse_outline,
@@ -172,6 +173,54 @@ def test_superellipse_rejects_bad_params() -> None:
         superellipse_outline(0.0, 0.0, 0.0, 50.0, 4.0)
     with pytest.raises(ValueError):
         superellipse_outline(0.0, 0.0, 50.0, 50.0, 0.0)
+
+
+def _line_cubic(
+    a: tuple[float, float], b: tuple[float, float]
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]:
+    return (
+        a,
+        (a[0] + (b[0] - a[0]) / 3, a[1] + (b[1] - a[1]) / 3),
+        (a[0] + 2 * (b[0] - a[0]) / 3, a[1] + 2 * (b[1] - a[1]) / 3),
+        b,
+    )
+
+
+def _coords(d: str) -> list[float]:
+    cleaned = d.replace("M", " ").replace("C", " ").replace("L", " ").replace("A", " ")
+    cleaned = cleaned.replace("Z", " ").replace(",", " ")
+    return [float(t) for t in cleaned.split() if _is_num(t)]
+
+
+def test_offset_closed_square_grows_outward() -> None:
+    sq = [
+        _line_cubic((0.0, 0.0), (100.0, 0.0)),
+        _line_cubic((100.0, 0.0), (100.0, 100.0)),
+        _line_cubic((100.0, 100.0), (0.0, 100.0)),
+        _line_cubic((0.0, 100.0), (0.0, 0.0)),
+    ]
+    d = offset_cubic_subpath(sq, 10.0, closed=True, join="miter")
+    assert d.startswith("M") and d.strip().endswith("Z")
+    nums = _coords(d)
+    assert min(nums) < -5.0 and max(nums) > 105.0  # positive distance grows a closed shape
+
+
+def test_offset_open_path_is_not_closed() -> None:
+    seg = [_line_cubic((0.0, 0.0), (100.0, 0.0))]
+    d = offset_cubic_subpath(seg, 10.0, closed=False)
+    assert d.startswith("M") and "Z" not in d
+
+
+def test_offset_drops_degenerate_seam_segment() -> None:
+    # A zero-length closing segment (as a Z adds) must not leave an un-offset spur at the seam.
+    sq = [
+        _line_cubic((0.0, 0.0), (100.0, 0.0)),
+        _line_cubic((100.0, 0.0), (0.0, 0.0)),
+        ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)),  # degenerate
+    ]
+    d = offset_cubic_subpath(sq, 8.0, closed=True)
+    # the original seam point (0,0) must not appear un-offset in the output
+    assert " 0,0 " not in f" {d.replace('M', '').replace('L', '').replace('C', '')} "
 
 
 def test_op_closed_sets_evenodd_fill_rule() -> None:

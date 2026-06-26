@@ -206,11 +206,16 @@ def lower_node(doc: Document, target: str) -> NodeRef:
     return _ref(element)
 
 
-def duplicate(doc: Document, target: str, into: str | None = None) -> NodeRef:
-    """Duplicate a node (fresh id, name suffixed ``-copy``); optionally move it into a parent.
+def duplicate(
+    doc: Document, target: str, into: str | None = None, style: Style | None = None
+) -> NodeRef:
+    """Duplicate a node (fresh id, name suffixed ``-copy``); optionally move it and restyle it.
 
     The copy's friendly name gets a ``-copy`` suffix so it doesn't collide with the original
-    under name-based resolution.
+    under name-based resolution. The deep copy preserves geometry, parametric specs (so a copied
+    squircle/star/… stays editable), and transform. Pass ``style`` to REPLACE the copy's top-level
+    style in the same call (handy for cloning a shape in a different color); paint shorthands
+    (``@name``) and ``url(#id)`` refs are resolved. Omit ``style`` to keep the original's style.
     """
     element = doc.resolve(target)
     copy = element.duplicate()
@@ -219,4 +224,6 @@ def duplicate(doc: Document, target: str, into: str | None = None) -> NodeRef:
         copy.label = f"{label}-copy"
     if into is not None:
         doc.resolve_parent(into).add(copy)
+    if style is not None:
+        copy.style = inkex.Style(resolve_paint_refs(doc, style) or {})
     return _ref(copy)

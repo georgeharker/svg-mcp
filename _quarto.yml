@@ -1,0 +1,47 @@
+project:
+  type: website
+  render:
+    - index.md
+    - README.md        # README files must be listed explicitly; globs skip them
+    - DESIGN.md         # architecture / design rationale (linked from the README)
+    - INKEX_PRIMITIVES.md  # the inkex → MCP-tool catalogue (linked from the README)
+    - docs/*.md
+  # Ship the gallery screenshots so the docs' image links resolve on the site.
+  resources:
+    - docs/img/*.png
+
+# gfm_auto_identifiers makes heading anchors match GitHub's slugs, which the
+# docs' cross-links use. Keep pandoc's full markdown reader otherwise —
+# `from: gfm` breaks Quarto's navigation divs.
+from: markdown+gfm_auto_identifiers
+
+website:
+  title: "svg-mcp"
+  search: true
+  sidebar:
+    style: docked
+    tools:
+      - icon: github
+        href: https://github.com/georgeharker/svg-mcp
+        text: GitHub repository
+    contents:
+      - text: "Home"
+        href: index.md
+      - text: "Overview (README)"
+        href: README.md
+      - text: "Gallery"
+        href: docs/gallery.md
+      - text: "Cookbook"
+        href: docs/cookbook.md
+      - section: "Reference"
+        contents:
+          - text: "Tool catalogue (inkex map)"
+            href: INKEX_PRIMITIVES.md
+          - text: "Design & architecture"
+            href: DESIGN.md
+
+format:
+  html:
+    theme: pulse
+    toc: true
+    embed-resources: true

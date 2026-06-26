@@ -378,8 +378,12 @@ def boolean(doc: Document, *, op: str, targets: list[str], name: str | None = No
             for leaf in leaves:
                 _reframe(leaf, dest_ct)
             clip = define_clip(doc, content=[str(leaf.get_id()) for leaf in leaves])
-            if operand is not subject and operand.getparent() is not None:
-                operand.delete()  # drop the now-empty group shell
+            # If the operand was a GROUP, its leaves were moved into the clip — drop the empty
+            # shell. A single-shape operand IS its own leaf (now in the clip), so must NOT be
+            # deleted, or the clipPath ends up empty and the subject clips to nothing.
+            operand_is_shell = not (len(leaves) == 1 and leaves[0] is operand)
+            if operand_is_shell and operand.getparent() is not None:
+                operand.delete()
             apply_clip(doc, str(result.get_id()), clip)
         if name is not None:
             result.label = name

@@ -381,3 +381,185 @@ def superellipse_outline(
     head = f"M {n(pts[0][0])} {n(pts[0][1])}"
     body = " ".join(f"L {n(x)} {n(y)}" for x, y in pts[1:])
     return f"{head} {body} Z"
+
+
+# --- path offsetting (parallel curve) --------------------------------------
+#
+# Offset a cubic Bézier path by a signed distance along its normals — the parallel-curve / inset
+# operation (concentric rings, even-width bezels, stroke outlining). A cubic's exact offset is not
+# itself a cubic (the unit normal carries a √ term), so we approximate: adaptively subdivide each
+# segment where it turns, offset each gentle piece with Tiller-Hanson (offset the control legs and
+# re-intersect), and stitch segments with miter/round/bevel joins at corners. This is approximate
+# and does NOT trim self-intersections, so a large inward offset on a high-curvature/concave region
+# can fold over itself (a true geometry engine would clean that up).
+
+Cubic = tuple[Point, Point, Point, Point]
+
+
+def _bez_deriv(c: Cubic, t: float) -> Point:
+    mt = 1.0 - t
+    x = (
+        3 * mt * mt * (c[1][0] - c[0][0])
+        + 6 * mt * t * (c[2][0] - c[1][0])
+        + 3 * t * t * (c[3][0] - c[2][0])
+    )
+    y = (
+        3 * mt * mt * (c[1][1] - c[0][1])
+        + 6 * mt * t * (c[2][1] - c[1][1])
+        + 3 * t * t * (c[3][1] - c[2][1])
+    )
+    return (x, y)
+
+
+def _bez_tangent(c: Cubic, t: float) -> Point:
+    d = _bez_deriv(c, t)
+    if math.hypot(*d) < 1e-9:  # degenerate control leg — nudge t inward to recover a direction
+        d = _bez_deriv(c, t + 1e-3 if t < 0.5 else t - 1e-3)
+    return _unit(d[0], d[1])
+
+
+def _left_normal(tangent: Point) -> Point:
+    return (-tangent[1], tangent[0])
+
+
+def _split_cubic(c: Cubic, t: float = 0.5) -> tuple[Cubic, Cubic]:
+    p0, p1, p2, p3 = c
+
+    def lerp(a: Point, b: Point) -> Point:
+        return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+    a, b, cc = lerp(p0, p1), lerp(p1, p2), lerp(p2, p3)
+    d, e = lerp(a, b), lerp(b, cc)
+    f = lerp(d, e)
+    return (p0, a, d, f), (f, e, cc, p3)
+
+
+def _line_intersect(a: Point, b: Point, c: Point, d: Point) -> Point | None:
+    r = (b[0] - a[0], b[1] - a[1])
+    s = (d[0] - c[0], d[1] - c[1])
+    den = r[0] * s[1] - r[1] * s[0]
+    if abs(den) < 1e-9:
+        return None
+    t = ((c[0] - a[0]) * s[1] - (c[1] - a[1]) * s[0]) / den
+    return (a[0] + t * r[0], a[1] + t * r[1])
+
+
+def _offset_leg(a: Point, b: Point, dist: float) -> tuple[Point, Point] | None:
+    if math.hypot(b[0] - a[0], b[1] - a[1]) < 1e-7:
+        return None
+    nx, ny = _left_normal(_unit(b[0] - a[0], b[1] - a[1]))
+    return ((a[0] + dist * nx, a[1] + dist * ny), (b[0] + dist * nx, b[1] + dist * ny))
+
+
+def _offset_cubic_th(c: Cubic, dist: float) -> Cubic:
+    """Tiller-Hanson: offset each control leg by ``dist`` and re-intersect for new controls."""
+    p0, p1, p2, p3 = c
+    n0, n3 = _left_normal(_bez_tangent(c, 0.0)), _left_normal(_bez_tangent(c, 1.0))
+    q0 = (p0[0] + dist * n0[0], p0[1] + dist * n0[1])
+    q3 = (p3[0] + dist * n3[0], p3[1] + dist * n3[1])
+    l0, l1, l2 = _offset_leg(p0, p1, dist), _offset_leg(p1, p2, dist), _offset_leg(p2, p3, dist)
+    q1 = _line_intersect(*l0, *l1) if (l0 and l1) else None
+    q2 = _line_intersect(*l1, *l2) if (l1 and l2) else None
+    if q1 is None:
+        q1 = (q0[0] + (q3[0] - q0[0]) / 3.0, q0[1] + (q3[1] - q0[1]) / 3.0)
+    if q2 is None:
+        q2 = (q0[0] + 2.0 * (q3[0] - q0[0]) / 3.0, q0[1] + 2.0 * (q3[1] - q0[1]) / 3.0)
+    return (q0, q1, q2, q3)
+
+
+def _turn_angle(a: Point, b: Point) -> float:
+    """Signed turn from unit tangent ``a`` to unit tangent ``b`` (radians, +ve = left)."""
+    return math.atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1])
+
+
+def _offset_one_cubic(c: Cubic, dist: float, depth: int = 0) -> list[Cubic]:
+    """Adaptively subdivide where the segment turns, then Tiller-Hanson each gentle piece."""
+    if depth < 8 and abs(_turn_angle(_bez_tangent(c, 0.0), _bez_tangent(c, 1.0))) > math.radians(8):
+        first, second = _split_cubic(c)
+        return _offset_one_cubic(first, dist, depth + 1) + _offset_one_cubic(
+            second, dist, depth + 1
+        )
+    return [_offset_cubic_th(c, dist)]
+
+
+def _signed_area(knots: list[Point]) -> float:
+    total = 0.0
+    n = len(knots)
+    for i in range(n):
+        x0, y0 = knots[i]
+        x1, y1 = knots[(i + 1) % n]
+        total += x0 * y1 - x1 * y0
+    return total / 2.0
+
+
+def offset_cubic_subpath(
+    segs: list[Cubic],
+    distance: float,
+    *,
+    closed: bool,
+    join: str = "round",
+    miter_limit: float = 4.0,
+) -> str:
+    """Offset one cubic subpath by signed ``distance`` (>0 grows a closed shape; pick a side open).
+
+    ``segs`` are consecutive cubic segments (4 control points each). Returns the offset subpath's
+    ``d`` fragment. Joins (round/miter/bevel) are inserted only at genuine corners on the convex
+    side; smooth segment boundaries are bridged seamlessly.
+    """
+    # Drop zero-length segments (e.g. the degenerate cubic a closing ``Z`` adds at the seam): their
+    # tangent is undefined, so they'd emit an un-offset point and leave a spur.
+    segs = [
+        s
+        for s in segs
+        if math.hypot(s[1][0] - s[0][0], s[1][1] - s[0][1])
+        + math.hypot(s[2][0] - s[1][0], s[2][1] - s[1][1])
+        + math.hypot(s[3][0] - s[2][0], s[3][1] - s[2][1])
+        > 1e-6
+    ]
+    if not segs:
+        return ""
+    sign = distance
+    if closed and _signed_area([s[0] for s in segs]) > 0:  # SVG y-down: +area = clockwise
+        sign = -distance
+    offsets = [_offset_one_cubic(s, sign) for s in segs]
+
+    parts = [f"M {_fmt(offsets[0][0][0])}"]
+    n = len(segs)
+    for i, offs in enumerate(offsets):
+        for oc in offs:
+            parts.append(f"C {_fmt(oc[1])} {_fmt(oc[2])} {_fmt(oc[3])}")
+        if i == n - 1 and not closed:
+            break
+        last = offs[-1][3]
+        nxt = offsets[(i + 1) % n][0][0]
+        t_in = _bez_tangent(segs[i], 1.0)
+        t_out = _bez_tangent(segs[(i + 1) % n], 0.0)
+        turn = _turn_angle(t_in, t_out)
+        if abs(turn) < math.radians(1.0):  # smooth — weld with a tiny line only if needed
+            if math.hypot(nxt[0] - last[0], nxt[1] - last[1]) > 1e-3:
+                parts.append(f"L {_fmt(nxt)}")
+        elif sign * turn < 0:  # convex/outer corner — span the gap with a join
+            if join == "round":
+                sweep = 0 if turn > 0 else 1
+                parts.append(f"A {abs(sign):.3f} {abs(sign):.3f} 0 0 {sweep} {_fmt(nxt)}")
+            elif join == "miter":
+                ip = _line_intersect(
+                    last,
+                    (last[0] + t_in[0], last[1] + t_in[1]),
+                    nxt,
+                    (nxt[0] - t_out[0], nxt[1] - t_out[1]),
+                )
+                if (
+                    ip is not None
+                    and math.hypot(ip[0] - last[0], ip[1] - last[1]) <= abs(sign) * miter_limit
+                ):
+                    parts.append(f"L {_fmt(ip)} L {_fmt(nxt)}")
+                else:
+                    parts.append(f"L {_fmt(nxt)}")  # exceeds miter limit → bevel
+            else:  # bevel
+                parts.append(f"L {_fmt(nxt)}")
+        else:  # concave/inner corner — offsets overlap; connect straight (may self-intersect)
+            parts.append(f"L {_fmt(nxt)}")
+    if closed:
+        parts.append("Z")
+    return " ".join(parts)

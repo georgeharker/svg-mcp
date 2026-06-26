@@ -155,6 +155,66 @@ def test_variable_width_path_edit_roundtrip() -> None:
     assert isinstance(params, dict) and params["widths"] == [20.0, 20.0, 20.0]
 
 
+def test_duplicate_with_style_replaces_only_the_copy() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    sq = ops.add_squircle(doc, x=10, y=10, width=40, height=40, radius=8, style={"fill": "#ff0000"})
+    copy = ops.duplicate(doc, sq.id, style={"fill": "#0000ff"})
+    assert copy.id != sq.id
+    assert "0000ff" in str(doc.resolve(copy.id).style)  # copy recolored
+    assert "ff0000" in str(doc.resolve(sq.id).style)  # original untouched
+    assert get_params(doc, copy.id)["kind"] == "squircle"  # still a parametric copy
+
+
+def test_offset_path_squircle_stays_parametric_and_grows() -> None:
+    # Tier A: offsetting a squircle regenerates its params exactly and stays a re-editable squircle.
+    _, doc = DocumentStore().create(300, 300)
+    sq = ops.add_squircle(doc, x=80, y=80, width=140, height=140, radius=30, smoothness=0.6)
+    out = ops.offset_path(doc, sq.id, 20, name="ring")
+    p = get_params(doc, out.id)
+    assert p["kind"] == "squircle" and p["parametric"] is True
+    params = p["params"]
+    assert isinstance(params, dict)
+    assert params["x"] == 60.0 and params["width"] == 180.0 and params["radius"] == 50.0
+    assert out.id != sq.id  # a new node beside the original
+    orig = get_params(doc, sq.id)["params"]
+    assert isinstance(orig, dict) and orig["width"] == 140.0  # original untouched
+
+
+def test_offset_path_pill_and_rounded_polygon_parametric() -> None:
+    _, doc = DocumentStore().create(300, 300)
+    pill = ops.add_pill(doc, x=40, y=120, width=200, height=60)
+    pout = ops.offset_path(doc, pill.id, 10)
+    pp = get_params(doc, pout.id)
+    assert pp["kind"] == "pill"
+    assert isinstance(pp["params"], dict) and pp["params"]["width"] == 220.0
+    rp = ops.add_rounded_polygon(doc, cx=150, cy=150, radius=80, corner_radius=20, sides=6)
+    rout = ops.offset_path(doc, rp.id, 12)
+    rpp = get_params(doc, rout.id)
+    assert rpp["kind"] == "rounded_polygon"
+    assert isinstance(rpp["params"], dict) and rpp["params"]["corner_radius"] == 32.0
+
+
+def test_offset_path_plain_shape_returns_offset_path() -> None:
+    # Tier B: a non-parametric shape is offset into a new plain path (analytic Bézier offset).
+    _, doc = DocumentStore().create(300, 300)
+    circle = ops.add_circle(doc, cx=150, cy=150, r=80)
+    out = ops.offset_path(doc, circle.id, 20)
+    el = doc.resolve(out.id)
+    assert el.TAG == "path"
+    bbox = el.bounding_box()
+    assert bbox is not None
+    assert abs(bbox.width - 200) < 8 and abs(bbox.height - 200) < 8  # r≈100 → ~200 across
+
+
+def test_offset_path_inset_shrinks() -> None:
+    _, doc = DocumentStore().create(300, 300)
+    circle = ops.add_circle(doc, cx=150, cy=150, r=80)
+    out = ops.offset_path(doc, circle.id, -20)
+    bbox = doc.resolve(out.id).bounding_box()
+    assert bbox is not None
+    assert abs(bbox.width - 120) < 8  # r≈60 → ~120 across
+
+
 def test_squircle_edit_reparametrizes_and_get_params_roundtrips() -> None:
     _, doc = DocumentStore().create(200, 200)
     sq = ops.add_squircle(doc, x=10, y=10, width=120, height=80, radius=24, smoothness=0.6)
@@ -251,6 +311,10 @@ def test_boolean_intersection_clips_the_subject() -> None:
     b = ops.add_circle(doc, cx=60, cy=60, r=40)
     ops.boolean(doc, op="intersection", targets=[a.id, b.id])
     assert doc.resolve(a.id).get("clip-path") is not None
+    # the clipPath must actually CONTAIN the operand — a single-shape operand must not be deleted
+    # out of it (regression: it clipped to an empty path → blank).
+    svg = export_svg(doc)
+    assert "<clipPath" in svg and "<circle" in svg.split("<clipPath", 1)[1]
 
 
 def test_boolean_exclusion_merges_to_evenodd_path() -> None:

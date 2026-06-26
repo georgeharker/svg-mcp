@@ -19,6 +19,8 @@ import inkex
 from inkex import BaseElement
 
 from ..geom import (
+    Cubic,
+    offset_cubic_subpath,
     rounded_polygon_outline,
     squircle_outline,
     superellipse_outline,
@@ -774,6 +776,137 @@ def edit_pill(
     )
     _merge_style_and_transform(doc, element, style, transform)
     return _node_ref(element)
+
+
+def _sibling_context(doc: Document, element: BaseElement) -> tuple[str | None, Style]:
+    """Parent id (None = root) and a copy of the style, for placing an offset beside ``element``."""
+    parent = element.getparent()
+    parent_id = (
+        str(parent.get_id())
+        if parent is not None and not isinstance(parent, inkex.SvgDocumentElement)
+        else None
+    )
+    style = {str(k): str(v) for k, v in element.style.items()}
+    return parent_id, style
+
+
+def _offset_parametric(
+    doc: Document,
+    element: BaseElement,
+    distance: float,
+    parent: str | None,
+    style: Style,
+    name: str | None,
+) -> NodeRef | None:
+    """Tier A — exact offset of a squircle/pill/rounded-polygon by regenerating its params.
+
+    Returns a new parametric shape of the SAME kind (so it stays editable), or None if ``element``
+    isn't one of those (then the caller falls back to the general path offset).
+    """
+    raw = element.get(_SQUIRCLE_ATTR)
+    if raw is not None:
+        s = json.loads(raw)
+        return add_squircle(
+            doc,
+            x=float(s["x"]) - distance,
+            y=float(s["y"]) - distance,
+            width=float(s["width"]) + 2 * distance,
+            height=float(s["height"]) + 2 * distance,
+            radius=max(0.0, float(s["radius"]) + distance),
+            smoothness=float(s["smoothness"]),
+            parent=parent,
+            name=name,
+            style=style,
+        )
+    raw = element.get(_PILL_ATTR)
+    if raw is not None:
+        s = json.loads(raw)
+        return add_pill(
+            doc,
+            x=float(s["x"]) - distance,
+            y=float(s["y"]) - distance,
+            width=float(s["width"]) + 2 * distance,
+            height=float(s["height"]) + 2 * distance,
+            smoothness=float(s["smoothness"]),
+            parent=parent,
+            name=name,
+            style=style,
+        )
+    raw = element.get(_ROUNDED_POLYGON_ATTR)
+    if raw is not None:
+        s = json.loads(raw)
+        sides = int(s["sides"])
+        # Offsetting a regular polygon moves each edge out by `distance`: the apothem grows by
+        # `distance`, so the circumradius grows by distance / cos(pi/sides); the fillet by distance.
+        grow = distance / math.cos(math.pi / sides)
+        return add_rounded_polygon(
+            doc,
+            cx=float(s["cx"]),
+            cy=float(s["cy"]),
+            radius=max(0.0, float(s["radius"]) + grow),
+            sides=sides,
+            corner_radius=max(0.0, float(s["corner_radius"]) + distance),
+            smoothness=float(s["smoothness"]),
+            start_angle=float(s["start_angle"]),
+            parent=parent,
+            name=name,
+            style=style,
+        )
+    return None
+
+
+def _subpath_segments(sub: list[list[list[float]]]) -> tuple[list[Cubic], bool]:
+    def pt(p: list[float]) -> Point:
+        return (float(p[0]), float(p[1]))
+
+    segs: list[Cubic] = []
+    for i in range(len(sub) - 1):
+        segs.append((pt(sub[i][1]), pt(sub[i][2]), pt(sub[i + 1][0]), pt(sub[i + 1][1])))
+    closed = len(sub) > 2 and math.dist(sub[0][1], sub[-1][1]) < 1e-6
+    return segs, closed
+
+
+def offset_path(
+    doc: Document,
+    target: str,
+    distance: float,
+    *,
+    join: str = "round",
+    miter_limit: float = 4.0,
+    name: str | None = None,
+) -> NodeRef:
+    """Offset (parallel-curve / inset) a shape by ``distance``, returning a NEW node beside it.
+
+    Positive ``distance`` grows a closed shape outward, negative insets it; for an open path it
+    offsets to one side. A squircle/pill/rounded-polygon is offset EXACTLY by regenerating its
+    parameters (and stays a re-editable parametric shape of the same kind). Anything else is offset
+    by the analytic cubic-Bézier method (adaptive Tiller-Hanson + ``join`` corners) into a new plain
+    path — APPROXIMATE, with no self-intersection trimming, so a large inward offset on a
+    high-curvature/concave region can fold over itself. ``distance`` is in the target's local units.
+    """
+    element = doc.resolve(target)
+    parent, style = _sibling_context(doc, element)
+    parametric = _offset_parametric(doc, element, distance, parent, style, name)
+    if parametric is not None:
+        return parametric
+    superpath = element.get_path().to_superpath()
+    fragments = []
+    for sub in superpath:
+        segs, closed = _subpath_segments(sub)
+        if segs:
+            fragments.append(
+                offset_cubic_subpath(
+                    segs, distance, closed=closed, join=join, miter_limit=miter_limit
+                )
+            )
+    if not fragments:
+        raise InvalidArgument(f"{target!r} has no offsettable path geometry")
+    new_element = inkex.PathElement.new(" ".join(fragments))
+    if element.transform:
+        new_element.transform = inkex.Transform(element.transform)
+    return _place(
+        doc, new_element, prefix="path", parent=parent, name=name, style=style, transform=None
+    )
 
 
 def add_text(
