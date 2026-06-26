@@ -251,6 +251,187 @@ def clear_mask(doc: Document, target: str) -> NodeRef:
     return _ref(element)
 
 
+# --- boolean operations (render-time, via clip/mask/compound path) ----------
+#
+# SVG has no native path booleans (Inkscape uses lib2geom in C++). Until a geometry engine is
+# wired in, we realize the *visual* result with constructs that need no new dependency:
+#   union        → group the inputs
+#   intersection → clip the subject by each operand (clipPath)
+#   difference   → mask the subject with the operands painted black (luminance mask)
+#   exclusion    → merge all inputs into one compound path with fill-rule:evenodd (exact XOR)
+# These produce a render construct, NOT a single re-editable merged `d`; a true geometry-level
+# merge (offset-able, measurable as one path) awaits the engine. Assumes the targets share a
+# coordinate space (siblings without conflicting ancestor transforms) — the common authoring case.
+
+_BOOLEAN_OPS = ("union", "difference", "intersection", "exclusion")
+
+
+def _new_in_tree(doc: Document, element: BaseElement, anchor: BaseElement, prefix: str) -> None:
+    """Insert ``element`` into the tree just before ``anchor`` and give it a fresh id."""
+    anchor.addprevious(element)
+    element.set_id(doc.new_id(prefix))
+
+
+def _union_bbox(elements: list[BaseElement]) -> inkex.BoundingBox | None:
+    box: inkex.BoundingBox | None = None
+    for el in elements:
+        try:
+            current = el.bounding_box()
+        except Exception:
+            current = None
+        if current is not None:
+            box = current if box is None else box + current
+    return box
+
+
+def _leaf_shapes(element: BaseElement) -> list[BaseElement]:
+    """Flatten a (possibly composite) node to its renderable shape leaves.
+
+    A group/layer/anchor/switch is descended into; anything else (a path/basic shape/text) is a
+    leaf. Lets boolean operands be composite groups, not just single shapes.
+    """
+    if isinstance(element, inkex.Group | inkex.Layer) or str(element.TAG).rsplit("}", 1)[-1] in (
+        "a",
+        "switch",
+    ):
+        leaves: list[BaseElement] = []
+        for child in element:
+            if isinstance(child, BaseElement):
+                leaves.extend(_leaf_shapes(child))
+        return leaves
+    return [element]
+
+
+def _recolor_subtree(element: BaseElement, fill: str) -> None:
+    """Force ``fill`` (and drop stroke) on every shape leaf so a whole subtree reads as one tone.
+
+    Needed for mask-based ops: a group operand's children keep their own fills otherwise, so the
+    luminance mask wouldn't treat the group as a single solid region.
+    """
+    for leaf in _leaf_shapes(element):
+        leaf.style = inkex.Style({**dict(leaf.style), "fill": fill, "stroke": "none"})
+
+
+def _reframe(element: BaseElement, dest_ct: inkex.Transform) -> None:
+    """Rewrite ``element.transform`` so it keeps its WORLD position after moving into a new frame.
+
+    ``dest_ct`` is the composed transform that maps the destination content space to world (e.g. for
+    a clipPath/mask, the composed transform of the element that references it; for a sibling, its
+    parent's composed transform). Same math as ``reparent``'s ``keep_world_position`` — without it,
+    a flattened operand under any ancestor/subject transform would be doubly transformed.
+    """
+    element.transform = (-dest_ct) @ element.composed_transform()
+
+
+def boolean(doc: Document, *, op: str, targets: list[str], name: str | None = None) -> NodeRef:
+    """Combine 2+ shapes with a boolean op, realized via clip/mask/compound path (no new deps).
+
+    The FIRST target is the subject; the rest are operands. ``union`` groups them; ``intersection``
+    clips the subject by the operands; ``difference`` subtracts the operands from the subject via a
+    luminance mask; ``exclusion`` (XOR) merges everything into one fill-rule:evenodd compound path.
+
+    WARNINGS — this is not a true geometry boolean, and it mutates/consumes the inputs:
+      * The result is a RENDER-TIME construct (a clip/mask, or a merged compound path), NOT a single
+        re-editable merged outline. You cannot then ``offset``/``get_bbox`` it as one path, and deep
+        boolean chains get unwieldy. A real geometry-level merge awaits an engine (lib2geom).
+      * Operands are CONSUMED: intersection moves them into a ``<clipPath>``, difference recolors
+        them solid black and moves them into a ``<mask>``, exclusion bakes them into the compound
+        path and deletes them. They no longer exist as independent nodes afterward.
+      * A composite GROUP operand is FLATTENED to its shape leaves (the empty shell is removed) for
+        intersection/exclusion, and RECOLORED solid black throughout for difference — so any
+        per-child fills/strokes in that group are discarded. A group works fine as the *subject*.
+      * Assumes targets share a coordinate space (siblings without conflicting ancestor transforms);
+        operand leaf transforms are baked to world coordinates, but a transformed subject can still
+        misalign the clip/mask.
+    """
+    if op not in _BOOLEAN_OPS:
+        raise InvalidArgument(f"unknown boolean op {op!r}; choices: {list(_BOOLEAN_OPS)}")
+    if len(targets) < 2:
+        raise InvalidArgument("boolean needs at least 2 targets")
+    elements = [doc.resolve(t) for t in targets]
+    for el in elements:
+        _ensure_renderable(el, f"boolean {op}")
+    subject, operands = elements[0], elements[1:]
+
+    if op == "union":
+        group = inkex.Group.new(name or "")
+        _new_in_tree(doc, group, subject, "g")
+        for el in elements:
+            group.add(el)
+        if name is not None:
+            group.label = name
+        return _ref(group)
+
+    if op == "intersection":
+        result = subject
+        for operand in operands:
+            if result.get("clip-path") is not None:  # one clip-path per node — nest in a group
+                group = inkex.Group.new("")
+                _new_in_tree(doc, group, result, "g")
+                group.add(result)
+                result = group
+            # The clip is applied to `result`; its content space maps to world by result's composed
+            # transform. A clipPath can't legally hold a <g>, so flatten a group operand to its
+            # shape leaves (their union clips the same region), reframed to keep their world place.
+            dest_ct = result.composed_transform()
+            leaves = _leaf_shapes(operand)
+            for leaf in leaves:
+                _reframe(leaf, dest_ct)
+            clip = define_clip(doc, content=[str(leaf.get_id()) for leaf in leaves])
+            if operand is not subject and operand.getparent() is not None:
+                operand.delete()  # drop the now-empty group shell
+            apply_clip(doc, str(result.get_id()), clip)
+        if name is not None:
+            result.label = name
+        return _ref(result)
+
+    if op == "difference":
+        box = _union_bbox(elements)  # world coords
+        if box is None:
+            raise InvalidArgument("difference needs targets with a measurable bounding box")
+        # The mask content space maps to world by the subject's composed transform, so express the
+        # world-coord backdrop and reframe each operand into that space.
+        subj_ct = subject.composed_transform()
+        pad = 2.0
+        backdrop = inkex.Rectangle()
+        backdrop.set("x", str(box.left - pad))
+        backdrop.set("y", str(box.top - pad))
+        backdrop.set("width", str(box.width + 2 * pad))
+        backdrop.set("height", str(box.height + 2 * pad))
+        backdrop.style = inkex.Style({"fill": "#ffffff"})
+        backdrop.transform = -subj_ct  # world bbox → subject's mask frame
+        _new_in_tree(doc, backdrop, subject, "rect")
+        content = [str(backdrop.get_id())]
+        for operand in operands:  # paint operands black (recursively) so they subtract
+            _reframe(operand, subj_ct)
+            _recolor_subtree(operand, "#000000")
+            content.append(str(operand.get_id()))
+        mask = define_mask(doc, content=content)
+        apply_mask(doc, str(subject.get_id()), mask)
+        if name is not None:
+            subject.label = name
+        return _ref(subject)
+
+    # exclusion (XOR): merge every input's outline into one evenodd compound path. Groups are
+    # flattened to their shape leaves; each leaf is expressed in the result path's frame (it lands
+    # as a sibling of the subject) so nested-group transforms are concatenated correctly.
+    parent = subject.getparent()
+    dest_ct = parent.composed_transform() if parent is not None else inkex.Transform()
+    combined: list[str] = []
+    for el in elements:
+        for leaf in _leaf_shapes(el):
+            rel = (-dest_ct) @ leaf.composed_transform()
+            combined.append(str(leaf.get_path().transform(rel)))
+    result_path = inkex.PathElement.new(" ".join(combined))
+    result_path.style = inkex.Style({**dict(subject.style), "fill-rule": "evenodd"})
+    _new_in_tree(doc, result_path, subject, "path")
+    if name is not None:
+        result_path.label = name
+    for el in elements:
+        el.delete()
+    return _ref(result_path)
+
+
 # --- filters ---------------------------------------------------------------
 
 

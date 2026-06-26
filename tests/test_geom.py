@@ -7,7 +7,12 @@ import math
 import pytest
 
 from svg_mcp import ops
-from svg_mcp.geom import squircle_outline, variable_width_outline
+from svg_mcp.geom import (
+    rounded_polygon_outline,
+    squircle_outline,
+    superellipse_outline,
+    variable_width_outline,
+)
 from svg_mcp.serialize import export_svg
 from svg_mcp.session import DocumentStore
 
@@ -136,6 +141,37 @@ def test_squircle_radius_clamped_to_box() -> None:
 def test_squircle_rejects_nonpositive_size() -> None:
     with pytest.raises(ValueError):
         squircle_outline(0.0, 0.0, 0.0, 50.0, 10.0)
+
+
+def test_rounded_polygon_is_closed_with_smoothed_corners() -> None:
+    d = rounded_polygon_outline(60.0, 60.0, 50.0, 6, 14.0, smoothness=0.6)
+    assert d.startswith("M") and d.strip().endswith("Z")
+    assert "C" in d  # corners are cubic Béziers, not sharp
+
+
+def test_rounded_polygon_sides_change_vertex_count() -> None:
+    tri = rounded_polygon_outline(50.0, 50.0, 40.0, 3, 10.0)
+    hexa = rounded_polygon_outline(50.0, 50.0, 40.0, 6, 10.0)
+    assert hexa.count("C") == 2 * tri.count("C")  # one corner cubic per side
+
+
+def test_rounded_polygon_rejects_too_few_sides() -> None:
+    with pytest.raises(ValueError):
+        rounded_polygon_outline(0.0, 0.0, 10.0, 2, 1.0)
+
+
+def test_superellipse_exponent_morphs_silhouette() -> None:
+    diamond = superellipse_outline(0.0, 0.0, 50.0, 50.0, 1.0, samples=64)
+    squircle = superellipse_outline(0.0, 0.0, 50.0, 50.0, 4.0, samples=64)
+    assert diamond.startswith("M") and diamond.strip().endswith("Z")
+    assert diamond != squircle  # the exponent changes the curve
+
+
+def test_superellipse_rejects_bad_params() -> None:
+    with pytest.raises(ValueError):
+        superellipse_outline(0.0, 0.0, 0.0, 50.0, 4.0)
+    with pytest.raises(ValueError):
+        superellipse_outline(0.0, 0.0, 50.0, 50.0, 0.0)
 
 
 def test_op_closed_sets_evenodd_fill_rule() -> None:

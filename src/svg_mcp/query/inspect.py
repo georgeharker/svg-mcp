@@ -190,6 +190,18 @@ _BASIC_GEOMETRY: dict[str, tuple[str, ...]] = {
     "line": ("x1", "y1", "x2", "y2"),
 }
 
+# Custom generated primitives (ops.construct): (data-* attr, reported kind, param keys to read).
+_PARAM_SHAPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("data-squircle", "squircle", ("x", "y", "width", "height", "radius", "smoothness")),
+    (
+        "data-rounded-polygon",
+        "rounded_polygon",
+        ("cx", "cy", "radius", "sides", "corner_radius", "smoothness", "start_angle"),
+    ),
+    ("data-superellipse", "superellipse", ("cx", "cy", "rx", "ry", "exponent", "samples")),
+    ("data-pill", "pill", ("x", "y", "width", "height", "smoothness")),
+)
+
 
 def _read_params(element: inkex.BaseElement) -> tuple[str, bool, ShapeParams]:
     """Dispatch a node to its (kind, parametric, params) — robust to missing/malformed markers."""
@@ -239,22 +251,14 @@ def _read_params(element: inkex.BaseElement) -> tuple[str, bool, ShapeParams]:
             )
         except (ValueError, TypeError, KeyError):
             pass  # corrupt spec → fall through and report it as a plain path
-    squircle = element.get("data-squircle")
-    if squircle is not None:
+    # Custom generated primitives stash their params in a data-* JSON attr (see ops.construct).
+    for attr, kind, param_keys in _PARAM_SHAPES:
+        raw = element.get(attr)
+        if raw is None:
+            continue
         try:
-            spec = json.loads(squircle)
-            return (
-                "squircle",
-                True,
-                {
-                    "x": float(spec["x"]),
-                    "y": float(spec["y"]),
-                    "width": float(spec["width"]),
-                    "height": float(spec["height"]),
-                    "radius": float(spec["radius"]),
-                    "smoothness": float(spec["smoothness"]),
-                },
-            )
+            spec = json.loads(raw)
+            return kind, True, {k: float(spec[k]) for k in param_keys}
         except (ValueError, TypeError, KeyError):
             pass  # corrupt spec → fall through and report it as a plain path
 

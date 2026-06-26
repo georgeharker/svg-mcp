@@ -119,6 +119,9 @@ _PARAMETRIC_ATTRS = (
     "inkscape:flatsided",
     "data-vwp",
     "data-squircle",
+    "data-rounded-polygon",
+    "data-superellipse",
+    "data-pill",
 )
 
 

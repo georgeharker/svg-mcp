@@ -118,7 +118,7 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
 ## Status
 
-The full inkex catalog is mapped through to **109 MCP tools** (see
+The full inkex catalog is mapped through to **116 MCP tools** (see
 [`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md)), with ruff/mypy clean and the test suite green.
 
 - **Document model** (inkex-backed, multi-document with an active-document default): shapes,
@@ -133,10 +133,18 @@ The full inkex catalog is mapped through to **109 MCP tools** (see
   so swelling/tapering lines — calligraphy, engraving, brushes, tapered arrows — are expanded into
   a filled ribbon, with butt/round caps and optional **cubic** (Catmull-Rom) smoothing of both the
   path and the width.
-- **Squircles** (`add_squircle`/`edit_squircle`): rounded rectangles with iOS/Figma **corner
-  smoothing** — Apple's continuous-corner app-icon shape, where edges ease into the corner arc with
-  cubic Béziers instead of meeting it abruptly. A `smoothness` 0–1 param (0 = plain rounded rect,
-  ~0.6 = Apple-icon look, 1 = maximally smooth); stored parametrically for re-editing.
+- **Squircles & smoothed shapes** — a parametric family with iOS/Figma **corner smoothing**, each
+  `add_`/`edit_` with a stored spec for re-editing: `add_squircle` (Apple's continuous-corner app
+  icon — rounded rect whose edges ease into the corner arc with cubic Béziers; `smoothness` 0–1),
+  `add_rounded_polygon` (the same idea generalized to N sides — soft-cornered triangle/pentagon/
+  hexagon/…), `add_pill` (stadium with fully rounded ends), and `add_superellipse` (the Lamé curve
+  `|x/rx|^n+|y/ry|^n=1` — one continuous edge-less curve the `exponent` morphs from diamond → ellipse
+  → squircle → rectangle).
+- **Boolean ops** (`boolean` — union/difference/intersection/exclusion): combine shapes with no new
+  dependency, realized via native clip/mask/compound-path constructs (e.g. an even-width icon bezel
+  is `difference` of an outer and inner squircle). Operands may be composite groups. Note: the result
+  is a render-time construct, not a re-editable merged path — true geometry-level booleans await an
+  engine (lib2geom).
 - **Bulk constructors** (`add_rects`/`add_circles`/`add_lines`/`add_paths`/
   `add_variable_width_paths`): add many shapes in one call (one round-trip) — for procedural art,
   hatching/engraving fields, and data viz.

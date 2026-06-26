@@ -1,6 +1,9 @@
-"""Pure-Python path geometry: variable-width stroke expansion and the squircle outline.
+"""Pure-Python path geometry: stroke expansion and parametric shape outlines.
 
 No inkex dependency — each helper takes plain numbers and returns an SVG path ``d`` string.
+Generators: ``variable_width_outline`` (Power Stroke), ``squircle_outline`` (corner-smoothed
+rounded rect), ``rounded_polygon_outline`` (corner-smoothed N-gon), ``superellipse_outline``
+(Lamé curve).
 
 Variable-width stroke expansion (a.k.a. Power Stroke):
 SVG has no native variable ``stroke-width`` — it is constant per element. To draw a line that
@@ -255,3 +258,126 @@ def squircle_outline(
         f"L {n(x + p)} {n(y + height)} {bottom_left} "
         f"L {n(x)} {n(y + p)} {top_left} Z"
     )
+
+
+def rounded_polygon_outline(
+    cx: float,
+    cy: float,
+    radius: float,
+    sides: int,
+    corner_radius: float,
+    smoothness: float = 0.6,
+    start_angle: float = -90.0,
+) -> str:
+    """Outline a regular N-gon with smoothed (rounded) corners — the squircle idea for N sides.
+
+    A convex regular polygon (``sides`` ≥ 3) inscribed in ``radius``, with each vertex replaced by
+    a rounded corner. At every vertex the edges are cut back to tangent points and joined by a cubic
+    Bézier; ``smoothness`` in ``[0, 1]`` eases that join from a crisp circular-ish fillet (0) toward
+    a softer, more continuous corner (1). ``corner_radius`` is the fillet radius, clamped so
+    adjacent corners never collide. ``start_angle`` (degrees) orients the first vertex (−90° = up).
+
+    Args:
+        cx, cy: Polygon center.
+        radius: Circumradius (center to each vertex).
+        sides: Number of sides (≥ 3).
+        corner_radius: Corner fillet radius (≥ 0); 0 yields a sharp polygon.
+        smoothness: Corner-smoothing fraction in ``[0, 1]`` (clamped).
+        start_angle: Angle of the first vertex in degrees (default −90, pointing up).
+
+    Returns:
+        An SVG path ``d`` string of the closed rounded polygon.
+    """
+    if sides < 3:
+        raise ValueError("rounded polygon needs at least 3 sides")
+    if radius <= 0:
+        raise ValueError("rounded polygon radius must be positive")
+    if corner_radius < 0:
+        raise ValueError("rounded polygon corner_radius must be non-negative")
+    smoothness = max(0.0, min(1.0, smoothness))
+    verts = [
+        (
+            cx + radius * math.cos(math.radians(start_angle) + i * 2.0 * math.pi / sides),
+            cy + radius * math.sin(math.radians(start_angle) + i * 2.0 * math.pi / sides),
+        )
+        for i in range(sides)
+    ]
+    interior = math.pi * (sides - 2) / sides  # interior angle at each vertex
+    edge = math.hypot(verts[1][0] - verts[0][0], verts[1][1] - verts[0][1])
+    # Largest fillet that fits without adjacent corners overrunning the shared edge.
+    max_r = (edge / 2.0) * math.tan(interior / 2.0)
+    r = max(0.0, min(corner_radius, max_r))
+    inset = r / math.tan(interior / 2.0) if r > 0 else 0.0
+
+    def _toward(a: Point, b: Point) -> Point:
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = math.hypot(dx, dy) or 1.0
+        return dx / length, dy / length
+
+    # Per corner: tangent points A (toward prev) and B (toward next), with cubic control points
+    # retreating from the vertex by `k`. Smaller k (high smoothness) → softer/flatter corner.
+    corners: list[tuple[Point, Point, Point, Point]] = []
+    for i in range(sides):
+        v = verts[i]
+        ux_in, uy_in = _toward(v, verts[(i - 1) % sides])
+        ux_out, uy_out = _toward(v, verts[(i + 1) % sides])
+        a = (v[0] + ux_in * inset, v[1] + uy_in * inset)
+        b = (v[0] + ux_out * inset, v[1] + uy_out * inset)
+        k = inset * (1.0 - 0.45 * smoothness)
+        c1 = (a[0] - ux_in * k, a[1] - uy_in * k)
+        c2 = (b[0] - ux_out * k, b[1] - uy_out * k)
+        corners.append((a, c1, c2, b))
+
+    n = _num
+    a0 = corners[0][0]
+    parts = [f"M {n(a0[0])} {n(a0[1])}"]
+    for i in range(sides):
+        _a, c1, c2, b = corners[i]
+        parts.append(f"C {n(c1[0])} {n(c1[1])} {n(c2[0])} {n(c2[1])} {n(b[0])} {n(b[1])}")
+        nxt = corners[(i + 1) % sides][0]
+        parts.append(f"L {n(nxt[0])} {n(nxt[1])}")
+    parts.append("Z")
+    return " ".join(parts)
+
+
+def superellipse_outline(
+    cx: float,
+    cy: float,
+    rx: float,
+    ry: float,
+    exponent: float = 4.0,
+    samples: int = 128,
+) -> str:
+    """Outline a Lamé superellipse ``|x/rx|^n + |y/ry|^n = 1`` as a dense closed polyline.
+
+    Unlike the squircle (straight edges + smoothed corners), this is a single continuous curve with
+    no edges or corners anywhere — the ``exponent`` n morphs the whole silhouette: ``n=1`` a
+    diamond, ``n=2`` an ellipse, ``n≈4`` a classic squircle look, large n approaches a rectangle,
+    ``n<1`` a four-pointed astroid. Sampled as ``samples`` line segments (resvg renders smoothly).
+
+    Args:
+        cx, cy: Center.
+        rx, ry: Semi-axes (both > 0).
+        exponent: Lamé exponent n (> 0).
+        samples: Number of polyline segments around the curve (≥ 16).
+
+    Returns:
+        An SVG path ``d`` string of the closed superellipse.
+    """
+    if rx <= 0 or ry <= 0:
+        raise ValueError("superellipse radii must be positive")
+    if exponent <= 0:
+        raise ValueError("superellipse exponent must be positive")
+    count = max(16, samples)
+    power = 2.0 / exponent
+    n = _num
+    pts: list[Point] = []
+    for i in range(count):
+        t = 2.0 * math.pi * i / count
+        ct, st = math.cos(t), math.sin(t)
+        x = cx + rx * math.copysign(abs(ct) ** power, ct)
+        y = cy + ry * math.copysign(abs(st) ** power, st)
+        pts.append((x, y))
+    head = f"M {n(pts[0][0])} {n(pts[0][1])}"
+    body = " ".join(f"L {n(x)} {n(y)}" for x, y in pts[1:])
+    return f"{head} {body} Z"

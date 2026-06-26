@@ -6,9 +6,10 @@ import pytest
 
 from svg_mcp import ops
 from svg_mcp.model.document import Document
-from svg_mcp.model.errors import InvalidArgument
+from svg_mcp.model.errors import InvalidArgument, NodeNotFound
 from svg_mcp.query import get_geometry, get_params, get_transform
 from svg_mcp.schemas.style import ShapeStyle
+from svg_mcp.serialize import export_svg
 from svg_mcp.session import DocumentStore
 
 # A rect (with its own scale) inside a translated group — exercises multi-level transforms.
@@ -188,6 +189,131 @@ def test_edit_path_demotes_squircle_to_plain_path() -> None:
         ops.edit_squircle(doc, sq.id, radius=6)
     p = get_params(doc, sq.id)
     assert p["kind"] == "path" and p["parametric"] is False
+
+
+def test_rounded_polygon_edit_roundtrip_and_demotion() -> None:
+    _, doc = DocumentStore().create(200, 200)
+    rp = ops.add_rounded_polygon(doc, cx=100, cy=100, radius=70, corner_radius=18, sides=6)
+    before = doc.resolve(rp.id).get("d")
+    ops.edit_rounded_polygon(doc, rp.id, sides=8, smoothness=1.0)
+    after = doc.resolve(rp.id)
+    assert after.get("d") != before
+    p = get_params(doc, rp.id)
+    assert p["kind"] == "rounded_polygon" and p["parametric"] is True
+    params = p["params"]
+    assert isinstance(params, dict) and params["sides"] == 8.0 and params["smoothness"] == 1.0
+    # raw d edit demotes it
+    ops.edit_path(doc, rp.id, "M0,0 L10,0 L10,10 Z")
+    assert doc.resolve(rp.id).get("data-rounded-polygon") is None
+    with pytest.raises(InvalidArgument):
+        ops.edit_rounded_polygon(doc, rp.id, sides=5)
+
+
+def test_superellipse_edit_roundtrip() -> None:
+    _, doc = DocumentStore().create(200, 200)
+    se = ops.add_superellipse(doc, cx=100, cy=100, rx=70, ry=50, exponent=4)
+    before = doc.resolve(se.id).get("d")
+    ops.edit_superellipse(doc, se.id, exponent=8)
+    after = doc.resolve(se.id)
+    assert after.get("d") != before
+    p = get_params(doc, se.id)
+    assert p["kind"] == "superellipse" and p["parametric"] is True
+    params = p["params"]
+    assert isinstance(params, dict) and params["exponent"] == 8.0 and params["rx"] == 70.0
+
+
+def test_pill_edit_roundtrip() -> None:
+    _, doc = DocumentStore().create(200, 120)
+    pill = ops.add_pill(doc, x=10, y=30, width=160, height=60)
+    p = get_params(doc, pill.id)
+    assert p["kind"] == "pill" and p["parametric"] is True
+    before = doc.resolve(pill.id).get("d")
+    ops.edit_pill(doc, pill.id, smoothness=0.6)
+    after = doc.resolve(pill.id)
+    assert after.get("d") != before
+    params = get_params(doc, pill.id)["params"]
+    assert isinstance(params, dict) and params["smoothness"] == 0.6 and params["width"] == 160.0
+
+
+def test_boolean_difference_masks_the_subject() -> None:
+    _, doc = DocumentStore().create(120, 120)
+    a = ops.add_rect(doc, x=10, y=10, width=80, height=80)
+    b = ops.add_circle(doc, cx=90, cy=90, r=30)
+    res = ops.boolean(doc, op="difference", targets=[a.id, b.id])
+    assert res.id == a.id  # subject is kept, masked
+    assert doc.resolve(a.id).get("mask") is not None
+    assert "mask" in export_svg(doc)
+
+
+def test_boolean_intersection_clips_the_subject() -> None:
+    _, doc = DocumentStore().create(120, 120)
+    a = ops.add_rect(doc, x=10, y=10, width=80, height=80)
+    b = ops.add_circle(doc, cx=60, cy=60, r=40)
+    ops.boolean(doc, op="intersection", targets=[a.id, b.id])
+    assert doc.resolve(a.id).get("clip-path") is not None
+
+
+def test_boolean_exclusion_merges_to_evenodd_path() -> None:
+    _, doc = DocumentStore().create(120, 120)
+    a = ops.add_rect(doc, x=10, y=10, width=60, height=60)
+    b = ops.add_rect(doc, x=40, y=40, width=60, height=60)
+    res = ops.boolean(doc, op="exclusion", targets=[a.id, b.id], name="xor")
+    assert res.tag == "path"
+    assert "evenodd" in str(doc.resolve(res.id).style)
+    # inputs consumed
+    with pytest.raises(NodeNotFound):
+        doc.resolve(a.id)
+
+
+def test_boolean_union_groups_inputs() -> None:
+    _, doc = DocumentStore().create(120, 120)
+    a = ops.add_rect(doc, x=10, y=10, width=50, height=50)
+    b = ops.add_circle(doc, cx=80, cy=80, r=25)
+    res = ops.boolean(doc, op="union", targets=[a.id, b.id])
+    group = doc.resolve(res.id)
+    assert group.tag_name == "g" or str(group.TAG).endswith("g")
+    assert {str(c.get_id()) for c in group} >= {a.id, b.id}
+
+
+def test_boolean_difference_with_composite_group_operand() -> None:
+    # A group of two circles subtracts as two real holes (children recolored, not left as overlays).
+    _, doc = DocumentStore().create(160, 160)
+    sq = ops.add_rect(doc, x=20, y=20, width=110, height=110)
+    c1 = ops.add_circle(doc, cx=60, cy=60, r=20, style={"fill": "#ff0000"})
+    c2 = ops.add_circle(doc, cx=100, cy=100, r=20, style={"fill": "#00ff00"})
+    grp = ops.create_group(doc, children=[c1.id, c2.id])
+    ops.boolean(doc, op="difference", targets=[sq.id, grp.id])
+    svg = export_svg(doc)
+    assert doc.resolve(sq.id).get("mask") is not None
+    # both circles were recolored black inside the mask (no surviving red/green)
+    assert "#ff0000" not in svg and "#00ff00" not in svg
+
+
+@pytest.mark.parametrize("transform", ["translate(30,30)", "rotate(45)", "rotate(30) scale(1.5)"])
+def test_boolean_exclusion_respects_ancestor_transform(transform: str) -> None:
+    # Regression: flattening a group operand must concat the FULL ancestor transform (translate,
+    # rotate, scale, …) and divide it back out, not bake it into the result d. The result is a child
+    # of the transformed group, so its LOCAL d stays in the un-transformed frame (bbox 0..90);
+    # before the fix the ancestor transform was doubly applied, shifting/rotating that local bbox.
+    _, doc = DocumentStore().create(200, 200)
+    g = ops.create_group(doc, transform=transform)
+    a = ops.add_rect(doc, x=0, y=0, width=60, height=60, parent=g.id)
+    b = ops.add_rect(doc, x=30, y=30, width=60, height=60, parent=g.id)
+    res = ops.boolean(doc, op="exclusion", targets=[a.id, b.id])
+    bbox = doc.resolve(res.id).bounding_box()
+    assert bbox is not None
+    assert abs(bbox.left) < 1.0 and abs(bbox.right - 90) < 1.0
+    assert abs(bbox.top) < 1.0 and abs(bbox.bottom - 90) < 1.0
+
+
+def test_boolean_rejects_single_target_and_bad_op() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    a = ops.add_rect(doc, x=0, y=0, width=10, height=10)
+    with pytest.raises(InvalidArgument):
+        ops.boolean(doc, op="difference", targets=[a.id])
+    b = ops.add_rect(doc, x=20, y=20, width=10, height=10)
+    with pytest.raises(InvalidArgument):
+        ops.boolean(doc, op="bogus", targets=[a.id, b.id])
 
 
 def test_resolve_prefers_shape_over_defs_via_edit_path() -> None:

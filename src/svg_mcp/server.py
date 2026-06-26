@@ -932,6 +932,160 @@ def add_squircle(
 
 @mcp.tool
 @emits_change
+def add_rounded_polygon(
+    *,
+    document_id: str | None = None,
+    cx: float,
+    cy: float,
+    radius: float,
+    corner_radius: float,
+    sides: int = 6,
+    smoothness: float = 0.6,
+    start_angle: float = -90.0,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Add a regular N-gon with smoothed corners — the squircle idea generalized to `sides` sides.
+
+    A convex regular polygon (triangle, pentagon, hexagon, octagon, …) inscribed in `radius`, with
+    each vertex rounded and eased the way `add_squircle` smooths a rectangle's corners. Distinct
+    from `add_star` (spiky, inner+outer radius) and `add_superellipse` (one curve, no edges).
+
+    Args:
+        cx, cy: Polygon center, in user units.
+        radius: Circumradius (center to each vertex).
+        corner_radius: Corner fillet radius (≥ 0); 0 yields a sharp polygon. Clamped so adjacent
+            corners never collide.
+        sides: Number of sides (≥ 3). Default 6.
+        smoothness: Corner-smoothing fraction in [0, 1] — 0 a crisp circular-ish fillet, 1 softer/
+            more continuous. Default 0.6.
+        start_angle: Angle of the first vertex in degrees (default −90, pointing up).
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label.
+        style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
+        transform: Optional SVG transform string.
+
+    Returns:
+        The new node's {id, tag, name}.
+    """
+    return ops.add_rounded_polygon(
+        _doc(document_id),
+        cx=cx,
+        cy=cy,
+        radius=radius,
+        corner_radius=corner_radius,
+        sides=sides,
+        smoothness=smoothness,
+        start_angle=start_angle,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def add_superellipse(
+    *,
+    document_id: str | None = None,
+    cx: float,
+    cy: float,
+    rx: float,
+    ry: float,
+    exponent: float = 4.0,
+    samples: int = 128,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Add a Lamé SUPERELLIPSE — one continuous curve with no edges or corners (≠ squircle).
+
+    `|x/rx|^n + |y/ry|^n = 1`: the `exponent` n morphs the whole silhouette — n=1 a diamond, n=2 an
+    ellipse, n≈4 a classic squircle look, large n toward a rectangle, n<1 a four-pointed astroid.
+    Unlike a squircle (straight edges + smoothed corners), the curvature here is continuous
+    everywhere — sometimes exactly what an icon body wants.
+
+    Args:
+        cx, cy: Center, in user units.
+        rx, ry: Semi-axes (both > 0).
+        exponent: Lamé exponent n (> 0). Default 4.
+        samples: Number of polyline segments around the curve (≥ 16, default 128).
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label.
+        style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
+        transform: Optional SVG transform string.
+
+    Returns:
+        The new node's {id, tag, name}.
+    """
+    return ops.add_superellipse(
+        _doc(document_id),
+        cx=cx,
+        cy=cy,
+        rx=rx,
+        ry=ry,
+        exponent=exponent,
+        samples=samples,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def add_pill(
+    *,
+    document_id: str | None = None,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    smoothness: float = 0.0,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Add a PILL / stadium — a rectangle whose short sides are fully rounded into semicircles.
+
+    The corner radius is fixed at half the shorter side (exact semicircular ends) — ideal for
+    buttons, badges, tags, and toggles. `smoothness` > 0 gives the iOS/Figma corner-smoothed
+    "super-pill"; default 0 is the classic stadium.
+
+    Args:
+        x, y: Top-left corner of the bounding box, in user units.
+        width, height: Box size (both > 0).
+        smoothness: Corner-smoothing fraction in [0, 1] (default 0 = circular ends).
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label.
+        style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
+        transform: Optional SVG transform string.
+
+    Returns:
+        The new node's {id, tag, name}.
+    """
+    return ops.add_pill(
+        _doc(document_id),
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        smoothness=smoothness,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
 def add_variable_width_paths(
     *,
     document_id: str | None = None,
@@ -1550,6 +1704,111 @@ def edit_squircle(
         width=width,
         height=height,
         radius=radius,
+        smoothness=smoothness,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_rounded_polygon(
+    *,
+    document_id: str | None = None,
+    target: str,
+    cx: float | None = None,
+    cy: float | None = None,
+    radius: float | None = None,
+    sides: int | None = None,
+    corner_radius: float | None = None,
+    smoothness: float | None = None,
+    start_angle: float | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a parametric rounded polygon by its PARAMETERS (mirrors add_rounded_polygon).
+
+    Changes only the params you pass and regenerates the outline, keeping the node's id/style/
+    z-order. Errors if `target` isn't a parametric rounded polygon (a raw `d` edit demoted it) —
+    then use `edit_path`. Read current params with `get_params`.
+    """
+    return ops.edit_rounded_polygon(
+        _doc(document_id),
+        target,
+        cx=cx,
+        cy=cy,
+        radius=radius,
+        sides=sides,
+        corner_radius=corner_radius,
+        smoothness=smoothness,
+        start_angle=start_angle,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_superellipse(
+    *,
+    document_id: str | None = None,
+    target: str,
+    cx: float | None = None,
+    cy: float | None = None,
+    rx: float | None = None,
+    ry: float | None = None,
+    exponent: float | None = None,
+    samples: int | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a parametric superellipse by its PARAMETERS (mirrors add_superellipse), re-deriving it.
+
+    Changes only the params you pass and regenerates the curve, keeping the node's id/style/z-order.
+    Errors if `target` isn't a parametric superellipse (a raw `d` edit demoted it) — then use
+    `edit_path`. Read current params with `get_params`.
+    """
+    return ops.edit_superellipse(
+        _doc(document_id),
+        target,
+        cx=cx,
+        cy=cy,
+        rx=rx,
+        ry=ry,
+        exponent=exponent,
+        samples=samples,
+        style=style.to_style_dict() if style else None,
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_pill(
+    *,
+    document_id: str | None = None,
+    target: str,
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    smoothness: float | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a parametric pill/stadium by its PARAMETERS (mirrors add_pill), re-deriving the path.
+
+    Changes only the params you pass; the corner radius stays half the shorter side. Errors if
+    `target` isn't a parametric pill (a raw `d` edit demoted it) — then use `edit_path`. Read
+    current params with `get_params`.
+    """
+    return ops.edit_pill(
+        _doc(document_id),
+        target,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
         smoothness=smoothness,
         style=style.to_style_dict() if style else None,
         transform=transform,
@@ -2212,6 +2471,46 @@ def apply_mask(*, document_id: str | None = None, target: str, mask: str) -> dic
         The node's {id, tag, name}.
     """
     return ops.apply_mask(_doc(document_id), target, mask).as_dict()
+
+
+@mcp.tool
+@emits_change
+def boolean(
+    *,
+    document_id: str | None = None,
+    op: Literal["union", "difference", "intersection", "exclusion"],
+    targets: list[str],
+    name: str | None = None,
+) -> dict[str, str | None]:
+    """Combine 2+ shapes with a boolean op — union/difference/intersection/exclusion.
+
+    Realized with native SVG constructs (no geometry engine): `union` groups the inputs;
+    `intersection` clips the subject by the operands; `difference` subtracts the operands via a
+    luminance mask; `exclusion` (XOR) merges everything into one evenodd compound path. The FIRST
+    target is the subject; the rest are operands. Great for icon frames — e.g. a bezel ring is
+    `difference` of an outer and inner squircle.
+
+    WARNINGS — not a true geometry boolean, and it mutates/consumes the inputs:
+      - The result is a RENDER-TIME construct (clip/mask, or a merged compound path), NOT a single
+        re-editable merged outline — you can't then offset or `get_bbox` it as one path, and deep
+        boolean chains get unwieldy. True geometry-level booleans await an engine (lib2geom).
+      - Operands are CONSUMED: intersection moves them into a clipPath, difference recolors them
+        solid black and moves them into a mask, exclusion bakes them into the compound path and
+        deletes them. They stop existing as independent nodes.
+      - A composite GROUP operand is FLATTENED to its shape leaves (empty shell removed) for
+        intersection/exclusion, and RECOLORED solid black for difference — discarding any per-child
+        fills/strokes inside it. A group works fine as the *subject* (targets[0]).
+      - Assumes targets share a coordinate space (siblings without conflicting ancestor transforms).
+
+    Args:
+        op: "union", "difference", "intersection", or "exclusion".
+        targets: ≥ 2 node ids/names; targets[0] is the subject, the rest are operands.
+        name: Friendly label for the result node.
+
+    Returns:
+        The result node's {id, tag, name}.
+    """
+    return ops.boolean(_doc(document_id), op=op, targets=targets, name=name).as_dict()
 
 
 @mcp.tool

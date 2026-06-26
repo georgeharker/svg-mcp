@@ -18,7 +18,12 @@ from pathlib import Path
 import inkex
 from inkex import BaseElement
 
-from ..geom import squircle_outline, variable_width_outline
+from ..geom import (
+    rounded_polygon_outline,
+    squircle_outline,
+    superellipse_outline,
+    variable_width_outline,
+)
 from ..model.document import Document
 from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef
@@ -34,15 +39,24 @@ Point = tuple[float, float]
 # `edit_variable_width_path` can re-derive it. A raw `d` edit strips it (see `_demote_parametric`).
 _VWP_ATTR = "data-vwp"
 
-# A squircle (iOS/Figma corner-smoothed rounded rect) is likewise a generated fill with no native
-# parametric type, so we stash its box + radius + smoothness here for `edit_squircle` to re-derive.
+# Generated-fill primitives with no native Inkscape parametric type stash their generator params
+# in a custom data-* attribute (the same way stars/arcs carry sodipodi params), so the matching
+# `edit_*` op can re-derive the path. A raw `d` edit strips it (see `_demote_parametric`).
 _SQUIRCLE_ATTR = "data-squircle"
+_ROUNDED_POLYGON_ATTR = "data-rounded-polygon"
+_SUPERELLIPSE_ATTR = "data-superellipse"
+_PILL_ATTR = "data-pill"
 
 
 def _node_ref(element: BaseElement) -> NodeRef:
     return NodeRef(
         id=str(element.get_id()), tag=str(element.TAG), name=getattr(element, "label", None)
     )
+
+
+def _store_param_spec(element: BaseElement, attr: str, spec: dict[str, float | int]) -> None:
+    """Stash a generated primitive's parameters as a compact JSON ``data-*`` attribute."""
+    element.set(attr, json.dumps(spec, separators=(",", ":")))
 
 
 def _store_vwp_spec(
@@ -458,6 +472,305 @@ def edit_squircle(
         height=new_height,
         radius=new_radius,
         smoothness=new_smoothness,
+    )
+    _merge_style_and_transform(doc, element, style, transform)
+    return _node_ref(element)
+
+
+def add_rounded_polygon(
+    doc: Document,
+    *,
+    cx: float,
+    cy: float,
+    radius: float,
+    corner_radius: float,
+    sides: int = 6,
+    smoothness: float = 0.6,
+    start_angle: float = -90.0,
+    parent: str | None = None,
+    name: str | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Add a regular N-gon with smoothed corners — the squircle idea generalized to ``sides`` sides.
+
+    A convex regular polygon inscribed in ``radius``, each vertex rounded by ``corner_radius`` and
+    eased by ``smoothness`` (0 = crisp circular-ish fillet, 1 = softer/continuous). ``start_angle``
+    orients the first vertex (−90° = pointing up). Stored parametrically so ``edit_rounded_polygon``
+    can re-derive it; a raw ``d`` edit demotes it to a plain path.
+    """
+    try:
+        d = rounded_polygon_outline(cx, cy, radius, sides, corner_radius, smoothness, start_angle)
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+    element = inkex.PathElement.new(d)
+    _store_param_spec(
+        element,
+        _ROUNDED_POLYGON_ATTR,
+        {
+            "cx": cx,
+            "cy": cy,
+            "radius": radius,
+            "sides": sides,
+            "corner_radius": corner_radius,
+            "smoothness": smoothness,
+            "start_angle": start_angle,
+        },
+    )
+    return _place(
+        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    )
+
+
+def edit_rounded_polygon(
+    doc: Document,
+    target: str,
+    *,
+    cx: float | None = None,
+    cy: float | None = None,
+    radius: float | None = None,
+    sides: int | None = None,
+    corner_radius: float | None = None,
+    smoothness: float | None = None,
+    start_angle: float | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Edit a parametric rounded polygon by its PARAMETERS (mirrors add_rounded_polygon).
+
+    Changes only the params you pass and regenerates the outline, keeping the node's id/style/
+    z-order. Errors if ``target`` has no stored spec (not a rounded polygon, or a raw ``d`` edit
+    demoted it); use ``edit_path`` for those. Read current params with ``get_params``.
+    """
+    element = doc.resolve(target)
+    raw = element.get(_ROUNDED_POLYGON_ATTR)
+    if raw is None:
+        raise InvalidArgument(
+            f"{target!r} is not a rounded polygon (or was demoted to a plain path); "
+            "use edit_path for plain paths"
+        )
+    try:
+        spec = json.loads(raw)
+        new_cx = cx if cx is not None else float(spec["cx"])
+        new_cy = cy if cy is not None else float(spec["cy"])
+        new_radius = radius if radius is not None else float(spec["radius"])
+        new_sides = sides if sides is not None else int(spec["sides"])
+        new_cr = corner_radius if corner_radius is not None else float(spec["corner_radius"])
+        new_smooth = smoothness if smoothness is not None else float(spec["smoothness"])
+        new_angle = start_angle if start_angle is not None else float(spec["start_angle"])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise InvalidArgument(
+            f"{target!r} has a corrupt rounded-polygon spec ({exc}); "
+            "edit it as a plain path with edit_path"
+        ) from None
+    try:
+        d = rounded_polygon_outline(
+            new_cx, new_cy, new_radius, new_sides, new_cr, new_smooth, new_angle
+        )
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+    element.set("d", d)
+    _store_param_spec(
+        element,
+        _ROUNDED_POLYGON_ATTR,
+        {
+            "cx": new_cx,
+            "cy": new_cy,
+            "radius": new_radius,
+            "sides": new_sides,
+            "corner_radius": new_cr,
+            "smoothness": new_smooth,
+            "start_angle": new_angle,
+        },
+    )
+    _merge_style_and_transform(doc, element, style, transform)
+    return _node_ref(element)
+
+
+def add_superellipse(
+    doc: Document,
+    *,
+    cx: float,
+    cy: float,
+    rx: float,
+    ry: float,
+    exponent: float = 4.0,
+    samples: int = 128,
+    parent: str | None = None,
+    name: str | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Add a Lamé SUPERELLIPSE — one continuous curve, no edges or corners (distinct from squircle).
+
+    ``|x/rx|^n + |y/ry|^n = 1``: the ``exponent`` n morphs the whole silhouette — n=1 a diamond, n=2
+    an ellipse, n≈4 a classic squircle look, large n toward a rectangle, n<1 a four-pointed astroid.
+    Sampled as ``samples`` segments. Stored parametrically so ``edit_superellipse`` re-derives it;
+    a raw ``d`` edit demotes it to a plain path.
+    """
+    try:
+        d = superellipse_outline(cx, cy, rx, ry, exponent, samples)
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+    element = inkex.PathElement.new(d)
+    _store_param_spec(
+        element,
+        _SUPERELLIPSE_ATTR,
+        {"cx": cx, "cy": cy, "rx": rx, "ry": ry, "exponent": exponent, "samples": samples},
+    )
+    return _place(
+        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    )
+
+
+def edit_superellipse(
+    doc: Document,
+    target: str,
+    *,
+    cx: float | None = None,
+    cy: float | None = None,
+    rx: float | None = None,
+    ry: float | None = None,
+    exponent: float | None = None,
+    samples: int | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Edit a parametric superellipse by its PARAMETERS (mirrors add_superellipse), re-deriving it.
+
+    Changes only the params you pass and regenerates the curve, keeping the node's id/style/z-order.
+    Errors if ``target`` has no stored spec (not a superellipse, or a raw ``d`` edit demoted it);
+    use ``edit_path`` for those. Read current params with ``get_params``.
+    """
+    element = doc.resolve(target)
+    raw = element.get(_SUPERELLIPSE_ATTR)
+    if raw is None:
+        raise InvalidArgument(
+            f"{target!r} is not a superellipse (or was demoted to a plain path); "
+            "use edit_path for plain paths"
+        )
+    try:
+        spec = json.loads(raw)
+        new_cx = cx if cx is not None else float(spec["cx"])
+        new_cy = cy if cy is not None else float(spec["cy"])
+        new_rx = rx if rx is not None else float(spec["rx"])
+        new_ry = ry if ry is not None else float(spec["ry"])
+        new_exp = exponent if exponent is not None else float(spec["exponent"])
+        new_samples = samples if samples is not None else int(spec["samples"])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise InvalidArgument(
+            f"{target!r} has a corrupt superellipse spec ({exc}); "
+            "edit it as a plain path with edit_path"
+        ) from None
+    try:
+        d = superellipse_outline(new_cx, new_cy, new_rx, new_ry, new_exp, new_samples)
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+    element.set("d", d)
+    _store_param_spec(
+        element,
+        _SUPERELLIPSE_ATTR,
+        {
+            "cx": new_cx,
+            "cy": new_cy,
+            "rx": new_rx,
+            "ry": new_ry,
+            "exponent": new_exp,
+            "samples": new_samples,
+        },
+    )
+    _merge_style_and_transform(doc, element, style, transform)
+    return _node_ref(element)
+
+
+def add_pill(
+    doc: Document,
+    *,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    smoothness: float = 0.0,
+    parent: str | None = None,
+    name: str | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Add a PILL / stadium — a rectangle whose short sides are fully rounded into semicircles.
+
+    The corner radius is fixed at half the shorter side (so the short ends are exact semicircles).
+    ``smoothness`` > 0 gives the iOS/Figma corner-smoothed variant (a softer "super-pill"); default
+    0 is the classic stadium. Stored parametrically so ``edit_pill`` can re-derive it; a raw ``d``
+    edit demotes it to a plain path.
+    """
+    try:
+        d = squircle_outline(x, y, width, height, min(width, height) / 2.0, smoothness)
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+    element = inkex.PathElement.new(d)
+    _store_param_spec(
+        element,
+        _PILL_ATTR,
+        {"x": x, "y": y, "width": width, "height": height, "smoothness": smoothness},
+    )
+    return _place(
+        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    )
+
+
+def edit_pill(
+    doc: Document,
+    target: str,
+    *,
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    smoothness: float | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Edit a parametric pill/stadium by its PARAMETERS (mirrors add_pill), re-deriving the path.
+
+    Changes only the params you pass; the corner radius stays half the shorter side. Errors if
+    ``target`` has no stored spec (not a pill, or a raw ``d`` edit demoted it); use ``edit_path``
+    for those. Read current params with ``get_params``.
+    """
+    element = doc.resolve(target)
+    raw = element.get(_PILL_ATTR)
+    if raw is None:
+        raise InvalidArgument(
+            f"{target!r} is not a pill (or was demoted to a plain path); "
+            "use edit_path for plain paths"
+        )
+    try:
+        spec = json.loads(raw)
+        new_x = x if x is not None else float(spec["x"])
+        new_y = y if y is not None else float(spec["y"])
+        new_width = width if width is not None else float(spec["width"])
+        new_height = height if height is not None else float(spec["height"])
+        new_smooth = smoothness if smoothness is not None else float(spec["smoothness"])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise InvalidArgument(
+            f"{target!r} has a corrupt pill spec ({exc}); edit it as a plain path with edit_path"
+        ) from None
+    try:
+        d = squircle_outline(
+            new_x, new_y, new_width, new_height, min(new_width, new_height) / 2.0, new_smooth
+        )
+    except ValueError as exc:
+        raise InvalidArgument(str(exc)) from exc
+    element.set("d", d)
+    _store_param_spec(
+        element,
+        _PILL_ATTR,
+        {
+            "x": new_x,
+            "y": new_y,
+            "width": new_width,
+            "height": new_height,
+            "smoothness": new_smooth,
+        },
     )
     _merge_style_and_transform(doc, element, style, transform)
     return _node_ref(element)
