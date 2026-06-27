@@ -3999,7 +3999,9 @@ def main() -> None:
     The http / streamable-http transports serve streamable HTTP at ``/mcp``.
     """
     import argparse
+    import atexit
     import os
+    import signal
 
     parser = argparse.ArgumentParser(prog="svg-mcp", description="svg-mcp MCP server")
     parser.add_argument(
@@ -4021,6 +4023,27 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # The preview server runs on daemon threads (so it never blocks exit), but its listening socket
+    # should be released promptly on shutdown — both so a restart can rebind the port and so the
+    # exit is clean rather than abrupt. ``shutdown`` is idempotent and a no-op when no preview was
+    # started, so registering it unconditionally is safe even when preview is never used. This
+    # covers the EOF / normal-return path (e.g. a stdio client closing the pipe).
+    atexit.register(_preview.server.shutdown)
+
+    # Respond to SIGINT and SIGTERM uniformly: release the preview socket, then re-raise the signal
+    # under its default disposition so the OS terminates us immediately. The re-raise is what makes
+    # this reliable across transports — Python's own KeyboardInterrupt unwinding can wedge on the
+    # anyio stdio loop (a blocked, non-daemon stdin reader keeps the interpreter alive), whereas an
+    # OS-level signal kill always lands. SIGKILL still can't be caught; the OS reclaims it then.
+    def _shutdown_on_signal(signum: int, _frame: object) -> None:
+        _preview.server.shutdown()
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(ValueError):  # signals only installable from the main thread
+            signal.signal(_sig, _shutdown_on_signal)
+
     # Opt-in live preview (loopback web page that auto-refreshes as the drawing is built).
     # Enabled by SVG_MCP_PREVIEW; the model can also start it on demand via `start_preview`.
     if os.environ.get("SVG_MCP_PREVIEW", "").strip().lower() not in ("", "0", "false", "no"):
@@ -4036,7 +4059,17 @@ def main() -> None:
     if args.transport == "stdio":
         mcp.run()
     else:
-        mcp.run(transport=args.transport, host=args.host, port=args.port)
+        # Bound how long uvicorn waits for in-flight connections to drain on shutdown. uvicorn's
+        # own default is None (wait forever), which would hang a stop signal while a long-lived MCP
+        # connection stays open; FastMCP currently overrides it to 0, but pin it ourselves so we
+        # don't depend on that default holding across versions. Override via SVG_MCP_SHUTDOWN_GRACE.
+        grace = int(os.environ.get("SVG_MCP_SHUTDOWN_GRACE", "0"))
+        mcp.run(
+            transport=args.transport,
+            host=args.host,
+            port=args.port,
+            uvicorn_config={"timeout_graceful_shutdown": grace},
+        )
 
 
 if __name__ == "__main__":

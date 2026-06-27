@@ -105,6 +105,9 @@ class PreviewServer:
                 except OSError:
                     httpd = ThreadingHTTPServer((host, 0), handler)  # port in use -> ephemeral
                 httpd.daemon_threads = True
+                # Don't join in-flight (daemon) request threads on close — SSE handlers block on
+                # ``queue.get`` and would otherwise wedge ``server_close``.
+                httpd.block_on_close = False
                 self._httpd = httpd
                 self._host = host
                 self._port = httpd.server_address[1]
@@ -112,6 +115,21 @@ class PreviewServer:
                     target=httpd.serve_forever, name="svg-mcp-preview", daemon=True
                 ).start()
             return f"http://{self._host}:{self._port}/", self._port
+
+    def shutdown(self) -> None:
+        """Stop the accept loop and close the listening socket. Idempotent.
+
+        Must run off the ``serve_forever`` thread (``shutdown`` joins it); the atexit hook and any
+        caller on the main thread satisfy that. In-flight request threads are daemons and are left
+        to be reaped at interpreter exit (see ``block_on_close``).
+        """
+        with self._lock:
+            httpd, self._httpd = self._httpd, None
+        if httpd is not None:
+            with contextlib.suppress(Exception):
+                httpd.shutdown()
+            with contextlib.suppress(Exception):
+                httpd.server_close()
 
     def url_for(self, token: str) -> str:
         """The page URL a given session should open."""
