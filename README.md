@@ -51,22 +51,28 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
    # alternatives: brew install uv  ·  pipx install uv  ·  winget install astral-sh.uv (Windows)
    ```
 
-   **Easiest — no clone.** `uvx` fetches svg-mcp and **all** its dependencies (including the
-   in-process renderer) into a cached, isolated environment and runs it — nothing to manage:
+   **Recommended — no clone.** Install svg-mcp into an environment you manage, so the entrypoint
+   is stable and launches fast (no per-invocation dependency resolution):
 
    ```bash
-   uvx svg-mcp --help                                                # once published to PyPI
-   uvx --from "git+https://github.com/georgeharker/svg-mcp" svg-mcp  # before PyPI / track main
+   uv tool install svg-mcp                                   # isolated tool; `svg-mcp` on PATH
+   # into your own venv instead:  uv pip install svg-mcp      # (with that venv active)
+   # track main (pre-release):    uv tool install "git+https://github.com/georgeharker/svg-mcp"
    ```
 
-   Use that command as the MCP server command in step 3 (then skip the rest of this step).
+   → entrypoint: **`svg-mcp`** (absolute: `which svg-mcp`, usually `~/.local/bin/svg-mcp`), or
+   **`/path/to/your/venv/bin/svg-mcp`** for the `uv pip install` case.
+
+   > 💡 Avoid `uvx svg-mcp` as the MCP server command: `uvx` re-resolves dependencies on **every
+   > launch** — needless latency for a long-lived server. Install once (above) and point your
+   > client at the resulting entrypoint.
 
    <details>
    <summary><b>Alternative: install from a clone (for development)</b></summary>
 
    Pick **one** of two install layouts — this choice decides the path you point Claude at:
 
-   **a) Project-local venv (recommended, self-contained).** Creates `./.venv` inside the repo and
+   **a) Project-local venv (self-contained).** Creates `./.venv` inside the repo and
    installs svg-mcp editable into it — nothing touches your other environments:
 
    ```bash
@@ -94,18 +100,17 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
    </details>
 
-3. **Connect Claude** — point it at the **entrypoint path from step 2** (`./.venv/bin/svg-mcp`
-   for option a, or `/path/to/your/venv/bin/svg-mcp` for option b; always use the **absolute**
-   path in configs):
+3. **(Optional) Connect an MCP client.** svg-mcp is a standard MCP server, so this step only
+   applies if you drive it from a client. If you use **Claude**, point it at the **entrypoint
+   from step 2** (always the **absolute** path):
 
-   - **Claude Code** — from the repo directory (option a shown):
+   - **Claude Code** — easiest is to install it as a plugin (no manual wiring) — see
+     [Install as a Claude Code plugin](#install-as-a-claude-code-plugin). Or add the entrypoint
+     explicitly:
 
      ```bash
-     claude mcp add svg-mcp -- "$(pwd)/.venv/bin/svg-mcp"
+     claude mcp add svg-mcp -- "$(which svg-mcp)"
      ```
-
-     (Or skip the clone entirely and install it as a plugin — see
-     [Install as a Claude Code plugin](#install-as-a-claude-code-plugin).)
 
    - **Claude Desktop** — add to `claude_desktop_config.json` and restart the app:
 
