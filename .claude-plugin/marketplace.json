@@ -1,0 +1,14 @@
+{
+  "name": "svg-mcp",
+  "owner": {
+    "name": "George Harker",
+    "email": "george@georgeharker.com"
+  },
+  "plugins": [
+    {
+      "name": "svg-mcp",
+      "source": "./",
+      "description": "Structured, hierarchical SVG authoring for an LLM with a render-and-see feedback loop, backed by an inkex document model."
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "name": "svg-mcp",
+  "version": "0.2.0",
+  "description": "Structured, hierarchical SVG authoring for an LLM with a render-and-see feedback loop, backed by an inkex document model.",
+  "author": {
+    "name": "George Harker",
+    "email": "george@georgeharker.com"
+  },
+  "homepage": "https://github.com/georgeharker/svg-mcp",
+  "repository": "https://github.com/georgeharker/svg-mcp",
+  "license": "GPL-2.0-or-later",
+  "keywords": ["svg", "mcp", "fastmcp", "inkex", "vector", "graphics"],
+  "mcpServers": {
+    "svg-mcp": {
+      "command": "uv",
+      "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}", "svg-mcp"]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 300,
+            "command": "if command -v uv >/dev/null 2>&1; then uv sync --project \"${CLAUDE_PLUGIN_ROOT}\" --quiet >/dev/null 2>&1 || true; else printf '{\"systemMessage\":\"svg-mcp plugin: `uv` is required but was not found on PATH — the svg-mcp MCP server will not start. Install uv: https://docs.astral.sh/uv/getting-started/installation/\"}'; fi"
+          }
+        ]
+      }
+    ]
+  }
+}

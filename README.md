@@ -191,7 +191,30 @@ read-only introspection, and the document model), and a **rendering & output** t
 typesetting, the render/export backends, and SVG serialization). See [`DESIGN.md`](./DESIGN.md)
 for the full layering rationale.
 
-## Install
+## Install as a Claude Code plugin
+
+The repo doubles as a [Claude Code](https://code.claude.com) plugin marketplace. The plugin
+runs the server with `uv run`, which creates and syncs its own venv from the bundled
+`uv.lock` on first launch (no manual `pip install`).
+
+**Prerequisites:**
+
+- **[uv](https://docs.astral.sh/uv/)** on `PATH`. If it's missing the plugin still loads, but
+  the MCP server won't start — a `SessionStart` hook reports this with an install link.
+- **Linux only:** install the [system packages (Linux)](#system-packages-linux) *before* the
+  first launch. Plugin users never run `pip install`, so the first `uv run` builds `lxml` and
+  `PyGObject` from source; without those dev headers the sync **fails** and the server won't
+  start. macOS installs entirely from wheels — nothing extra.
+
+```
+/plugin marketplace add georgeharker/svg-mcp
+/plugin install svg-mcp@svg-mcp
+```
+
+The first session pays a one-time sync/build cost (tens of seconds, longer on Linux source
+builds); later sessions reuse the venv and start fast.
+
+## Install (manual / development)
 
 ```bash
 pip install -e ".[dev]"

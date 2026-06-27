@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "svg-mcp": {
-      "command": "/Users/geohar/Development/svg-mcp/.venv/bin/svg-mcp",
-      "args": [],
-      "env": {}
-    }
-  }
-}
