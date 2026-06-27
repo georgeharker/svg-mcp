@@ -22,10 +22,19 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
 ## Quickstart (Claude)
 
-1. **Prerequisites** — just **Python ≥ 3.12**. Rendering happens **in-process** (the
-   [resvg](https://github.com/linebender/resvg) engine ships as the `resvg-py` dependency), so
-   there's no separate renderer to install. *Optionally*, install the resvg **CLI** for a small
-   per-render speedup — it's used automatically when on `PATH`:
+1. **Prerequisites** — **Python ≥ 3.12** and **[uv](https://docs.astral.sh/uv/)**. Every path
+   below runs svg-mcp through uv — standalone *and* the
+   [Claude Code plugin](#install-as-a-claude-code-plugin) — so install it first if you don't have
+   it:
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
+   # alternatives: brew install uv  ·  pipx install uv  ·  winget install astral-sh.uv (Windows)
+   ```
+
+   Rendering happens **in-process** (the [resvg](https://github.com/linebender/resvg) engine ships
+   as the `resvg-py` dependency), so there's no separate renderer to install. *Optionally*, install
+   the resvg **CLI** for a small per-render speedup — used automatically when on `PATH`:
 
    ```bash
    brew install resvg          # OPTIONAL (macOS; or: cargo install resvg)
@@ -43,13 +52,7 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
         libgirepository-2.0-dev gir1.2-girepository-2.0 libcairo2-dev
     ```
 
-2. **Install.** You need [uv](https://docs.astral.sh/uv/) — install it first if you don't have it
-   ([docs](https://docs.astral.sh/uv/getting-started/installation/)):
-
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
-   # alternatives: brew install uv  ·  pipx install uv  ·  winget install astral-sh.uv (Windows)
-   ```
+2. **Install.**
 
    **Recommended — no clone.** Install svg-mcp into an environment you manage, so the entrypoint
    is stable and launches fast (no per-invocation dependency resolution):
@@ -78,7 +81,6 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
    ```bash
    uv sync                             # → ./.venv with svg-mcp + deps (from pyproject/uv.lock)
    # equivalently, without uv.lock:  uv venv && uv pip install -e .
-   # no uv at all:                   python -m venv .venv && .venv/bin/pip install -e .
    ```
 
    → entrypoint: **`./.venv/bin/svg-mcp`** (absolute: `$(pwd)/.venv/bin/svg-mcp`).
