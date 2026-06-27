@@ -83,6 +83,23 @@ add_variable_width_path(
 The result is a filled ribbon (set `style.fill`, not stroke). Use `closed=true` for an annular
 ribbon.
 
+## Arrowheads & endpoint markers
+
+![Arrowhead presets — triangle, barbed, stealth, diamond, open, dot — on curved paths.](img/arrows.png){width=360}
+
+`define_arrow_marker` builds a head from a preset; `apply_marker` attaches it to a path/line/curve.
+The marker is `orient="auto"` (rotates to the path's direction) and scales with the stroke width, so
+an arrow on a curve points along the tangent at its tip.
+
+```
+head = define_arrow_marker(preset="barbed", color="#6366f1")   # also: triangle/stealth/diamond/open/dot
+line = add_path(d="M30,120 C120,60 220,160 300,90",
+                style={fill:"none", stroke:"#6366f1", stroke-width:4})
+apply_marker(target=line, marker=head, position="end")          # or "start" / "mid"
+```
+
+For a fully custom head, build the shapes yourself and use `define_marker(content=[…])` instead.
+
 ## Duplicate & restyle
 
 ```
@@ -92,6 +109,23 @@ duplicate(target=card, style={fill:"#3b82f6"})   # a clone, recolored, still an 
 
 `duplicate` deep-copies the subtree (descendants get fresh ids) and preserves parametric specs.
 For many instances that update together, use `define_symbol` + `add_use`.
+
+**Restyle one node, or many in one call.** `restyle` merges by default (only the props you pass
+change; `replace=true` swaps the whole style). Pass `edits` to apply different styles to many nodes
+in a single round-trip — ideal for a wholesale recolor/gloss pass:
+
+```
+restyle(target="card", style={stroke:"#000", stroke-width:2})    # single (merge)
+restyle(edits=[                                                   # batch — one call
+  {target:"bezel", style:{fill:"url(#sheen)"}},
+  {target:"dot1",  style:{fill:"#ef4444", opacity:0.8}},
+  {target:"dot2",  style:{fill:"#10b981"}, replace:true},
+])
+```
+
+For styles reused across many nodes, prefer a **named style**: `define_style("chip", {…})` +
+`apply_styles(target, ["chip"])`, then `edit_style("chip", {…})` (merge) updates every node wearing
+it at once; `delete_style("chip")` removes the class.
 
 ## Gradients & export
 

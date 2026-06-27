@@ -53,3 +53,11 @@ offset with round/miter/bevel joins. Positive distance grows, negative insets.
 SVG strokes are constant width, so swelling/tapering lines — calligraphy, brush strokes, tapered
 arrows — are drawn as a **fill**. `add_variable_width_path` expands a centerline with a per-vertex
 width into a filled ribbon, with butt/round caps and optional cubic (Catmull-Rom) smoothing.
+
+## Arrowheads
+
+![Arrowhead presets — triangle, barbed, stealth, diamond, open, dot.](img/arrows.png)
+
+`define_arrow_marker` builds an endpoint head from a preset (triangle / barbed / stealth / diamond /
+open / dot); `apply_marker` attaches it at the start, middle, or end. Heads are `orient="auto"`, so
+they follow the path's tangent — note each arrow above points along its curve.
