@@ -104,7 +104,8 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
      claude mcp add svg-mcp -- "$(pwd)/.venv/bin/svg-mcp"
      ```
 
-     (Or just open the project — it ships a [`.mcp.json`](./.mcp.json) you can approve.)
+     (Or skip the clone entirely and install it as a plugin — see
+     [Install as a Claude Code plugin](#install-as-a-claude-code-plugin).)
 
    - **Claude Desktop** — add to `claude_desktop_config.json` and restart the app:
 
@@ -373,8 +374,8 @@ Quickest sanity check (no LLM): render a sample poster to PNG.
 .venv/bin/python scripts/demo.py            # writes demo_output.png
 ```
 
-**Claude Code** — this repo ships a project [`.mcp.json`](./.mcp.json); open the project and
-approve the `svg-mcp` server, or add it explicitly:
+**Claude Code** — install it as a [plugin](#install-as-a-claude-code-plugin), or add the server
+explicitly:
 
 ```bash
 claude mcp add svg-mcp -- /Users/geohar/Development/svg-mcp/.venv/bin/svg-mcp
