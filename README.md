@@ -20,7 +20,7 @@ query, and manipulate as groups, layers, transforms, and masks, with a fast
 See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 [`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md) catalog for the inkex → tool mapping.
 
-## Quickstart (Claude)
+## Quickstart
 
 1. **Prerequisites** — **Python ≥ 3.12** and **[uv](https://docs.astral.sh/uv/)**. Every path
    below runs svg-mcp through uv — standalone *and* the
