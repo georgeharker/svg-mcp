@@ -1,6 +1,6 @@
 {
   "name": "svg-mcp",
-  "version": "0.2.0",
+  "version": "0.2.5",
   "description": "Structured, hierarchical SVG authoring for an LLM with a render-and-see feedback loop, backed by an inkex document model.",
   "author": {
     "name": "George Harker",
