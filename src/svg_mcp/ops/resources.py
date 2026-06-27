@@ -96,6 +96,31 @@ def define_style(doc: Document, name: str, props: Style) -> str:
     return name
 
 
+def edit_style(doc: Document, name: str, props: Style, *, replace: bool = False) -> str:
+    """Edit a named style — MERGE ``props`` into it by default, or REPLACE it wholesale.
+
+    Mirrors ``restyle``'s ergonomics for a CSS class: merging changes only the props you pass and
+    keeps the rest. Every node carrying the class updates, since it's a shared ``<style>`` rule.
+    Errors if the style isn't defined yet — use ``define_style`` to create it.
+    """
+    if name not in doc.styles:
+        raise InvalidArgument(f"no named style {name!r}; create it with define_style")
+    resolved = resolve_paint_refs(doc, props) or {}
+    doc.styles[name] = resolved if replace else {**doc.styles[name], **resolved}
+    _sync_stylesheet(doc)
+    return name
+
+
+def delete_style(doc: Document, name: str) -> str:
+    """Delete a named style. Nodes still referencing the class keep their ``class`` attr but lose
+    its rules. Errors if the style isn't defined."""
+    if name not in doc.styles:
+        raise InvalidArgument(f"no named style {name!r}")
+    del doc.styles[name]
+    _sync_stylesheet(doc)
+    return name
+
+
 def apply_styles(doc: Document, target: str, names: list[str]) -> NodeRef:
     """Apply named styles to a node by setting its ``class`` attribute."""
     element = doc.resolve(target)
@@ -698,6 +723,77 @@ def define_marker(
     marker_id = doc.add_def(marker, "marker", name)
     for node in content:
         marker.add(doc.resolve(node))
+    return marker_id
+
+
+# Arrowhead presets, drawn in a 0..10 marker viewBox pointing +x (forward along the path).
+# Value: (path d, filled, refX). refX puts the tip ~at the path end with a slight overlap so a
+# stroke tucks under the head. "dot" is a special-cased circle.
+_ARROW_PRESETS: dict[str, tuple[str, bool, float]] = {
+    "triangle": ("M0,0 L10,5 L0,10 Z", True, 9.0),
+    "barbed": ("M0,0 L10,5 L0,10 L3.5,5 Z", True, 9.0),
+    "stealth": ("M0,0 L10,5 L0,10 L4.5,5 Z", True, 9.5),
+    "diamond": ("M0,5 L5,0 L10,5 L5,10 Z", True, 9.0),
+    "open": ("M1,1 L9.5,5 L1,9", False, 8.5),  # stroked chevron (no fill)
+    "dot": ("", True, 5.0),  # special-cased to a circle
+}
+
+
+def define_arrow_marker(
+    doc: Document,
+    *,
+    preset: str = "triangle",
+    size: float = 8.0,
+    color: str = "#000000",
+    stroke_width: float = 1.6,
+    name: str | None = None,
+) -> str:
+    """Create an arrowhead/endpoint ``<marker>`` from a named preset; returns its id.
+
+    A one-call convenience over ``define_marker``: it builds the head geometry for you. Apply it
+    with ``apply_marker(target, id, position="end")`` (or start/mid). It is ``orient="auto"``
+    so it follows the path direction, and ``markerUnits="strokeWidth"`` so it scales with the line.
+
+    Args:
+        preset: One of "triangle", "barbed", "stealth", "diamond", "open" (stroked chevron), "dot".
+        size: Marker size in stroke-width multiples (markerWidth/Height).
+        color: Head color — the fill for solid presets, the stroke for "open".
+        stroke_width: Stroke width (in the 0..10 marker space) for the "open" preset.
+        name: Friendly name, usable as the "@name" shorthand.
+
+    Returns:
+        The marker's id (use it as ``apply_marker``'s ``marker`` argument).
+    """
+    spec = _ARROW_PRESETS.get(preset)
+    if spec is None:
+        raise InvalidArgument(f"unknown arrow preset {preset!r}; choices: {sorted(_ARROW_PRESETS)}")
+    path_d, filled, ref_x = spec
+    marker = inkex.Marker()
+    for key, value in (
+        ("refX", ref_x),
+        ("refY", 5.0),
+        ("markerWidth", size),
+        ("markerHeight", size),
+        ("orient", "auto"),
+        ("markerUnits", "strokeWidth"),
+        ("viewBox", "0 0 10 10"),  # map the 0..10 geometry cleanly into the marker box
+    ):
+        marker.set(key, value)
+    marker_id = doc.add_def(marker, "marker", name)
+    shape: BaseElement
+    if preset == "dot":
+        shape = inkex.Circle.new((5.0, 5.0), 4.0)
+        shape.style = inkex.Style({"fill": color})
+    elif filled:
+        shape = inkex.PathElement.new(path_d)
+        shape.style = inkex.Style({"fill": color, "stroke": "none"})
+    else:
+        shape = inkex.PathElement.new(path_d)
+        shape.style = inkex.Style(
+            {"fill": "none", "stroke": color, "stroke-width": str(stroke_width)}
+        )
+    marker.add(shape)
+    shape.set_id(doc.new_id("arrowhead"))
     return marker_id
 
 

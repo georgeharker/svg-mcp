@@ -277,6 +277,14 @@ class VariableWidthStroke(BaseModel):
     name: str | None = None
 
 
+class StyleEdit(BaseModel):
+    """One node's restyle for the batch form of `restyle`."""
+
+    target: str
+    style: ShapeStyle
+    replace: bool = False
+
+
 class RectSpec(BaseModel):
     """One rectangle for the bulk `add_rects` tool."""
 
@@ -423,21 +431,34 @@ def create_document(
 
 @mcp.tool
 @emits_change
-def import_svg(*, svg: str | None = None, path: str | None = None) -> dict[str, str | bool]:
-    """Load an existing SVG into a new session document, so you can render/inspect/edit it.
+def import_svg(
+    *, svg: str | None = None, path: str | None = None, into_active: bool = False
+) -> dict[str, str | bool]:
+    """Load an existing SVG into the session, so you can render/inspect/edit it.
 
     Provide the source EITHER inline via `svg` OR from a file via `path` (preferred for large
-    documents — avoids inlining the whole string). The imported document becomes active.
+    documents — avoids inlining the whole string).
+
+    By default this opens a NEW document. Set `into_active=True` to load the SVG INTO the active
+    document instead — same `document_id`, same live-preview URL, same session — replacing its
+    content. Use that to author a whole document as SVG text (a big wholesale change in one call)
+    without losing the doc identity, then keep doing incremental named-node edits on it afterward.
+    With no active document yet, it falls back to opening a new one.
 
     Args:
         svg: Complete SVG source as a string.
         path: Filesystem path to an `.svg` file to read instead.
+        into_active: Replace the active document's content (keep its id) vs. opening a new one.
 
     Returns:
-        {document_id, active}. The new document becomes active.
+        {document_id, active, replaced}. `replaced` is true when an existing doc was overwritten.
     """
-    document_id = _store().register(ops.load_svg_document(svg=svg, path=path))
-    return {"document_id": document_id, "active": True}
+    document = ops.load_svg_document(svg=svg, path=path)
+    store = _store()
+    if into_active and store.active_id is not None:
+        document_id = store.replace(None, document)
+        return {"document_id": document_id, "active": True, "replaced": True}
+    return {"document_id": store.register(document), "active": True, "replaced": False}
 
 
 @mcp.tool
@@ -1368,26 +1389,42 @@ def delete_node(*, document_id: str | None = None, target: str) -> str:
 @mcp.tool
 @emits_change
 def restyle(
-    *, document_id: str | None = None, target: str, style: ShapeStyle, replace: bool = False
-) -> dict[str, str | None]:
-    """Update a node's presentation style — MERGE by default, or REPLACE.
+    *,
+    document_id: str | None = None,
+    target: str | None = None,
+    style: ShapeStyle | None = None,
+    replace: bool = False,
+    edits: list[StyleEdit] | None = None,
+) -> dict[str, str | None] | list[dict[str, str | None]]:
+    """Update node presentation styles — MERGE by default, or REPLACE.
 
     By default (`replace=false`) this is a partial edit: only the properties you pass are changed,
-    and every other existing style property is kept. Pass `replace=true` to discard the node's
-    entire current style and set it to exactly what you provide here.
+    and every other existing style property is kept. Pass `replace=true` to discard a node's entire
+    current style and set it to exactly what you provide.
+
+    SINGLE: pass `target` + `style`. BATCH: pass `edits` — a list of `{target, style, replace?}`
+    objects — to restyle many nodes (each with its own style) in ONE call. Ideal for a wholesale
+    pass (e.g. recoloring/gloss across dozens of nodes) without per-node round-trips.
 
     Args:
-        target: Node id or name.
-        style: The properties to set/override (fill, stroke, stroke_width, opacity, …). Fill/stroke
-            may be a color or a paint ref (url(#id) or @name). Properties you omit are left as-is
-            when merging, or dropped when replacing.
-        replace: false (default) = merge into the existing style; true = replace it wholesale.
+        target: Node id or name (single form).
+        style: Properties to set/override (single form). Fill/stroke may be a color or paint ref
+            (url(#id) or @name). Omitted props are kept when merging, dropped when replacing.
+        replace: false (default) = merge into the existing style; true = replace wholesale.
+        edits: Batch form — a list of per-node `{target, style, replace?}` edits.
 
     Returns:
-        The node's {id, tag, name}.
+        The node's {id, tag, name} for the single form, or a list of them for the batch form.
     """
-    style_dict = style.to_style_dict()
-    return ops.restyle(_doc(document_id), target, style_dict, replace=replace).as_dict()
+    doc = _doc(document_id)
+    if edits is not None:
+        refs = ops.restyle_many(
+            doc, [(e.target, e.style.to_style_dict(), e.replace) for e in edits]
+        )
+        return [ref.as_dict() for ref in refs]
+    if target is None or style is None:
+        raise ValueError("restyle needs either target+style, or edits")
+    return ops.restyle(doc, target, style.to_style_dict(), replace=replace).as_dict()
 
 
 # --- in-place geometry edits (mirror the add_* constructors) ----------------
@@ -2339,6 +2376,47 @@ def define_style(*, document_id: str | None = None, name: str, style: ShapeStyle
 
 @mcp.tool
 @emits_change
+def edit_style(
+    *,
+    document_id: str | None = None,
+    name: str,
+    style: ShapeStyle,
+    replace: bool = False,
+) -> str:
+    """Edit a named style — MERGE the given props by default, or REPLACE it wholesale.
+
+    Like `restyle` but for a reusable CSS class: merging changes only the props you pass and keeps
+    the rest. Every node carrying the class updates at once (shared `<style>` rule). Errors if the
+    style isn't defined yet — use `define_style` to create it.
+
+    Args:
+        name: The named style/class to edit.
+        style: Properties to merge (or, with replace=true, the full new style).
+        replace: false (default) = merge into the existing class; true = replace it wholesale.
+
+    Returns:
+        The style name.
+    """
+    return ops.edit_style(_doc(document_id), name, style.to_style_dict(), replace=replace)
+
+
+@mcp.tool
+@emits_change
+def delete_style(*, document_id: str | None = None, name: str) -> str:
+    """Delete a named style. Nodes still referencing the class keep their `class` attribute but lose
+    its rules. Errors if the style isn't defined.
+
+    Args:
+        name: The named style/class to remove.
+
+    Returns:
+        The deleted style name.
+    """
+    return ops.delete_style(_doc(document_id), name)
+
+
+@mcp.tool
+@emits_change
 def apply_styles(
     *, document_id: str | None = None, target: str, names: list[str]
 ) -> dict[str, str | None]:
@@ -3180,6 +3258,45 @@ def define_marker(
 
 @mcp.tool
 @emits_change
+def define_arrow_marker(
+    *,
+    document_id: str | None = None,
+    preset: Literal["triangle", "barbed", "stealth", "diamond", "open", "dot"] = "triangle",
+    size: float = 8.0,
+    color: str = "#000000",
+    stroke_width: float = 1.6,
+    name: str | None = None,
+) -> str:
+    """Create an arrowhead/endpoint marker from a named preset — a one-call shortcut for arrows.
+
+    Builds the head geometry for you (vs `define_marker`, where you supply the shapes). Apply it
+    with `apply_marker(target, <id>, position="end")` (or "start"/"mid"). The marker is
+    `orient="auto"` (follows the path direction) and scales with the stroke width, so an arrow on a
+    curve points along the tangent at its tip.
+
+    Args:
+        preset: "triangle" (solid), "barbed" (notched back), "stealth" (sharp notched), "diamond",
+            "open" (stroked chevron, no fill), or "dot" (circle).
+        size: Marker size in stroke-width multiples.
+        color: Head color — fill for solid presets, stroke for "open".
+        stroke_width: Stroke width (in the 0..10 marker space) for the "open" preset.
+        name: Friendly name, usable as the "@name" paint/resource shorthand.
+
+    Returns:
+        The marker's id — pass it to `apply_marker`.
+    """
+    return ops.define_arrow_marker(
+        _doc(document_id),
+        preset=preset,
+        size=size,
+        color=color,
+        stroke_width=stroke_width,
+        name=name,
+    )
+
+
+@mcp.tool
+@emits_change
 def apply_marker(
     *, document_id: str | None = None, target: str, marker: str, position: str = "end"
 ) -> dict[str, str | None]:
@@ -3387,6 +3504,40 @@ def set_document_metadata(
     """
     return ops.set_document_metadata(
         _doc(document_id), title=title, creator=creator, rights=rights, date=date
+    )
+
+
+@mcp.tool
+@emits_change
+def resize_document(
+    *,
+    document_id: str | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    mode: Literal["plain", "scale", "fit"] = "plain",
+    margin: float = 0.0,
+) -> dict[str, str | None]:
+    """Resize the document canvas after creation (width/height/viewBox).
+
+    Modes:
+        plain: set width/height with a 1:1 viewBox — the canvas grows or crops around the content,
+            which keeps its coordinates. Needs width + height.
+        scale: set width/height but keep the current viewBox — the content scales to fill the new
+            canvas. Needs width + height.
+        fit: set viewBox (and size) to the content's bounding box plus `margin` — shrink-wraps/crops
+            to the artwork. width/height optional (default = the fitted box; if given, content
+            scales to that size).
+
+    Args:
+        width, height: New canvas dimensions in user units (required for plain/scale).
+        mode: "plain", "scale", or "fit".
+        margin: Padding around the content for "fit" mode.
+
+    Returns:
+        The new {width, height, viewBox}.
+    """
+    return ops.resize_document(
+        _doc(document_id), width=width, height=height, mode=mode, margin=margin
     )
 
 

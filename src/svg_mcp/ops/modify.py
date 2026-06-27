@@ -53,6 +53,11 @@ def restyle(doc: Document, target: str, style: Style, *, replace: bool = False) 
     return _ref(element)
 
 
+def restyle_many(doc: Document, edits: list[tuple[str, Style, bool]]) -> list[NodeRef]:
+    """Apply many ``(target, style, replace)`` restyles in one call (a wholesale styling pass)."""
+    return [restyle(doc, target, style, replace=replace) for target, style, replace in edits]
+
+
 def reparent(
     doc: Document,
     target: str,

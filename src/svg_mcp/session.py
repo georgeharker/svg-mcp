@@ -38,6 +38,19 @@ class DocumentStore:
         self._active = document_id
         return document_id
 
+    def replace(self, document_id: str | None, document: Document) -> str:
+        """Swap the Document behind an existing id (keeps the id and preview), make it active.
+
+        Lets ``import_svg`` load fresh SVG into the *active* document instead of spawning a new
+        one — so the document_id, live-preview URL, and session anchor all persist.
+        """
+        resolved = self.resolve_id(document_id)
+        if resolved not in self._docs:
+            raise DocumentNotFound(f"no document with id {resolved!r}")
+        self._docs[resolved] = document
+        self._active = resolved
+        return resolved
+
     def resolve_id(self, document_id: str | None) -> str:
         """Resolve an explicit id, or the active document when ``document_id`` is None."""
         if document_id is not None:

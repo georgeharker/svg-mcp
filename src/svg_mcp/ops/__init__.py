@@ -36,7 +36,7 @@ from .construct import (
 )
 from .geometry import edit_path, edit_shape
 from .layers import list_layers, move_to_layer, rename_layer, set_layer_state
-from .meta import set_description, set_document_metadata, set_title
+from .meta import resize_document, set_description, set_document_metadata, set_title
 from .modify import (
     apply_transform,
     delete_node,
@@ -45,6 +45,7 @@ from .modify import (
     raise_node,
     reparent,
     restyle,
+    restyle_many,
     rotate_node,
     scale_node,
     set_name,
@@ -84,6 +85,7 @@ from .resources import (
     boolean,
     clear_clip,
     clear_mask,
+    define_arrow_marker,
     define_clip,
     define_filter,
     define_linear_gradient,
@@ -94,6 +96,8 @@ from .resources import (
     define_radial_gradient,
     define_style,
     define_symbol,
+    delete_style,
+    edit_style,
 )
 
 __all__ = [
@@ -141,6 +145,7 @@ __all__ = [
     "delete_node",
     "reparent",
     "restyle",
+    "restyle_many",
     "set_name",
     "edit_shape",
     "edit_path",
@@ -170,10 +175,13 @@ __all__ = [
     "set_title",
     "set_description",
     "set_document_metadata",
+    "resize_document",
     # resources
     "FePrimitive",
     "boolean",
     "define_style",
+    "edit_style",
+    "delete_style",
     "apply_styles",
     "define_linear_gradient",
     "define_radial_gradient",
@@ -186,6 +194,7 @@ __all__ = [
     "define_symbol",
     "define_pattern",
     "define_marker",
+    "define_arrow_marker",
     "apply_marker",
     "define_filter",
     "apply_filter",

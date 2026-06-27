@@ -155,6 +155,114 @@ def test_variable_width_path_edit_roundtrip() -> None:
     assert isinstance(params, dict) and params["widths"] == [20.0, 20.0, 20.0]
 
 
+def test_edit_style_merges_and_replaces() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    ops.define_style(doc, "card", {"fill": "#ff0000", "stroke": "#000000"})
+    ops.edit_style(doc, "card", {"stroke-width": "2"})  # merge: keeps fill+stroke
+    assert doc.styles["card"] == {"fill": "#ff0000", "stroke": "#000000", "stroke-width": "2"}
+    ops.edit_style(doc, "card", {"fill": "#0000ff"}, replace=True)  # wholesale
+    assert doc.styles["card"] == {"fill": "#0000ff"}
+
+
+def test_edit_style_requires_existing() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    with pytest.raises(InvalidArgument):
+        ops.edit_style(doc, "ghost", {"fill": "#fff"})
+
+
+def test_delete_style_removes_it() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    ops.define_style(doc, "card", {"fill": "#ff0000"})
+    ops.delete_style(doc, "card")
+    assert "card" not in doc.styles
+    with pytest.raises(InvalidArgument):
+        ops.delete_style(doc, "card")
+
+
+def test_restyle_many_applies_per_node_styles() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    a = ops.add_rect(doc, x=0, y=0, width=10, height=10, name="a")
+    b = ops.add_rect(doc, x=20, y=20, width=10, height=10, name="b", style={"fill": "#fff"})
+    refs = ops.restyle_many(
+        doc, [("a", {"fill": "#ff0000"}, False), ("b", {"stroke": "#00ff00"}, True)]
+    )
+    assert [r.id for r in refs] == [a.id, b.id]
+    assert "ff0000" in str(doc.resolve("a").style)
+    assert "00ff00" in str(doc.resolve("b").style) and "fff" not in str(doc.resolve("b").style)
+
+
+def test_document_store_replace_keeps_id() -> None:
+    store = DocumentStore()
+    did, doc1 = store.create(100, 100)
+    ops.add_rect(doc1, x=0, y=0, width=5, height=5, name="orig")
+    new_doc = ops.load_svg_document(
+        svg='<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"></svg>'
+    )
+    rid = store.replace(None, new_doc)  # import-into-active: same id, new content
+    assert rid == did and store.active_id == did
+    assert store.get(did) is new_doc  # the document behind the id was swapped
+
+
+def test_handles_survive_export_reimport() -> None:
+    # Author with a name + parametric spec, serialize, reimport: id/name/spec all persist.
+    _, doc = DocumentStore().create(200, 200)
+    sq = ops.add_squircle(doc, x=20, y=20, width=120, height=120, radius=30, name="card")
+    svg = export_svg(doc)
+    assert f'id="{sq.id}"' in svg and 'inkscape:label="card"' in svg and "data-squircle" in svg
+    doc2 = ops.load_svg_document(svg=svg)
+    assert doc2.resolve("card").get_id() == sq.id  # resolve by name survives
+    p = get_params(doc2, "card")
+    assert p["kind"] == "squircle" and p["parametric"] is True  # parametric spec survives
+    ops.edit_squircle(doc2, "card", radius=45)  # still editable in place
+    params = get_params(doc2, "card")["params"]
+    assert isinstance(params, dict) and params["radius"] == 45.0
+
+
+def test_resize_document_modes() -> None:
+    def fresh() -> Document:
+        _, d = DocumentStore().create(400, 400)
+        ops.add_circle(d, cx=120, cy=120, r=40)
+        ops.add_rect(d, x=170, y=170, width=60, height=60)
+        return d
+
+    plain = ops.resize_document(fresh(), width=200, height=200, mode="plain")
+    assert plain == {"width": "200", "height": "200", "viewBox": "0 0 200 200"}
+
+    scaled = ops.resize_document(fresh(), width=800, height=800, mode="scale")
+    assert scaled["width"] == "800" and scaled["viewBox"] == "0 0 400 400"  # viewBox kept → scales
+
+    fit = ops.resize_document(fresh(), mode="fit", margin=10)
+    # content spans (80,80)-(230,230); +10 margin → viewBox 70 70 170 170
+    assert fit["viewBox"] is not None
+    vx, vy, vw, vh = (float(t) for t in fit["viewBox"].split())
+    assert abs(vx - 70) < 1 and abs(vy - 70) < 1 and abs(vw - 170) < 1 and abs(vh - 170) < 1
+
+
+def test_resize_document_validation() -> None:
+    _, doc = DocumentStore().create(100, 100)
+    with pytest.raises(InvalidArgument):
+        ops.resize_document(doc, mode="plain")  # missing width/height
+    with pytest.raises(InvalidArgument):
+        ops.resize_document(doc, width=50, height=50, mode="bogus")
+
+
+def test_define_arrow_marker_presets_and_apply() -> None:
+    _, doc = DocumentStore().create(120, 60)
+    for preset in ("triangle", "barbed", "stealth", "diamond", "open", "dot"):
+        mk = ops.define_arrow_marker(doc, preset=preset, color="#123456")
+        assert mk  # returns a marker id
+    line = ops.add_path(doc, d="M10,30 L110,30", style={"fill": "none", "stroke": "#000"})
+    ops.apply_marker(doc, line.id, mk, position="end")
+    svg = export_svg(doc)
+    assert "<marker" in svg and "orient" in svg and "marker-end" in svg
+
+
+def test_define_arrow_marker_rejects_unknown_preset() -> None:
+    _, doc = DocumentStore().create(50, 50)
+    with pytest.raises(InvalidArgument):
+        ops.define_arrow_marker(doc, preset="zigzag")
+
+
 def test_name_clash_warns_on_create() -> None:
     _, doc = DocumentStore().create(100, 100)
     a = ops.add_rect(doc, x=0, y=0, width=10, height=10, name="box")
