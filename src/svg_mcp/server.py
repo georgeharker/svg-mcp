@@ -172,7 +172,8 @@ FILTERS & EFFECTS
   `apply_blend`, `apply_morphology`, `apply_turbulence`, `apply_displacement_map`.
 - Composite effects (synthesized, no native equivalent — for icons/slides): `apply_inner_shadow`,
   `apply_outer_glow`, `apply_inner_glow`, `apply_outline` (sticker stroke), `apply_bevel`,
-  `apply_gloss` (glassy sheen), `apply_grain` (noise overlay).
+  `apply_gloss` (edge shine, gradient roll-off at the light angle), `apply_front_light` (broad
+  3D front-face light), `apply_grain` (noise overlay). All stack and have a light `angle`.
 - `get_filter(target)` describes the filter on a node — `{id, kind, params}` under the same param
   names — and `edit_filter(target, {param: value, …})` changes them ONE BY ONE in place (works for
   built-ins and composites; reads/edits without re-applying). Custom `define_filter` graphs report
@@ -3619,14 +3620,37 @@ def apply_bevel(
 @mcp.tool
 @emits_change
 def apply_gloss(
-    *, document_id: str | None = None, target: str, position: float = 0.18, size: float = 0.4,
-    spread: float = 2, intensity: float = 0.55, color: str = "#ffffff", replace: bool = False,
+    *, document_id: str | None = None, target: str, angle: float = 90, offset: float = 14,
+    blur: float = 3, rolloff: float = 0.8, intensity: float = 0.9, color: str = "#ffffff",
+    replace: bool = False,
 ) -> dict[str, str | None]:
-    """Glassy highlight BAND clipped to the shape (not a wash): `position`/`size` are fractions of
-    the height, `spread` softens; preserves the base fill outside the band."""
+    """Contour-following glassy highlight on the lit EDGE, rolling off with a gradient at the angle.
+
+    `angle` = light direction (90 = top, 120 = upper-left); `offset` = how far the shine sits;
+    `blur` = softness; `rolloff` = gradient reach (smaller = tighter directional fade). For a broad
+    FRONT-face light instead, use `apply_front_light`. The base fill is preserved.
+    """
     return ops.apply_gloss(
-        _doc(document_id), target, position=position, size=size, spread=spread, intensity=intensity,
-        color=color, replace=replace,
+        _doc(document_id), target, angle=angle, offset=offset, blur=blur, rolloff=rolloff,
+        intensity=intensity, color=color, replace=replace,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def apply_front_light(
+    *, document_id: str | None = None, target: str, angle: float = 90, offset: float = 14,
+    blur: float = 6, rolloff: float = 1.0, intensity: float = 0.5, color: str = "#ffffff",
+    replace: bool = False,
+) -> dict[str, str | None]:
+    """INVERSE of `apply_gloss`: light the FRONT BODY behind the lit edge — exactly where gloss does
+    NOT shine (a soft 3D front-lit / inflated look). Shares gloss's params, so applying both gives
+    complementary regions: `offset` = how far in the front face begins; `blur` = softness;
+    `rolloff` = how far the light reaches across the face. Base fill preserved.
+    """
+    return ops.apply_front_light(
+        _doc(document_id), target, angle=angle, offset=offset, blur=blur, rolloff=rolloff,
+        intensity=intensity, color=color, replace=replace,
     ).as_dict()
 
 

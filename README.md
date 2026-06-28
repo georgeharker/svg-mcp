@@ -172,6 +172,17 @@ The full inkex catalog is mapped through to **117 MCP tools** (see
   gradients, patterns, markers, **clip + mask**, and **filters** (blur, drop-shadow,
   color-matrix/overlay, blend, morphology, component-transfer, turbulence, displacement, plus a
   raw filter-graph builder).
+- **Composable effect stack** — Photoshop-style layer effects that **stack** on one node (each
+  `apply_*` appends; `replace=true` starts fresh), each bounded by a `size`/falloff so the
+  interior fill stays intact: `apply_drop_shadow`, `apply_inner_shadow`, `apply_outer_glow`,
+  `apply_inner_glow`, `apply_outline`, `apply_bevel`, `apply_gloss` (glassy sheen on the lit edge),
+  `apply_front_light` (its inverse — lights the front body), `apply_grain`. `get_filter` describes
+  the ordered stack and `edit_filter` tweaks one effect's params by index — round-tripping through
+  the SVG (`data-fx`).
+
+<p align="center">
+  <img src="./docs/effects.png" alt="svg-mcp effects" width="720">
+</p>
 - **Transforms** as primitives: translate, rotate-about-center, scale-about-anchor, skew, raw.
 - **Queries / context**: `current_context`, `describe_node`, `list_resources`, `outline`, bbox,
   computed style, transform/CTM, unit conversion, selectors (`find`/`get_subtree`), image

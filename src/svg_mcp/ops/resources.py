@@ -11,6 +11,7 @@ import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 import inkex
 from inkex import BaseElement
@@ -550,6 +551,29 @@ def _flood(flt: BaseElement, color: float | str, opacity: float | str, result: s
     _fe(flt, "feFlood", {"flood-color": color, "flood-opacity": opacity, "result": result})
 
 
+def _angled_gradient(
+    angle: float | str, stops: list[tuple[float, float]], color: float | str
+) -> str:
+    """A data-URI SVG of a linear gradient along the light ``angle`` (offset 0 = the lit side).
+
+    ``stops`` are ``(offset, opacity)`` pairs. Used via feImage as a directional roll-off ramp —
+    resvg renders it scaled to the shape's box.
+    """
+    a = math.radians(float(angle))
+    x1, y1 = 0.5 + 0.5 * math.cos(a), 0.5 - 0.5 * math.sin(a)  # lit side
+    x2, y2 = 0.5 - 0.5 * math.cos(a), 0.5 + 0.5 * math.sin(a)  # far side
+    body = "".join(
+        f'<stop offset="{o:g}" stop-color="{color}" stop-opacity="{op:g}"/>' for o, op in stops
+    )
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1" viewBox="0 0 1 1">'
+        f'<linearGradient id="g" x1="{x1:g}" y1="{y1:g}" x2="{x2:g}" y2="{y2:g}">'
+        f'{body}</linearGradient>'
+        '<rect width="1" height="1" fill="url(#g)"/></svg>'
+    )
+    return "data:image/svg+xml;utf8," + quote(svg)
+
+
 # Each builder adds its fe* graph (results namespaced by the effect index ``i`` so stacked effects
 # don't collide), reading its input from ``src`` (the running source for "source" transforms) and
 # returning ``(placement, result_name)``. Layer effects compute from the original SourceAlpha.
@@ -642,20 +666,42 @@ def _b_inner_glow(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str,
     return "above", r
 
 
-def _b_gloss(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]:
-    # A localized glassy highlight BAND, not a surface wash: flood a soft-edged sub-region rectangle
-    # (position/size down the shape), blur it, and clip to the shape's alpha.
+def _b_contour_light(flt: BaseElement, p: FxParams, i: int, op: str) -> tuple[str, str]:
+    # Shared core for the two complementary contour lights. Offset the alpha away from the light by
+    # `offset`, then keep one of the two regions split by that shifted copy: `op="out"` keeps the
+    # thin band hugging the lit EDGE (gloss); `op="in"` keeps the FRONT body behind it
+    # (front_light). Soften with `blur`, then roll the result off along the light angle with a
+    # gradient (`rolloff` = reach, smaller = tighter), flood with `color` at `intensity`, clip.
     r = f"e{i}"
-    position, size = float(p["position"]), float(p["size"])
-    top = max(0.0, position - size / 2)
-    _fe(flt, "feFlood", {
-        "flood-color": p["color"], "flood-opacity": p["intensity"],
-        "x": "0%", "y": f"{top * 100:g}%", "width": "100%", "height": f"{size * 100:g}%",
-        "result": f"{r}band"})
-    _fe(flt, "feGaussianBlur",
-        {"in": f"{r}band", "stdDeviation": p["spread"], "result": f"{r}soft"})
-    _fe(flt, "feComposite", {"in": f"{r}soft", "in2": "SourceAlpha", "operator": "in", "result": r})
+    angle = float(p["angle"])
+    offset = float(p["offset"])
+    dx, dy = -offset * math.cos(math.radians(angle)), offset * math.sin(math.radians(angle))
+    _fe(flt, "feOffset", {"in": "SourceAlpha", "dx": dx, "dy": dy, "result": f"{r}sh"})
+    _fe(flt, "feComposite",
+        {"in": "SourceAlpha", "in2": f"{r}sh", "operator": op, "result": f"{r}band"})
+    _fe(flt, "feGaussianBlur", {"in": f"{r}band", "stdDeviation": p["blur"], "result": f"{r}soft"})
+    ramp = _angled_gradient(angle, [(0.0, 1.0), (float(p["rolloff"]), 0.0)], "#ffffff")
+    _fe(flt, "feImage",
+        {"href": ramp, "width": "100%", "height": "100%", "preserveAspectRatio": "none",
+         "result": f"{r}ramp"})
+    _fe(flt, "feComposite", {  # multiply the region's alpha by the roll-off ramp
+        "in": f"{r}soft", "in2": f"{r}ramp", "operator": "arithmetic",
+        "k1": 1, "k2": 0, "k3": 0, "k4": 0, "result": f"{r}fade"})
+    _flood(flt, p["color"], p["intensity"], f"{r}c")
+    _fe(flt, "feComposite",
+        {"in": f"{r}c", "in2": f"{r}fade", "operator": "in", "result": f"{r}hi"})
+    _fe(flt, "feComposite", {"in": f"{r}hi", "in2": "SourceAlpha", "operator": "in", "result": r})
     return "above", r
+
+
+def _b_gloss(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]:
+    # Glassy highlight on the lit EDGE — a contour band hugging where the shape faces the light.
+    return _b_contour_light(flt, p, i, "out")
+
+
+def _b_front_light(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]:
+    # The INVERSE of gloss: light the FRONT body BEHIND the lit edge — exactly where gloss does not.
+    return _b_contour_light(flt, p, i, "in")
 
 
 def _b_bevel(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]:
@@ -713,8 +759,13 @@ _FILTER_KINDS: dict[str, _FilterKind] = {
     "bevel": _FilterKind(
         {"size": 4.0, "softness": 2.0, "angle": 135.0, "intensity": 0.7}, _b_bevel),
     "gloss": _FilterKind(
-        {"position": 0.18, "size": 0.4, "spread": 2.0, "intensity": 0.55, "color": "#ffffff"},
+        {"angle": 90.0, "offset": 14.0, "blur": 3.0, "rolloff": 0.8, "intensity": 0.9,
+         "color": "#ffffff"},
         _b_gloss),
+    "front_light": _FilterKind(
+        {"angle": 90.0, "offset": 14.0, "blur": 6.0, "rolloff": 1.0, "intensity": 0.5,
+         "color": "#ffffff"},
+        _b_front_light),
     "grain": _FilterKind({"scale": 0.9, "amount": 0.25, "monochrome": 1.0}, _b_grain),
 }
 
@@ -953,15 +1004,37 @@ def apply_bevel(
 
 
 def apply_gloss(
-    doc: Document, target: str, *, position: float = 0.18, size: float = 0.4, spread: float = 2,
-    intensity: float = 0.55, color: str = "#ffffff", name: str | None = None, replace: bool = False,
+    doc: Document, target: str, *, angle: float = 90, offset: float = 14, blur: float = 3,
+    rolloff: float = 0.8, intensity: float = 0.9, color: str = "#ffffff",
+    name: str | None = None, replace: bool = False,
 ) -> NodeRef:
-    """Glassy highlight BAND clipped to the shape — ``position``/``size`` (fractions of height),
-    ``spread`` (softness), ``intensity``; preserves the base fill outside the band."""
+    """Contour-following glassy highlight on the lit EDGE, rolling off with a gradient at the angle.
+
+    ``angle`` = light direction (90 = top, 120 = upper-left); ``offset`` = how far the shine sits;
+    ``blur`` = softness; ``rolloff`` = gradient reach (smaller = tighter directional fade). For a
+    broad FRONT-face light instead of an edge, use ``apply_front_light``. Base fill preserved.
+    """
     return _apply_fx(
         doc, target, "gloss",
-        {"position": position, "size": size, "spread": spread, "intensity": intensity,
-         "color": color}, name, replace=replace,
+        {"angle": angle, "offset": offset, "blur": blur, "rolloff": rolloff,
+         "intensity": intensity, "color": color}, name, replace=replace,
+    )
+
+
+def apply_front_light(
+    doc: Document, target: str, *, angle: float = 90, offset: float = 14, blur: float = 6,
+    rolloff: float = 1.0, intensity: float = 0.5, color: str = "#ffffff",
+    name: str | None = None, replace: bool = False,
+) -> NodeRef:
+    """The INVERSE of ``apply_gloss``: light the FRONT BODY behind the lit edge — exactly where
+    gloss does NOT shine (a soft 3D front-lit / inflated look). Shares gloss's params so the two
+    compose as complementary regions: ``offset`` = how far in the front face begins, ``blur`` =
+    softness, ``rolloff`` = how far the light reaches across the face. Base fill preserved.
+    """
+    return _apply_fx(
+        doc, target, "front_light",
+        {"angle": angle, "offset": offset, "blur": blur, "rolloff": rolloff,
+         "intensity": intensity, "color": color}, name, replace=replace,
     )
 
 
