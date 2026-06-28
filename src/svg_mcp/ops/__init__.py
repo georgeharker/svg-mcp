@@ -96,6 +96,7 @@ from .resources import (
     apply_turbulence,
     boolean,
     clear_clip,
+    clear_effects,
     clear_mask,
     define_arrow_marker,
     define_clip,
@@ -112,6 +113,7 @@ from .resources import (
     edit_filter,
     edit_style,
     get_filter,
+    remove_effect,
 )
 
 __all__ = [
@@ -235,5 +237,7 @@ __all__ = [
     "apply_grain",
     "get_filter",
     "edit_filter",
+    "clear_effects",
+    "remove_effect",
     "define_mesh_gradient",
 ]

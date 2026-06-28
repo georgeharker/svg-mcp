@@ -3550,39 +3550,44 @@ def apply_morphology(
 # --- composite effects (synthesized; describe/edit via get_filter/edit_filter) ----------------
 
 
+# Each apply_* below APPENDS an effect to the node's stack (pass replace=true to start fresh).
+# Effects are bounded by a `size`/falloff and compose: shadow + gloss + inner-shadow coexist.
+
+
 @mcp.tool
 @emits_change
 def apply_inner_shadow(
-    *, document_id: str | None = None, target: str, dx: float = 2, dy: float = 2, blur: float = 3,
-    color: str = "#000000", opacity: float = 0.6,
+    *, document_id: str | None = None, target: str, dx: float = 0, dy: float = 2, size: float = 3,
+    color: str = "#000000", opacity: float = 0.6, replace: bool = False,
 ) -> dict[str, str | None]:
-    """Inset shadow inside the shape's edges (composite; no native feInnerShadow)."""
+    """Inset shadow hugging the inside edge, decaying over `size` (interior fill untouched)."""
     return ops.apply_inner_shadow(
-        _doc(document_id), target, dx=dx, dy=dy, blur=blur, color=color, opacity=opacity
+        _doc(document_id), target, dx=dx, dy=dy, size=size, color=color, opacity=opacity,
+        replace=replace,
     ).as_dict()
 
 
 @mcp.tool
 @emits_change
 def apply_outer_glow(
-    *, document_id: str | None = None, target: str, blur: float = 4, color: str = "#ffffff",
-    opacity: float = 1.0,
+    *, document_id: str | None = None, target: str, size: float = 4, color: str = "#ffffff",
+    opacity: float = 1.0, replace: bool = False,
 ) -> dict[str, str | None]:
-    """Soft colored halo around the shape (composite glow). Edit via edit_filter."""
+    """Soft colored halo around the shape, spreading over `size` (composite glow)."""
     return ops.apply_outer_glow(
-        _doc(document_id), target, blur=blur, color=color, opacity=opacity
+        _doc(document_id), target, size=size, color=color, opacity=opacity, replace=replace
     ).as_dict()
 
 
 @mcp.tool
 @emits_change
 def apply_inner_glow(
-    *, document_id: str | None = None, target: str, blur: float = 4, color: str = "#ffffff",
-    opacity: float = 1.0,
+    *, document_id: str | None = None, target: str, size: float = 4, color: str = "#ffffff",
+    opacity: float = 1.0, replace: bool = False,
 ) -> dict[str, str | None]:
-    """Colored glow contained inside the shape's alpha (composite). Edit via edit_filter."""
+    """Colored glow inset from the edge over `size`, contained in the shape's alpha (composite)."""
     return ops.apply_inner_glow(
-        _doc(document_id), target, blur=blur, color=color, opacity=opacity
+        _doc(document_id), target, size=size, color=color, opacity=opacity, replace=replace
     ).as_dict()
 
 
@@ -3590,56 +3595,60 @@ def apply_inner_glow(
 @emits_change
 def apply_outline(
     *, document_id: str | None = None, target: str, width: float = 2, color: str = "#000000",
-    opacity: float = 1.0,
+    opacity: float = 1.0, replace: bool = False,
 ) -> dict[str, str | None]:
-    """Outline hugging the shape's alpha — a filter-based sticker stroke. Edit via edit_filter."""
+    """Outline hugging the shape's alpha — a filter-based sticker stroke; stackable under a glow."""
     return ops.apply_outline(
-        _doc(document_id), target, width=width, color=color, opacity=opacity
+        _doc(document_id), target, width=width, color=color, opacity=opacity, replace=replace
     ).as_dict()
 
 
 @mcp.tool
 @emits_change
 def apply_bevel(
-    *, document_id: str | None = None, target: str, blur: float = 3, depth: float = 4,
-    intensity: float = 0.8, angle: float = 225,
+    *, document_id: str | None = None, target: str, size: float = 4, softness: float = 2,
+    angle: float = 135, intensity: float = 0.7, replace: bool = False,
 ) -> dict[str, str | None]:
-    """Faux-3D raised edge via a specular highlight (composite emboss; angle = light azimuth)."""
+    """Faux-3D raised edge: paired light/dark edges — highlight on the `angle` side."""
     return ops.apply_bevel(
-        _doc(document_id), target, blur=blur, depth=depth, intensity=intensity, angle=angle
+        _doc(document_id), target, size=size, softness=softness, angle=angle, intensity=intensity,
+        replace=replace,
     ).as_dict()
 
 
 @mcp.tool
 @emits_change
 def apply_gloss(
-    *, document_id: str | None = None, target: str, intensity: float = 0.9, angle: float = 235,
-    color: str = "#ffffff",
+    *, document_id: str | None = None, target: str, position: float = 0.18, size: float = 0.4,
+    spread: float = 2, intensity: float = 0.55, color: str = "#ffffff", replace: bool = False,
 ) -> dict[str, str | None]:
-    """Glassy top sheen via a broad specular highlight (composite; angle = light azimuth)."""
+    """Glassy highlight BAND clipped to the shape (not a wash): `position`/`size` are fractions of
+    the height, `spread` softens; preserves the base fill outside the band."""
     return ops.apply_gloss(
-        _doc(document_id), target, intensity=intensity, angle=angle, color=color
+        _doc(document_id), target, position=position, size=size, spread=spread, intensity=intensity,
+        color=color, replace=replace,
     ).as_dict()
 
 
 @mcp.tool
 @emits_change
 def apply_grain(
-    *, document_id: str | None = None, target: str, frequency: float = 0.9, opacity: float = 0.25,
+    *, document_id: str | None = None, target: str, scale: float = 0.9, amount: float = 0.25,
+    monochrome: bool = True, replace: bool = False,
 ) -> dict[str, str | None]:
-    """Subtle monochrome noise overlay clipped to the shape (feTurbulence composite)."""
+    """Noise texture confined to the shape — `scale` (frequency), `amount`, `monochrome`."""
     return ops.apply_grain(
-        _doc(document_id), target, frequency=frequency, opacity=opacity
+        _doc(document_id), target, scale=scale, amount=amount, monochrome=monochrome,
+        replace=replace,
     ).as_dict()
 
 
 @mcp.tool
 def get_filter(*, document_id: str | None = None, target: str) -> _FilterInfo | None:
-    """Describe the filter applied to a node — {id, kind, params} — for read-then-edit.
+    """Describe a node's EFFECT STACK — {id, effects:[{index, kind, params}, …]} — to read-edit.
 
-    `params` use the same names as the apply_*/edit_filter interface (e.g. a drop_shadow's
-    dx/dy/blur/color/opacity). Works for built-ins and composites; a hand-built `define_filter`
-    reports kind="custom" with its primitive list. Returns null if the node has no filter.
+    Effects compose (shadow + gloss + inner-shadow on one node); `params` use the apply_*/edit
+    names. A hand-built `define_filter` reports kind="custom" + primitive list. Null if no filter.
 
     Args:
         target: Node id or name.
@@ -3650,19 +3659,45 @@ def get_filter(*, document_id: str | None = None, target: str) -> _FilterInfo | 
 @mcp.tool
 @emits_change
 def edit_filter(
-    *, document_id: str | None = None, target: str, params: _FxParams
+    *, document_id: str | None = None, target: str, params: _FxParams, index: int = 0
 ) -> dict[str, str | None]:
-    """Change a node's filter params ONE BY ONE — built-in OR composite — re-deriving the filter.
+    """Change ONE effect's params (by stack `index`), re-deriving the filter in place (same id).
 
-    Read current params with `get_filter`, then pass only the ones to change (e.g.
-    `{"blur": 6, "color": "#1e3a8a"}` on an outer_glow). Rebuilds the filter in place (same id),
-    so the node keeps referencing it. Rejects a hand-built `define_filter` and unknown param names.
+    Read the stack with `get_filter`, then pass only the params to change (e.g.
+    `{"size": 8, "color": "#1e3a8a"}` on the outer_glow at index 1). Rejects unknown param names
+    and a hand-built `define_filter`.
 
     Args:
         target: Node id or name (must already have a filter).
-        params: Param name → new value (partial; merged into the filter's current params).
+        params: Param name → new value (partial; merged into that effect's current params).
+        index: Which effect in the stack to edit (0-based; see get_filter).
     """
-    return ops.edit_filter(_doc(document_id), target, params).as_dict()
+    return ops.edit_filter(_doc(document_id), target, params, index=index).as_dict()
+
+
+@mcp.tool
+@emits_change
+def remove_effect(
+    *, document_id: str | None = None, target: str, index: int
+) -> dict[str, str | None]:
+    """Remove one effect from a node's stack by `index` (see get_filter); drops the filter if last.
+
+    Args:
+        target: Node id or name.
+        index: Which effect to remove (0-based).
+    """
+    return ops.remove_effect(_doc(document_id), target, index).as_dict()
+
+
+@mcp.tool
+@emits_change
+def clear_effects(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+    """Remove ALL effects from a node (detaches the whole filter).
+
+    Args:
+        target: Node id or name.
+    """
+    return ops.clear_effects(_doc(document_id), target).as_dict()
 
 
 @mcp.tool
