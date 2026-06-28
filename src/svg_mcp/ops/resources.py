@@ -6,7 +6,9 @@ Each ``define_*`` returns the new resource's id; ``apply_*`` wires a target node
 
 from __future__ import annotations
 
+import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import inkex
@@ -495,13 +497,253 @@ def _attach_filter(doc: Document, target: str, flt: BaseElement) -> NodeRef:
     return _ref(element)
 
 
+# ---- parametric filter registry -------------------------------------------
+# Every convenience filter is a *kind* with named params and a builder that writes its fe* graph.
+# Composites serialize their params as intent on the <filter> (single-primitive built-ins could be
+# read back off the primitive, but we store uniformly so get_filter/edit_filter are one code path):
+# describe reads {kind, params}; edit merges new params, rebuilds the graph, re-stores the intent.
+
+_FX_ATTR = "data-fx"
+FxParams = dict[str, float | str]
+# A node's filter described for read-then-edit (kind + params under the apply_* arg names).
+FilterInfo = dict[str, str | FxParams | list[str]]
+
+
+def _store_fx(flt: BaseElement, kind: str, params: FxParams) -> None:
+    flt.set(_FX_ATTR, json.dumps({"kind": kind, "params": params}, separators=(",", ":")))
+
+
+def _read_fx(flt: BaseElement) -> tuple[str, FxParams] | None:
+    raw = flt.get(_FX_ATTR)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return str(data["kind"]), dict(data["params"])
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _clear_primitives(flt: BaseElement) -> None:
+    for child in list(flt):
+        flt.remove(child)
+
+
+def _node_filter(doc: Document, element: BaseElement) -> BaseElement | None:
+    """The <filter> element a node references (via its `filter` style/attr), or None."""
+    ref = element.style.get("filter") or element.get("filter")
+    if not ref:
+        return None
+    match = re.search(r"url\(#([^)]+)\)", ref)
+    return None if match is None else doc.svg.getElementById(match.group(1))
+
+
+def _b_blur(flt: BaseElement, p: FxParams) -> None:
+    _fe(flt, "feGaussianBlur", {"in": "SourceGraphic", "stdDeviation": p["std_deviation"]})
+
+
+def _b_drop_shadow(flt: BaseElement, p: FxParams) -> None:
+    _fe(flt, "feGaussianBlur", {"in": "SourceAlpha", "stdDeviation": p["blur"], "result": "b"})
+    _fe(flt, "feOffset", {"in": "b", "dx": p["dx"], "dy": p["dy"], "result": "o"})
+    _fe(flt, "feFlood", {"flood-color": p["color"], "flood-opacity": p["opacity"], "result": "c"})
+    _fe(flt, "feComposite", {"in": "c", "in2": "o", "operator": "in", "result": "s"})
+    m = _fe(flt, "feMerge", {})
+    _fe(m, "feMergeNode", {"in": "s"})
+    _fe(m, "feMergeNode", {"in": "SourceGraphic"})
+
+
+def _b_color_matrix(flt: BaseElement, p: FxParams) -> None:
+    values = p.get("values") or None
+    _fe(flt, "feColorMatrix", {"in": "SourceGraphic", "type": p["type"], "values": values})
+
+
+def _b_color_overlay(flt: BaseElement, p: FxParams) -> None:
+    _fe(flt, "feFlood", {"flood-color": p["color"], "flood-opacity": p["opacity"], "result": "f"})
+    _fe(flt, "feComposite", {"in": "f", "in2": "SourceGraphic", "operator": "in"})
+
+
+def _b_blend(flt: BaseElement, p: FxParams) -> None:
+    _fe(flt, "feBlend", {"in": "SourceGraphic", "in2": "SourceGraphic", "mode": p["mode"]})
+
+
+def _b_morphology(flt: BaseElement, p: FxParams) -> None:
+    _fe(flt, "feMorphology",
+        {"in": "SourceGraphic", "operator": p["operator"], "radius": p["radius"]})
+
+
+def _b_inner_shadow(flt: BaseElement, p: FxParams) -> None:
+    inv = _fe(flt, "feComponentTransfer", {"in": "SourceAlpha", "result": "inv"})
+    _fe(inv, "feFuncA", {"type": "table", "tableValues": "1 0"})
+    _fe(flt, "feGaussianBlur", {"in": "inv", "stdDeviation": p["blur"], "result": "bl"})
+    _fe(flt, "feOffset", {"in": "bl", "dx": p["dx"], "dy": p["dy"], "result": "of"})
+    _fe(flt, "feFlood", {"flood-color": p["color"], "flood-opacity": p["opacity"], "result": "c"})
+    _fe(flt, "feComposite", {"in": "c", "in2": "of", "operator": "in", "result": "sh"})
+    _fe(flt, "feComposite", {"in": "sh", "in2": "SourceAlpha", "operator": "in", "result": "inner"})
+    m = _fe(flt, "feMerge", {})
+    _fe(m, "feMergeNode", {"in": "SourceGraphic"})
+    _fe(m, "feMergeNode", {"in": "inner"})
+
+
+def _b_outer_glow(flt: BaseElement, p: FxParams) -> None:
+    _fe(flt, "feGaussianBlur", {"in": "SourceAlpha", "stdDeviation": p["blur"], "result": "b"})
+    _fe(flt, "feFlood", {"flood-color": p["color"], "flood-opacity": p["opacity"], "result": "c"})
+    _fe(flt, "feComposite", {"in": "c", "in2": "b", "operator": "in", "result": "g"})
+    m = _fe(flt, "feMerge", {})
+    _fe(m, "feMergeNode", {"in": "g"})
+    _fe(m, "feMergeNode", {"in": "SourceGraphic"})
+
+
+def _b_inner_glow(flt: BaseElement, p: FxParams) -> None:
+    inv = _fe(flt, "feComponentTransfer", {"in": "SourceAlpha", "result": "inv"})
+    _fe(inv, "feFuncA", {"type": "table", "tableValues": "1 0"})
+    _fe(flt, "feGaussianBlur", {"in": "inv", "stdDeviation": p["blur"], "result": "b"})
+    _fe(flt, "feFlood", {"flood-color": p["color"], "flood-opacity": p["opacity"], "result": "c"})
+    _fe(flt, "feComposite", {"in": "c", "in2": "b", "operator": "in", "result": "sh"})
+    _fe(flt, "feComposite", {"in": "sh", "in2": "SourceAlpha", "operator": "in", "result": "inner"})
+    m = _fe(flt, "feMerge", {})
+    _fe(m, "feMergeNode", {"in": "SourceGraphic"})
+    _fe(m, "feMergeNode", {"in": "inner"})
+
+
+def _b_outline(flt: BaseElement, p: FxParams) -> None:
+    _fe(flt, "feMorphology",
+        {"in": "SourceAlpha", "operator": "dilate", "radius": p["width"], "result": "d"})
+    _fe(flt, "feComposite", {"in": "d", "in2": "SourceAlpha", "operator": "out", "result": "ring"})
+    _fe(flt, "feFlood", {"flood-color": p["color"], "flood-opacity": p["opacity"], "result": "c"})
+    _fe(flt, "feComposite", {"in": "c", "in2": "ring", "operator": "in", "result": "ol"})
+    m = _fe(flt, "feMerge", {})
+    _fe(m, "feMergeNode", {"in": "ol"})
+    _fe(m, "feMergeNode", {"in": "SourceGraphic"})
+
+
+def _b_bevel(flt: BaseElement, p: FxParams) -> None:
+    _fe(flt, "feGaussianBlur", {"in": "SourceAlpha", "stdDeviation": p["blur"], "result": "b"})
+    sp = _fe(flt, "feSpecularLighting", {
+        "in": "b", "surfaceScale": p["depth"], "specularConstant": p["intensity"],
+        "specularExponent": 18, "lighting-color": "#ffffff", "result": "sp"})
+    _fe(sp, "feDistantLight", {"azimuth": p["angle"], "elevation": 45})
+    _fe(flt, "feComposite", {"in": "sp", "in2": "SourceAlpha", "operator": "in", "result": "spc"})
+    m = _fe(flt, "feMerge", {})
+    _fe(m, "feMergeNode", {"in": "SourceGraphic"})
+    _fe(m, "feMergeNode", {"in": "spc"})
+
+
+def _b_gloss(flt: BaseElement, p: FxParams) -> None:
+    _fe(flt, "feGaussianBlur", {"in": "SourceAlpha", "stdDeviation": 1, "result": "b"})
+    sp = _fe(flt, "feSpecularLighting", {
+        "in": "b", "surfaceScale": 3, "specularConstant": p["intensity"],
+        "specularExponent": 2, "lighting-color": p["color"], "result": "sp"})
+    _fe(sp, "feDistantLight", {"azimuth": p["angle"], "elevation": 65})
+    _fe(flt, "feComposite", {"in": "sp", "in2": "SourceAlpha", "operator": "in", "result": "sh"})
+    m = _fe(flt, "feMerge", {})
+    _fe(m, "feMergeNode", {"in": "SourceGraphic"})
+    _fe(m, "feMergeNode", {"in": "sh"})
+
+
+def _b_grain(flt: BaseElement, p: FxParams) -> None:
+    _fe(flt, "feTurbulence", {
+        "type": "fractalNoise", "baseFrequency": p["frequency"],
+        "numOctaves": 2, "stitchTiles": "stitch", "result": "n"})
+    _fe(flt, "feColorMatrix", {
+        "in": "n", "type": "matrix",
+        "values": f"0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {p['opacity']} 0", "result": "m"})
+    _fe(flt, "feComposite", {"in": "m", "in2": "SourceGraphic", "operator": "in", "result": "g"})
+    mg = _fe(flt, "feMerge", {})
+    _fe(mg, "feMergeNode", {"in": "SourceGraphic"})
+    _fe(mg, "feMergeNode", {"in": "g"})
+
+
+@dataclass
+class _FilterKind:
+    params: FxParams  # arg names -> defaults
+    build: Callable[[BaseElement, FxParams], None]
+    region_pad: float = 0.5
+
+
+_FILTER_KINDS: dict[str, _FilterKind] = {
+    "blur": _FilterKind({"std_deviation": 2.0}, _b_blur),
+    "drop_shadow": _FilterKind(
+        {"dx": 2.0, "dy": 2.0, "blur": 2.0, "color": "#000000", "opacity": 0.5}, _b_drop_shadow),
+    "color_matrix": _FilterKind({"type": "matrix", "values": ""}, _b_color_matrix, 0.0),
+    "color_overlay": _FilterKind({"color": "#000000", "opacity": 1.0}, _b_color_overlay, 0.0),
+    "blend": _FilterKind({"mode": "normal"}, _b_blend, 0.0),
+    "morphology": _FilterKind({"operator": "dilate", "radius": 1.0}, _b_morphology),
+    "inner_shadow": _FilterKind(
+        {"dx": 2.0, "dy": 2.0, "blur": 2.0, "color": "#000000", "opacity": 0.5}, _b_inner_shadow),
+    "outer_glow": _FilterKind({"blur": 4.0, "color": "#ffffff", "opacity": 1.0}, _b_outer_glow),
+    "inner_glow": _FilterKind({"blur": 4.0, "color": "#ffffff", "opacity": 1.0}, _b_inner_glow),
+    "outline": _FilterKind({"width": 2.0, "color": "#000000", "opacity": 1.0}, _b_outline),
+    "bevel": _FilterKind(
+        {"blur": 3.0, "depth": 4.0, "intensity": 0.8, "angle": 225.0}, _b_bevel),
+    "gloss": _FilterKind({"intensity": 0.9, "angle": 235.0, "color": "#ffffff"}, _b_gloss),
+    "grain": _FilterKind({"frequency": 0.9, "opacity": 0.25}, _b_grain),
+}
+
+
+def _apply_fx(
+    doc: Document, target: str, kind: str, params: FxParams, name: str | None
+) -> NodeRef:
+    spec = _FILTER_KINDS[kind]
+    flt = _new_filter(doc, name, region_pad=spec.region_pad)
+    spec.build(flt, params)
+    _store_fx(flt, kind, params)
+    return _attach_filter(doc, target, flt)
+
+
+def get_filter(doc: Document, target: str) -> FilterInfo | None:
+    """Describe the filter applied to a node — ``{id, kind, params}`` — for read-then-edit.
+
+    ``params`` use the same names as the ``apply_*``/``edit_filter`` interface. A hand-built
+    ``define_filter`` returns ``kind="custom"`` with the primitive tag list. ``None`` if the node
+    has no filter.
+    """
+    element = doc.resolve(target)
+    flt = _node_filter(doc, element)
+    if flt is None:
+        return None
+    fx = _read_fx(flt)
+    if fx is not None:
+        kind, params = fx
+        return {"id": str(flt.get_id()), "kind": kind, "params": params}
+    prims = [str(etree.QName(c).localname) for c in flt if isinstance(c.tag, str)]
+    return {"id": str(flt.get_id()), "kind": "custom", "params": {}, "primitives": prims}
+
+
+def edit_filter(doc: Document, target: str, params: FxParams) -> NodeRef:
+    """Change a node's filter params ONE BY ONE (built-in or composite); re-derives the filter.
+
+    Merges ``params`` into the filter's current params and rebuilds it in place (same filter id).
+    Read the current params with :func:`get_filter`. Rejects a hand-built ``define_filter`` (rebuild
+    it there) and unknown param names for the kind.
+    """
+    element = doc.resolve(target)
+    flt = _node_filter(doc, element)
+    if flt is None:
+        raise InvalidArgument(f"{target!r} has no filter to edit")
+    fx = _read_fx(flt)
+    if fx is None:
+        raise InvalidArgument(
+            f"{target!r}'s filter is hand-built (define_filter); rebuild it there, not edit_filter"
+        )
+    kind, current = fx
+    spec = _FILTER_KINDS.get(kind)
+    if spec is None:
+        raise InvalidArgument(f"unknown filter kind {kind!r}")
+    unknown = sorted(set(params) - set(spec.params))
+    if unknown:
+        raise InvalidArgument(f"{kind} has no param(s) {unknown}; valid: {sorted(spec.params)}")
+    merged = {**current, **params}
+    _clear_primitives(flt)
+    spec.build(flt, merged)
+    _store_fx(flt, kind, merged)
+    return _ref(element)
+
+
 def apply_blur(
     doc: Document, target: str, *, std_deviation: float, name: str | None = None
 ) -> NodeRef:
     """Gaussian-blur a node."""
-    flt = _new_filter(doc, name)
-    _fe(flt, "feGaussianBlur", {"in": "SourceGraphic", "stdDeviation": std_deviation})
-    return _attach_filter(doc, target, flt)
+    return _apply_fx(doc, target, "blur", {"std_deviation": std_deviation}, name)
 
 
 def apply_drop_shadow(
@@ -516,15 +758,10 @@ def apply_drop_shadow(
     name: str | None = None,
 ) -> NodeRef:
     """Drop shadow, synthesized (inkex/SVG1.1 has no feDropShadow)."""
-    flt = _new_filter(doc, name)
-    _fe(flt, "feGaussianBlur", {"in": "SourceAlpha", "stdDeviation": blur, "result": "blur"})
-    _fe(flt, "feOffset", {"in": "blur", "dx": dx, "dy": dy, "result": "off"})
-    _fe(flt, "feFlood", {"flood-color": color, "flood-opacity": opacity, "result": "color"})
-    _fe(flt, "feComposite", {"in": "color", "in2": "off", "operator": "in", "result": "shadow"})
-    merge = _fe(flt, "feMerge", {})
-    _fe(merge, "feMergeNode", {"in": "shadow"})
-    _fe(merge, "feMergeNode", {"in": "SourceGraphic"})
-    return _attach_filter(doc, target, flt)
+    return _apply_fx(
+        doc, target, "drop_shadow",
+        {"dx": dx, "dy": dy, "blur": blur, "color": color, "opacity": opacity}, name,
+    )
 
 
 def apply_color_matrix(
@@ -536,26 +773,19 @@ def apply_color_matrix(
     name: str | None = None,
 ) -> NodeRef:
     """feColorMatrix: type ``matrix``/``saturate``/``hueRotate``/``luminanceToAlpha``."""
-    flt = _new_filter(doc, name, region_pad=0.0)
-    _fe(flt, "feColorMatrix", {"in": "SourceGraphic", "type": type, "values": values})
-    return _attach_filter(doc, target, flt)
+    return _apply_fx(doc, target, "color_matrix", {"type": type, "values": values or ""}, name)
 
 
 def apply_color_overlay(
     doc: Document, target: str, *, color: str, opacity: float = 1.0, name: str | None = None
 ) -> NodeRef:
     """Tint a node by flooding a color and compositing it inside the source alpha."""
-    flt = _new_filter(doc, name, region_pad=0.0)
-    _fe(flt, "feFlood", {"flood-color": color, "flood-opacity": opacity, "result": "flood"})
-    _fe(flt, "feComposite", {"in": "flood", "in2": "SourceGraphic", "operator": "in"})
-    return _attach_filter(doc, target, flt)
+    return _apply_fx(doc, target, "color_overlay", {"color": color, "opacity": opacity}, name)
 
 
 def apply_blend(doc: Document, target: str, *, mode: str, name: str | None = None) -> NodeRef:
     """feBlend the node against itself (sets a blend mode via filter)."""
-    flt = _new_filter(doc, name, region_pad=0.0)
-    _fe(flt, "feBlend", {"in": "SourceGraphic", "in2": "SourceGraphic", "mode": mode})
-    return _attach_filter(doc, target, flt)
+    return _apply_fx(doc, target, "blend", {"mode": mode}, name)
 
 
 def apply_morphology(
@@ -567,9 +797,77 @@ def apply_morphology(
     name: str | None = None,
 ) -> NodeRef:
     """feMorphology: ``dilate`` (thicken) or ``erode`` (thin) by ``radius``."""
-    flt = _new_filter(doc, name)
-    _fe(flt, "feMorphology", {"in": "SourceGraphic", "operator": operator, "radius": radius})
-    return _attach_filter(doc, target, flt)
+    return _apply_fx(doc, target, "morphology", {"operator": operator, "radius": radius}, name)
+
+
+def apply_inner_shadow(
+    doc: Document, target: str, *, dx: float = 2, dy: float = 2, blur: float = 3,
+    color: str = "#000000", opacity: float = 0.6, name: str | None = None,
+) -> NodeRef:
+    """Inset shadow inside the shape's edges (composite; no native feInnerShadow)."""
+    return _apply_fx(
+        doc, target, "inner_shadow",
+        {"dx": dx, "dy": dy, "blur": blur, "color": color, "opacity": opacity}, name,
+    )
+
+
+def apply_outer_glow(
+    doc: Document, target: str, *, blur: float = 4, color: str = "#ffffff",
+    opacity: float = 1.0, name: str | None = None,
+) -> NodeRef:
+    """Soft colored halo around the shape (composite glow)."""
+    return _apply_fx(
+        doc, target, "outer_glow", {"blur": blur, "color": color, "opacity": opacity}, name
+    )
+
+
+def apply_inner_glow(
+    doc: Document, target: str, *, blur: float = 4, color: str = "#ffffff",
+    opacity: float = 1.0, name: str | None = None,
+) -> NodeRef:
+    """Colored glow contained inside the shape's alpha (composite)."""
+    return _apply_fx(
+        doc, target, "inner_glow", {"blur": blur, "color": color, "opacity": opacity}, name
+    )
+
+
+def apply_outline(
+    doc: Document, target: str, *, width: float = 2, color: str = "#000000",
+    opacity: float = 1.0, name: str | None = None,
+) -> NodeRef:
+    """Outline hugging the shape's alpha (feMorphology dilate; a filter-based sticker stroke)."""
+    return _apply_fx(
+        doc, target, "outline", {"width": width, "color": color, "opacity": opacity}, name
+    )
+
+
+def apply_bevel(
+    doc: Document, target: str, *, blur: float = 3, depth: float = 4, intensity: float = 0.8,
+    angle: float = 225, name: str | None = None,
+) -> NodeRef:
+    """Faux-3D raised edge via a specular highlight (composite emboss; angle = light azimuth)."""
+    return _apply_fx(
+        doc, target, "bevel",
+        {"blur": blur, "depth": depth, "intensity": intensity, "angle": angle}, name,
+    )
+
+
+def apply_gloss(
+    doc: Document, target: str, *, intensity: float = 0.9, angle: float = 235,
+    color: str = "#ffffff", name: str | None = None,
+) -> NodeRef:
+    """Glassy top sheen via a broad specular highlight (composite; angle = light azimuth)."""
+    return _apply_fx(
+        doc, target, "gloss", {"intensity": intensity, "angle": angle, "color": color}, name
+    )
+
+
+def apply_grain(
+    doc: Document, target: str, *, frequency: float = 0.9, opacity: float = 0.25,
+    name: str | None = None,
+) -> NodeRef:
+    """Subtle monochrome noise overlay clipped to the shape (feTurbulence composite)."""
+    return _apply_fx(doc, target, "grain", {"frequency": frequency, "opacity": opacity}, name)
 
 
 def apply_component_transfer(

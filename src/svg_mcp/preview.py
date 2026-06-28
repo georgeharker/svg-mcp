@@ -61,6 +61,7 @@ class _Bucket:
         self.active: str | None = None
         self.sources: dict[str, str] = {}
         self.index_json = _EMPTY_INDEX
+        self.backdrop = "checker"  # page backdrop: "checker" | "white" | "black" | any CSS color
         self.clients: set[queue.Queue[int]] = set()
 
 
@@ -177,12 +178,24 @@ class PreviewServer:
                 doc_id = bucket.active or ""
             return bucket.sources.get(doc_id)
 
-    def state(self, token: str) -> tuple[int, str | None, str]:
+    def state(self, token: str) -> tuple[int, str | None, str, str]:
         with self._lock:
             bucket = self._buckets.get(token)
             if bucket is None:
-                return 0, None, _EMPTY_INDEX
-            return bucket.gen, bucket.active, bucket.index_json
+                return 0, None, _EMPTY_INDEX, "checker"
+            return bucket.gen, bucket.active, bucket.index_json, bucket.backdrop
+
+    def set_backdrop(self, token: str, backdrop: str) -> None:
+        """Set a session's preview backdrop and nudge its browsers (MCP-side control)."""
+        with self._lock:
+            bucket = self._bucket(token)
+            bucket.backdrop = backdrop
+            bucket.gen += 1
+            gen = bucket.gen
+            clients = list(bucket.clients)
+        for q in clients:
+            with contextlib.suppress(queue.Full):
+                q.put_nowait(gen)
 
     def subscribe(self, token: str) -> queue.Queue[int]:
         q: queue.Queue[int] = queue.Queue(maxsize=8)
@@ -248,13 +261,20 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
             if sub == ["events"]:
                 return self._sse(token)
             if sub == ["version"]:
-                gen, active, _ = self.preview.state(token)
+                gen, active, _, backdrop = self.preview.state(token)
                 return self._text(
-                    json.dumps({"gen": gen, "active": active, "vector": rsvg_available()}),
+                    json.dumps(
+                        {
+                            "gen": gen,
+                            "active": active,
+                            "vector": rsvg_available(),
+                            "backdrop": backdrop,
+                        }
+                    ),
                     "application/json",
                 )
             if sub == ["documents"]:
-                _, _, index_json = self.preview.state(token)
+                index_json = self.preview.state(token)[2]
                 return self._text(index_json, "application/json")
 
             # /<token>/{doc}/svg | /render | /export.{fmt}
@@ -364,6 +384,11 @@ _PAGE = """<!doctype html>
                 flex-direction: column; gap: 2px; padding: 6px; background: #232428;
                 border: 1px solid #44464c; border-radius: 8px; min-width: 120px; }
   .save.open .menu { display: flex; }
+  #bd-color { width: 24px; height: 26px; padding: 0; border: 1px solid #44464c;
+              border-radius: 6px; background: #2f3136; cursor: pointer; }
+  .swatch { width: 22px; height: 22px; padding: 0; border: 1px solid #44464c;
+            border-radius: 5px; cursor: pointer; }
+  .swatch.on, #backdrop button.on { outline: 2px solid #4b6a96; outline-offset: 1px; }
   main { flex: 1; overflow: auto; display: grid; place-items: center; padding: 24px;
          background-color: #141517;
          background-image: linear-gradient(45deg,#1d1e21 25%,transparent 25%),
@@ -394,6 +419,15 @@ _PAGE = """<!doctype html>
     <button id="zoom-out">−</button>
     <button id="zoom-fit">Fit</button>
     <button id="zoom-in">+</button>
+  </div>
+  <div class="group" id="backdrop" title="preview backdrop">
+    <button data-bd="checker" class="on" title="checkerboard">▦</button>
+    <button class="swatch" data-bd="#ffffff" style="background:#ffffff" title="white"></button>
+    <button class="swatch" data-bd="#d4d4d4" style="background:#d4d4d4" title="light grey"></button>
+    <button class="swatch" data-bd="#808080" style="background:#808080" title="grey"></button>
+    <button class="swatch" data-bd="#404040" style="background:#404040" title="dark grey"></button>
+    <button class="swatch" data-bd="#111111" style="background:#111111" title="black"></button>
+    <input type="color" id="bd-color" value="#1e293b" title="custom backdrop">
   </div>
   <div class="save" id="save">
     <button>Save</button>
@@ -428,6 +462,27 @@ function zoom(f){ scale = Math.min(Math.max(scale*f, 0.05), 16); applyScale(); }
 document.getElementById('zoom-in').onclick = () => zoom(1.25);
 document.getElementById('zoom-out').onclick = () => zoom(0.8);
 document.getElementById('zoom-fit').onclick = () => { scale = 1; applyScale(); };
+
+// Backdrop behind the (possibly transparent) artwork — controllable here AND from MCP.
+let backdrop = 'checker';
+function applyBackdrop(bd){
+  backdrop = bd || 'checker';
+  const named = {white:'#ffffff', black:'#111111', grey:'#808080', gray:'#808080'};
+  if (backdrop === 'checker') {
+    view.style.backgroundImage = '';   // fall back to the CSS checkerboard
+    view.style.backgroundColor = '';
+  } else {
+    view.style.backgroundImage = 'none';
+    view.style.backgroundColor = named[backdrop] || backdrop;
+  }
+  document.querySelectorAll('#backdrop button').forEach(
+    b => b.classList.toggle('on', b.dataset.bd === backdrop)
+  );
+}
+document.querySelectorAll('#backdrop button').forEach(b => {
+  b.onclick = () => applyBackdrop(b.dataset.bd);
+});
+document.getElementById('bd-color').oninput = (e) => applyBackdrop(e.target.value);
 
 // Drag to pan when zoomed in (adjusts scroll, so it cooperates with centering).
 let drag = null;
@@ -480,12 +535,18 @@ function buildSaveMenu(){
 }
 
 let gen = -1;
+let lastServerBackdrop = null;
 async function refresh(){
   const r = await fetch(base + '/version', {cache:'no-store'});
   if (!r.ok) return;
   const v = await r.json();
   gen = v.gen;
   if (v.vector !== vector) { vector = v.vector; buildSaveMenu(); }
+  // MCP-set backdrop wins when it actually changes; local picks persist between server changes.
+  if (v.backdrop !== undefined && v.backdrop !== lastServerBackdrop) {
+    lastServerBackdrop = v.backdrop;
+    applyBackdrop(v.backdrop);
+  }
   if (!v.active) { meta.textContent = 'no active document'; stage.replaceChildren(); return; }
   try {
     const idx = await (await fetch(base + '/documents', {cache:'no-store'})).json();

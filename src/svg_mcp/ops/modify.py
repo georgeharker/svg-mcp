@@ -37,6 +37,30 @@ def delete_node(doc: Document, target: str) -> str:
     return node_id
 
 
+def delete_nodes(doc: Document, targets: list[str]) -> list[str]:
+    """Delete several nodes in one call; returns the deleted ids.
+
+    All targets are resolved BEFORE anything is deleted, so a bad/ambiguous target aborts the whole
+    call (nothing is removed) rather than leaving a half-applied delete.
+    """
+    elements = [doc.resolve(t) for t in targets]
+    deleted: list[str] = []
+    for element in elements:
+        deleted.append(str(element.get_id()))
+        element.delete()
+    return deleted
+
+
+def set_transform(doc: Document, target: str, transform: str) -> NodeRef:
+    """REPLACE a node's local transform (unlike apply_transform, which composes onto it).
+
+    Pass an empty string (or ``"none"``) to clear the transform entirely.
+    """
+    element = doc.resolve(target)
+    element.transform = inkex.Transform("" if transform == "none" else transform)
+    return _ref(element)
+
+
 def restyle(doc: Document, target: str, style: Style, *, replace: bool = False) -> NodeRef:
     """Merge ``style`` into the node's presentation (or replace it wholesale).
 

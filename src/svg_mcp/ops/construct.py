@@ -87,6 +87,19 @@ def _apply_style(element: BaseElement, style: Style | None) -> None:
         element.style = inkex.Style(style)
 
 
+def _with_default_stroke(style: Style | None) -> Style:
+    """Linear primitives (line/polyline) are invisible without a stroke — default one if none set.
+
+    Triggers only when ``stroke`` is absent, so an explicit ``stroke`` (including ``none``) is
+    respected; a present ``stroke-width`` without a color still gets the default color.
+    """
+    out = dict(style or {})
+    if "stroke" not in out:
+        out["stroke"] = "#000000"
+        out.setdefault("stroke-width", "1")
+    return out
+
+
 @names_node
 def _place(
     doc: Document,
@@ -182,7 +195,8 @@ def add_line(
 ) -> NodeRef:
     element = inkex.Line.new((x1, y1), (x2, y2))
     return _place(
-        doc, element, prefix="line", parent=parent, name=name, style=style, transform=transform
+        doc, element, prefix="line", parent=parent, name=name,
+        style=_with_default_stroke(style), transform=transform,
     )
 
 
@@ -201,7 +215,8 @@ def add_polyline(
 ) -> NodeRef:
     element = inkex.Polyline.new(_points_str(points))
     return _place(
-        doc, element, prefix="polyline", parent=parent, name=name, style=style, transform=transform
+        doc, element, prefix="polyline", parent=parent, name=name,
+        style=_with_default_stroke(style), transform=transform,
     )
 
 
@@ -987,6 +1002,131 @@ def add_text_run(
         tspan.label = name
     _apply_style(tspan, _resolve_paint_refs(doc, style))
     return NodeRef(id=str(tspan.get_id()), tag=str(tspan.TAG), name=name)
+
+
+def edit_text(
+    doc: Document,
+    target: str,
+    *,
+    content: str | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Edit a ``<text>``/``<tspan>`` in place (mirrors add_text): content, position, style.
+
+    Keeps the node's id, clip, filters, and z-order — unlike delete + re-add. Setting ``content``
+    replaces this node's own text run; any child ``<tspan>`` runs are left in place (edit those by
+    id for multi-run/multi-line text). Only the fields you pass are changed.
+    """
+    element = doc.resolve(target)
+    if not isinstance(element, (inkex.TextElement, inkex.Tspan)):
+        raise InvalidArgument(
+            f"{target!r} is a <{element.TAG}>, not text; edit_text needs a text or tspan node"
+        )
+    if content is not None:
+        element.text = content
+    if x is not None:
+        element.set("x", x)
+    if y is not None:
+        element.set("y", y)
+    _merge_style_and_transform(doc, element, style, transform)
+    return NodeRef(
+        id=str(element.get_id()), tag=str(element.TAG), name=getattr(element, "label", None)
+    )
+
+
+_LINE_HEIGHT_ATTR = "data-line-height"
+
+
+def _lay_out_lines(element: BaseElement, lines: list[str], x: float, line_height: float) -> None:
+    """(Re)build a text node's children as one ``<tspan>`` per line, spaced by line_height em."""
+    for child in list(element):
+        if isinstance(child, inkex.Tspan):
+            child.delete()
+    element.set(_LINE_HEIGHT_ATTR, str(line_height))
+    for index, line in enumerate(lines):
+        tspan = inkex.Tspan()
+        tspan.set("x", x)
+        tspan.set("dy", "0" if index == 0 else f"{line_height}em")
+        tspan.text = line
+        element.add(tspan)
+
+
+def add_text_block(
+    doc: Document,
+    *,
+    x: float,
+    y: float,
+    content: str,
+    line_height: float = 1.2,
+    parent: str | None = None,
+    name: str | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Add a MULTI-LINE text block: split ``content`` on ``\\n`` into evenly-spaced lines.
+
+    Each line becomes a ``<tspan>`` anchored at ``x`` with ``dy = line_height`` em — no manual
+    per-line ``y`` arithmetic. ``line_height`` is a multiple of the font size (1.2 ≈ normal). Set
+    ``text_anchor`` in ``style`` to left/center/right-align all lines. Re-flow it later with
+    ``edit_text_block`` (which re-lays-out from new content, keeping the spacing).
+    """
+    element = inkex.TextElement()
+    element.set("x", x)
+    element.set("y", y)
+    _lay_out_lines(element, content.split("\n"), x, line_height)
+    return _place(
+        doc, element, prefix="text", parent=parent, name=name, style=style, transform=transform
+    )
+
+
+def edit_text_block(
+    doc: Document,
+    target: str,
+    *,
+    content: str | None = None,
+    line_height: float | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    style: Style | None = None,
+    transform: str | None = None,
+) -> NodeRef:
+    """Re-flow a multi-line text block in place (mirrors add_text_block), keeping its id/style.
+
+    Pass ``content`` to replace the lines (re-laid-out automatically), and/or ``line_height``/``x``
+    to re-space/re-anchor — solving the "had to re-space everything when a line was added" problem.
+    Only the fields you pass change; the block's id, clip, filters, and z-order are preserved.
+    """
+    element = doc.resolve(target)
+    if not isinstance(element, inkex.TextElement):
+        raise InvalidArgument(f"{target!r} is a <{element.TAG}>, not a text block")
+    if y is not None:
+        element.set("y", y)
+    if content is not None or line_height is not None or x is not None:
+        stored_lh = element.get(_LINE_HEIGHT_ATTR)
+        new_lh = line_height if line_height is not None else _safe_float(stored_lh, 1.2)
+        new_x = x if x is not None else _safe_float(element.get("x"), 0.0)
+        if content is not None:
+            lines = content.split("\n")
+        else:
+            lines = [child.text or "" for child in element if isinstance(child, inkex.Tspan)]
+        _lay_out_lines(element, lines, new_x, new_lh)
+        element.set("x", new_x)
+    _merge_style_and_transform(doc, element, style, transform)
+    return NodeRef(
+        id=str(element.get_id()), tag=str(element.TAG), name=getattr(element, "label", None)
+    )
+
+
+def _safe_float(value: str | None, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def add_text_on_path(

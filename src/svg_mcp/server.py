@@ -26,6 +26,8 @@ from pydantic import AnyUrl, BaseModel
 from . import ops
 from . import preview as _preview
 from .model.document import Document
+from .ops.resources import FilterInfo as _FilterInfo
+from .ops.resources import FxParams as _FxParams
 from .query import convert_units as _convert_units
 from .query import describe_document as _describe_document
 from .query import describe_node as _describe_node
@@ -130,8 +132,12 @@ STYLING & PAINT
   also takes a bare number (px). Unknown/misspelled keys are REJECTED with an error (not dropped),
   so set the whole style in one call and trust it stuck.
 - Colors accept hex (`#ff0000`), `rgb()/rgba()`, CSS names (`tomato`), or `none`.
-- A fill/stroke may also reference a defined resource: `url(#<id>)` or the shorthand `@<name>`
-  (e.g. a gradient/pattern you defined). Define the resource first, then use its id as the paint.
+- A fill/stroke may also reference a defined resource by id `url(#<id>)`, the shorthand `@<name>`,
+  or `url(#<name>)` — all resolve to the defined gradient/pattern. Define the resource first.
+- `add_line`/`add_polyline` (and bulk `add_lines`) auto-get a 1px black stroke when none is set,
+  so they're never invisible; pass `stroke` (or `stroke:"none"`) to override. `fill` defaults to
+  black, so closed shapes show — but an unstyled OPEN `add_path`/`add_paths` (no fill region) can
+  still be invisible; give it a stroke.
 - `restyle` MERGES by default — it only changes the properties you pass, keeping the rest. Pass
   `replace=true` to discard the node's current style and set exactly what you provide.
 
@@ -164,6 +170,17 @@ TRANSFORMS
 FILTERS & EFFECTS
 - Convenience: `apply_blur`, `apply_drop_shadow`, `apply_color_matrix`, `apply_color_overlay`,
   `apply_blend`, `apply_morphology`, `apply_turbulence`, `apply_displacement_map`.
+- Composite effects (synthesized, no native equivalent — for icons/slides): `apply_inner_shadow`,
+  `apply_outer_glow`, `apply_inner_glow`, `apply_outline` (sticker stroke), `apply_bevel`,
+  `apply_gloss` (glassy sheen), `apply_grain` (noise overlay).
+- `get_filter(target)` describes the filter on a node — `{id, kind, params}` under the same param
+  names — and `edit_filter(target, {param: value, …})` changes them ONE BY ONE in place (works for
+  built-ins and composites; reads/edits without re-applying). Custom `define_filter` graphs report
+  `kind="custom"` and aren't editable via `edit_filter` (rebuild them with `define_filter`).
+- Each `apply_*` filter REPLACES the node's filter — a node has ONE `filter`, so the last apply
+  wins (re-applying a drop shadow swaps it, it does not stack). To COMBINE effects (e.g. blur +
+  drop shadow) on one node, build a single filter with `define_filter` (one `fe*` graph) and attach
+  it with `apply_filter` — not by stacking convenience calls.
 - For full control, `define_filter` builds an arbitrary `fe*` primitive graph; attach with
   `apply_filter`. (SVG has no native feDropShadow — `apply_drop_shadow` synthesizes one.)
 
@@ -171,6 +188,9 @@ TEXT
 - `add_text(x, y, content)` for a text block; `add_text_run` appends `<tspan>` runs. For multiple
   LINES, append runs with an absolute `x` and an incremental `dy` (e.g. `dy="1.2em"`) per line.
   `add_text_on_path` flows text along an existing path (pass the path's id).
+- To change wording/position/style of EXISTING text, use `edit_text(target, content=…)` IN PLACE —
+  do not delete + re-add (that drops the node's id/clip/filters/z-order).
+- Do NOT estimate text width by chars × size — call `measure_text` (below); it's why it exists.
 - Fonts: `list_fonts()` returns the family names installed on this machine — pick one and set it
   via `style.font_family`. `font_size`, `font_weight` (`bold`/`700`), `font_style` (`italic`),
   `text_anchor` (start/middle/end), `letter_spacing`, `word_spacing`, `text_decoration`,
@@ -1305,6 +1325,119 @@ def add_text(
 
 @mcp.tool
 @emits_change
+def edit_text(
+    *,
+    document_id: str | None = None,
+    target: str,
+    content: str | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Edit a `<text>`/`<tspan>` in place (mirrors add_text): content, position, style, transform.
+
+    Use this for wording or restyling changes instead of delete + re-add (which drops the node's
+    id, clip, filters, and z-order). Setting `content` replaces this node's own text run; child
+    `<tspan>` runs are left alone — edit those by id for multi-line/multi-run text. Only the fields
+    you pass change.
+
+    Args:
+        target: Node id or name (a text or tspan node).
+        content: New text string (omit to keep the current text).
+        x, y: New anchor/baseline position (omit to keep).
+        style: Font/fill properties to merge.
+        transform: SVG transform to set.
+    """
+    return ops.edit_text(
+        _doc(document_id),
+        target,
+        content=content,
+        x=x,
+        y=y,
+        style=_style(style),
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def add_text_block(
+    *,
+    document_id: str | None = None,
+    x: float,
+    y: float,
+    content: str,
+    line_height: float = 1.2,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Add a MULTI-LINE text block — split `content` on `\\n` into evenly-spaced lines.
+
+    No manual per-line `y` math: each line is a `<tspan>` at `x` with `dy = line_height` em
+    (`line_height` is a multiple of font size; 1.2 ≈ normal). Set `text_anchor` in `style` to
+    align all lines. Re-flow later with `edit_text_block` (adding/removing a line re-spaces the
+    rest automatically).
+
+    Args:
+        x: Anchor x (all lines share it).
+        y: Baseline y of the FIRST line.
+        content: The text, with `\\n` between lines.
+        line_height: Line spacing as a multiple of font size.
+    """
+    return ops.add_text_block(
+        _doc(document_id),
+        x=x,
+        y=y,
+        content=content,
+        line_height=line_height,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def edit_text_block(
+    *,
+    document_id: str | None = None,
+    target: str,
+    content: str | None = None,
+    line_height: float | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    style: ShapeStyle | None = None,
+    transform: str | None = None,
+) -> dict[str, str | None]:
+    """Re-flow a multi-line text block in place (mirrors add_text_block); keeps id/clip/filters.
+
+    Pass `content` to replace the lines (re-laid-out automatically), and/or `line_height`/`x` to
+    re-space/re-anchor — so adding or removing a line never means recomputing every `y`. Only the
+    fields you pass change.
+
+    Args:
+        target: Node id or name (a text block).
+        content: New text with `\\n` between lines (omit to keep current lines).
+        line_height: New line spacing (omit to keep).
+    """
+    return ops.edit_text_block(
+        _doc(document_id),
+        target,
+        content=content,
+        line_height=line_height,
+        x=x,
+        y=y,
+        style=_style(style),
+        transform=transform,
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
 def create_group(
     *,
     document_id: str | None = None,
@@ -1384,6 +1517,20 @@ def delete_node(*, document_id: str | None = None, target: str) -> str:
         The deleted node's id.
     """
     return ops.delete_node(_doc(document_id), target)
+
+
+@mcp.tool
+@emits_change
+def delete_nodes(*, document_id: str | None = None, targets: list[str]) -> list[str]:
+    """Delete several nodes in one call (and their descendants); returns the deleted ids.
+
+    All targets are resolved before anything is deleted, so a bad/ambiguous target aborts the whole
+    call without removing anything. Use this instead of many `delete_node` calls.
+
+    Args:
+        targets: Node ids or names to remove.
+    """
+    return ops.delete_nodes(_doc(document_id), targets)
 
 
 @mcp.tool
@@ -2134,6 +2281,26 @@ def apply_transform(
     return ops.apply_transform(_doc(document_id), target, transform).as_dict()
 
 
+@mcp.tool
+@emits_change
+def set_transform(
+    *, document_id: str | None = None, target: str, transform: str
+) -> dict[str, str | None]:
+    """REPLACE a node's local transform (vs apply_transform, which COMPOSES onto the existing one).
+
+    Use this to set a transform outright — e.g. re-place a group after reading `get_transform` —
+    instead of composing deltas. Pass "" or "none" to clear the transform entirely.
+
+    Args:
+        target: Node id or name.
+        transform: The transform to set, e.g. "translate(10,5) scale(2)" — or "" / "none" to clear.
+
+    Returns:
+        The node's {id, tag, name}.
+    """
+    return ops.set_transform(_doc(document_id), target, transform).as_dict()
+
+
 # --- layers ----------------------------------------------------------------
 
 
@@ -2707,7 +2874,9 @@ def apply_drop_shadow(
     """Add a drop shadow to a node.
 
     SVG has no native feDropShadow; this synthesizes one (blur + offset + flood + composite +
-    merge) and attaches it as a filter.
+    merge) and attaches it as a filter. REPLACES any existing filter on the node (a node has one
+    `filter`) — re-applying swaps the shadow, it does not stack. To combine with another effect,
+    build one filter via `define_filter` + `apply_filter` instead.
 
     Args:
         target: Node id or name.
@@ -3378,6 +3547,124 @@ def apply_morphology(
     ).as_dict()
 
 
+# --- composite effects (synthesized; describe/edit via get_filter/edit_filter) ----------------
+
+
+@mcp.tool
+@emits_change
+def apply_inner_shadow(
+    *, document_id: str | None = None, target: str, dx: float = 2, dy: float = 2, blur: float = 3,
+    color: str = "#000000", opacity: float = 0.6,
+) -> dict[str, str | None]:
+    """Inset shadow inside the shape's edges (composite; no native feInnerShadow)."""
+    return ops.apply_inner_shadow(
+        _doc(document_id), target, dx=dx, dy=dy, blur=blur, color=color, opacity=opacity
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def apply_outer_glow(
+    *, document_id: str | None = None, target: str, blur: float = 4, color: str = "#ffffff",
+    opacity: float = 1.0,
+) -> dict[str, str | None]:
+    """Soft colored halo around the shape (composite glow). Edit via edit_filter."""
+    return ops.apply_outer_glow(
+        _doc(document_id), target, blur=blur, color=color, opacity=opacity
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def apply_inner_glow(
+    *, document_id: str | None = None, target: str, blur: float = 4, color: str = "#ffffff",
+    opacity: float = 1.0,
+) -> dict[str, str | None]:
+    """Colored glow contained inside the shape's alpha (composite). Edit via edit_filter."""
+    return ops.apply_inner_glow(
+        _doc(document_id), target, blur=blur, color=color, opacity=opacity
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def apply_outline(
+    *, document_id: str | None = None, target: str, width: float = 2, color: str = "#000000",
+    opacity: float = 1.0,
+) -> dict[str, str | None]:
+    """Outline hugging the shape's alpha — a filter-based sticker stroke. Edit via edit_filter."""
+    return ops.apply_outline(
+        _doc(document_id), target, width=width, color=color, opacity=opacity
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def apply_bevel(
+    *, document_id: str | None = None, target: str, blur: float = 3, depth: float = 4,
+    intensity: float = 0.8, angle: float = 225,
+) -> dict[str, str | None]:
+    """Faux-3D raised edge via a specular highlight (composite emboss; angle = light azimuth)."""
+    return ops.apply_bevel(
+        _doc(document_id), target, blur=blur, depth=depth, intensity=intensity, angle=angle
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def apply_gloss(
+    *, document_id: str | None = None, target: str, intensity: float = 0.9, angle: float = 235,
+    color: str = "#ffffff",
+) -> dict[str, str | None]:
+    """Glassy top sheen via a broad specular highlight (composite; angle = light azimuth)."""
+    return ops.apply_gloss(
+        _doc(document_id), target, intensity=intensity, angle=angle, color=color
+    ).as_dict()
+
+
+@mcp.tool
+@emits_change
+def apply_grain(
+    *, document_id: str | None = None, target: str, frequency: float = 0.9, opacity: float = 0.25,
+) -> dict[str, str | None]:
+    """Subtle monochrome noise overlay clipped to the shape (feTurbulence composite)."""
+    return ops.apply_grain(
+        _doc(document_id), target, frequency=frequency, opacity=opacity
+    ).as_dict()
+
+
+@mcp.tool
+def get_filter(*, document_id: str | None = None, target: str) -> _FilterInfo | None:
+    """Describe the filter applied to a node — {id, kind, params} — for read-then-edit.
+
+    `params` use the same names as the apply_*/edit_filter interface (e.g. a drop_shadow's
+    dx/dy/blur/color/opacity). Works for built-ins and composites; a hand-built `define_filter`
+    reports kind="custom" with its primitive list. Returns null if the node has no filter.
+
+    Args:
+        target: Node id or name.
+    """
+    return ops.get_filter(_doc(document_id), target)
+
+
+@mcp.tool
+@emits_change
+def edit_filter(
+    *, document_id: str | None = None, target: str, params: _FxParams
+) -> dict[str, str | None]:
+    """Change a node's filter params ONE BY ONE — built-in OR composite — re-deriving the filter.
+
+    Read current params with `get_filter`, then pass only the ones to change (e.g.
+    `{"blur": 6, "color": "#1e3a8a"}` on an outer_glow). Rebuilds the filter in place (same id),
+    so the node keeps referencing it. Rejects a hand-built `define_filter` and unknown param names.
+
+    Args:
+        target: Node id or name (must already have a filter).
+        params: Param name → new value (partial; merged into the filter's current params).
+    """
+    return ops.edit_filter(_doc(document_id), target, params).as_dict()
+
+
 @mcp.tool
 @emits_change
 def apply_component_transfer(
@@ -3963,6 +4250,24 @@ def start_preview(
     with contextlib.suppress(Exception):
         _publish_preview()  # prime so the page isn't blank on first open
     return {"url": url, "port": bound, "running": True}
+
+
+@mcp.tool
+def set_preview_backdrop(*, backdrop: str) -> dict[str, str]:
+    """Set the live-preview BACKDROP shown behind the (possibly transparent) artwork.
+
+    Lets you review transparent/edge-to-edge designs against different backgrounds without adding a
+    temporary rect to the document — pushed live to the open preview page. The page's own backdrop
+    buttons control it too; whichever was set most recently wins.
+
+    Args:
+        backdrop: "checker" (default), "white", "black", "grey", or any CSS color (e.g. "#1e293b").
+
+    Returns:
+        {backdrop} that was set.
+    """
+    _preview.server.set_backdrop(_session_token(), backdrop)
+    return {"backdrop": backdrop}
 
 
 # --- resources (readable ambient context) ----------------------------------
