@@ -195,8 +195,13 @@ def add_line(
 ) -> NodeRef:
     element = inkex.Line.new((x1, y1), (x2, y2))
     return _place(
-        doc, element, prefix="line", parent=parent, name=name,
-        style=_with_default_stroke(style), transform=transform,
+        doc,
+        element,
+        prefix="line",
+        parent=parent,
+        name=name,
+        style=_with_default_stroke(style),
+        transform=transform,
     )
 
 
@@ -215,8 +220,13 @@ def add_polyline(
 ) -> NodeRef:
     element = inkex.Polyline.new(_points_str(points))
     return _place(
-        doc, element, prefix="polyline", parent=parent, name=name,
-        style=_with_default_stroke(style), transform=transform,
+        doc,
+        element,
+        prefix="polyline",
+        parent=parent,
+        name=name,
+        style=_with_default_stroke(style),
+        transform=transform,
     )
 
 

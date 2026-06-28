@@ -568,7 +568,7 @@ def _angled_gradient(
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1" viewBox="0 0 1 1">'
         f'<linearGradient id="g" x1="{x1:g}" y1="{y1:g}" x2="{x2:g}" y2="{y2:g}">'
-        f'{body}</linearGradient>'
+        f"{body}</linearGradient>"
         '<rect width="1" height="1" fill="url(#g)"/></svg>'
     )
     return "data:image/svg+xml;utf8," + quote(svg)
@@ -577,6 +577,7 @@ def _angled_gradient(
 # Each builder adds its fe* graph (results namespaced by the effect index ``i`` so stacked effects
 # don't collide), reading its input from ``src`` (the running source for "source" transforms) and
 # returning ``(placement, result_name)``. Layer effects compute from the original SourceAlpha.
+
 
 def _b_blur(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]:
     r = f"e{i}"
@@ -595,8 +596,11 @@ def _b_drop_shadow(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str
 
 def _b_color_matrix(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]:
     r = f"e{i}"
-    _fe(flt, "feColorMatrix",
-        {"in": src, "type": p["type"], "values": p.get("values") or None, "result": r})
+    _fe(
+        flt,
+        "feColorMatrix",
+        {"in": src, "type": p["type"], "values": p.get("values") or None, "result": r},
+    )
     return "source", r
 
 
@@ -615,8 +619,11 @@ def _b_blend(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]
 
 def _b_morphology(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]:
     r = f"e{i}"
-    _fe(flt, "feMorphology",
-        {"in": src, "operator": p["operator"], "radius": p["radius"], "result": r})
+    _fe(
+        flt,
+        "feMorphology",
+        {"in": src, "operator": p["operator"], "radius": p["radius"], "result": r},
+    )
     return "source", r
 
 
@@ -630,10 +637,16 @@ def _b_outer_glow(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str,
 
 def _b_outline(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]:
     r = f"e{i}"
-    _fe(flt, "feMorphology",
-        {"in": "SourceAlpha", "operator": "dilate", "radius": p["width"], "result": f"{r}d"})
-    _fe(flt, "feComposite",
-        {"in": f"{r}d", "in2": "SourceAlpha", "operator": "out", "result": f"{r}ring"})
+    _fe(
+        flt,
+        "feMorphology",
+        {"in": "SourceAlpha", "operator": "dilate", "radius": p["width"], "result": f"{r}d"},
+    )
+    _fe(
+        flt,
+        "feComposite",
+        {"in": f"{r}d", "in2": "SourceAlpha", "operator": "out", "result": f"{r}ring"},
+    )
     _flood(flt, p["color"], p["opacity"], f"{r}c")
     _fe(flt, "feComposite", {"in": f"{r}c", "in2": f"{r}ring", "operator": "in", "result": r})
     return "below", r
@@ -645,8 +658,11 @@ def _inset(flt: BaseElement, r: str, size: float | str, dx: float | str, dy: flo
     _fe(inv, "feFuncA", {"type": "table", "tableValues": "1 0"})
     _fe(flt, "feGaussianBlur", {"in": f"{r}inv", "stdDeviation": size, "result": f"{r}bl"})
     _fe(flt, "feOffset", {"in": f"{r}bl", "dx": dx, "dy": dy, "result": f"{r}of"})
-    _fe(flt, "feComposite",
-        {"in": f"{r}of", "in2": "SourceAlpha", "operator": "in", "result": f"{r}m"})
+    _fe(
+        flt,
+        "feComposite",
+        {"in": f"{r}of", "in2": "SourceAlpha", "operator": "in", "result": f"{r}m"},
+    )
     return f"{r}m"
 
 
@@ -677,19 +693,42 @@ def _b_contour_light(flt: BaseElement, p: FxParams, i: int, op: str) -> tuple[st
     offset = float(p["offset"])
     dx, dy = -offset * math.cos(math.radians(angle)), offset * math.sin(math.radians(angle))
     _fe(flt, "feOffset", {"in": "SourceAlpha", "dx": dx, "dy": dy, "result": f"{r}sh"})
-    _fe(flt, "feComposite",
-        {"in": "SourceAlpha", "in2": f"{r}sh", "operator": op, "result": f"{r}band"})
+    _fe(
+        flt,
+        "feComposite",
+        {"in": "SourceAlpha", "in2": f"{r}sh", "operator": op, "result": f"{r}band"},
+    )
     _fe(flt, "feGaussianBlur", {"in": f"{r}band", "stdDeviation": p["blur"], "result": f"{r}soft"})
     ramp = _angled_gradient(angle, [(0.0, 1.0), (float(p["rolloff"]), 0.0)], "#ffffff")
-    _fe(flt, "feImage",
-        {"href": ramp, "width": "100%", "height": "100%", "preserveAspectRatio": "none",
-         "result": f"{r}ramp"})
-    _fe(flt, "feComposite", {  # multiply the region's alpha by the roll-off ramp
-        "in": f"{r}soft", "in2": f"{r}ramp", "operator": "arithmetic",
-        "k1": 1, "k2": 0, "k3": 0, "k4": 0, "result": f"{r}fade"})
+    _fe(
+        flt,
+        "feImage",
+        {
+            "href": ramp,
+            "width": "100%",
+            "height": "100%",
+            "preserveAspectRatio": "none",
+            "result": f"{r}ramp",
+        },
+    )
+    _fe(
+        flt,
+        "feComposite",
+        {  # multiply the region's alpha by the roll-off ramp
+            "in": f"{r}soft",
+            "in2": f"{r}ramp",
+            "operator": "arithmetic",
+            "k1": 1,
+            "k2": 0,
+            "k3": 0,
+            "k4": 0,
+            "result": f"{r}fade",
+        },
+    )
     _flood(flt, p["color"], p["intensity"], f"{r}c")
-    _fe(flt, "feComposite",
-        {"in": f"{r}c", "in2": f"{r}fade", "operator": "in", "result": f"{r}hi"})
+    _fe(
+        flt, "feComposite", {"in": f"{r}c", "in2": f"{r}fade", "operator": "in", "result": f"{r}hi"}
+    )
     _fe(flt, "feComposite", {"in": f"{r}hi", "in2": "SourceAlpha", "operator": "in", "result": r})
     return "above", r
 
@@ -723,16 +762,26 @@ def _b_bevel(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]
 
 def _b_grain(flt: BaseElement, p: FxParams, i: int, src: str) -> tuple[str, str]:
     r = f"e{i}"
-    _fe(flt, "feTurbulence", {
-        "type": "fractalNoise", "baseFrequency": p["scale"],
-        "numOctaves": 2, "stitchTiles": "stitch", "result": f"{r}n"})
+    _fe(
+        flt,
+        "feTurbulence",
+        {
+            "type": "fractalNoise",
+            "baseFrequency": p["scale"],
+            "numOctaves": 2,
+            "stitchTiles": "stitch",
+            "result": f"{r}n",
+        },
+    )
     # monochrome -> zero RGB (black grain); else keep the noise's color. Alpha = noise * amount.
     matrix = (
-        f"0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {p['amount']} 0" if float(p["monochrome"])
+        f"0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {p['amount']} 0"
+        if float(p["monochrome"])
         else f"1 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 0 0 {p['amount']} 0"
     )
-    _fe(flt, "feColorMatrix",
-        {"in": f"{r}n", "type": "matrix", "values": matrix, "result": f"{r}m"})
+    _fe(
+        flt, "feColorMatrix", {"in": f"{r}n", "type": "matrix", "values": matrix, "result": f"{r}m"}
+    )
     _fe(flt, "feComposite", {"in": f"{r}m", "in2": "SourceAlpha", "operator": "in", "result": r})
     return "above", r
 
@@ -746,26 +795,43 @@ class _FilterKind:
 _FILTER_KINDS: dict[str, _FilterKind] = {
     "blur": _FilterKind({"std_deviation": 2.0}, _b_blur),
     "drop_shadow": _FilterKind(
-        {"dx": 2.0, "dy": 2.0, "blur": 2.0, "color": "#000000", "opacity": 0.5}, _b_drop_shadow),
+        {"dx": 2.0, "dy": 2.0, "blur": 2.0, "color": "#000000", "opacity": 0.5}, _b_drop_shadow
+    ),
     "color_matrix": _FilterKind({"type": "matrix", "values": ""}, _b_color_matrix),
     "color_overlay": _FilterKind({"color": "#000000", "opacity": 1.0}, _b_color_overlay),
     "blend": _FilterKind({"mode": "normal"}, _b_blend),
     "morphology": _FilterKind({"operator": "dilate", "radius": 1.0}, _b_morphology),
     "inner_shadow": _FilterKind(
-        {"dx": 0.0, "dy": 2.0, "size": 3.0, "color": "#000000", "opacity": 0.6}, _b_inner_shadow),
+        {"dx": 0.0, "dy": 2.0, "size": 3.0, "color": "#000000", "opacity": 0.6}, _b_inner_shadow
+    ),
     "outer_glow": _FilterKind({"size": 4.0, "color": "#ffffff", "opacity": 1.0}, _b_outer_glow),
     "inner_glow": _FilterKind({"size": 4.0, "color": "#ffffff", "opacity": 1.0}, _b_inner_glow),
     "outline": _FilterKind({"width": 2.0, "color": "#000000", "opacity": 1.0}, _b_outline),
     "bevel": _FilterKind(
-        {"size": 4.0, "softness": 2.0, "angle": 135.0, "intensity": 0.7}, _b_bevel),
+        {"size": 4.0, "softness": 2.0, "angle": 135.0, "intensity": 0.7}, _b_bevel
+    ),
     "gloss": _FilterKind(
-        {"angle": 90.0, "offset": 14.0, "blur": 3.0, "rolloff": 0.8, "intensity": 0.9,
-         "color": "#ffffff"},
-        _b_gloss),
+        {
+            "angle": 90.0,
+            "offset": 14.0,
+            "blur": 3.0,
+            "rolloff": 0.8,
+            "intensity": 0.9,
+            "color": "#ffffff",
+        },
+        _b_gloss,
+    ),
     "front_light": _FilterKind(
-        {"angle": 90.0, "offset": 14.0, "blur": 6.0, "rolloff": 1.0, "intensity": 0.5,
-         "color": "#ffffff"},
-        _b_front_light),
+        {
+            "angle": 90.0,
+            "offset": 14.0,
+            "blur": 6.0,
+            "rolloff": 1.0,
+            "intensity": 0.5,
+            "color": "#ffffff",
+        },
+        _b_front_light,
+    ),
     "grain": _FilterKind({"scale": 0.9, "amount": 0.25, "monochrome": 1.0}, _b_grain),
 }
 
@@ -890,7 +956,11 @@ def clear_effects(doc: Document, target: str) -> NodeRef:
 
 
 def apply_blur(
-    doc: Document, target: str, *, std_deviation: float, name: str | None = None,
+    doc: Document,
+    target: str,
+    *,
+    std_deviation: float,
+    name: str | None = None,
     replace: bool = False,
 ) -> NodeRef:
     """Gaussian-blur a node."""
@@ -898,20 +968,36 @@ def apply_blur(
 
 
 def apply_drop_shadow(
-    doc: Document, target: str, *, dx: float = 2, dy: float = 2, blur: float = 2,
-    color: str = "#000000", opacity: float = 0.5, name: str | None = None, replace: bool = False,
+    doc: Document,
+    target: str,
+    *,
+    dx: float = 2,
+    dy: float = 2,
+    blur: float = 2,
+    color: str = "#000000",
+    opacity: float = 0.5,
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """Drop shadow, synthesized (inkex/SVG1.1 has no feDropShadow)."""
     return _apply_fx(
-        doc, target, "drop_shadow",
-        {"dx": dx, "dy": dy, "blur": blur, "color": color, "opacity": opacity}, name,
+        doc,
+        target,
+        "drop_shadow",
+        {"dx": dx, "dy": dy, "blur": blur, "color": color, "opacity": opacity},
+        name,
         replace=replace,
     )
 
 
 def apply_color_matrix(
-    doc: Document, target: str, *, type: str = "matrix", values: str | None = None,
-    name: str | None = None, replace: bool = False,
+    doc: Document,
+    target: str,
+    *,
+    type: str = "matrix",
+    values: str | None = None,
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """feColorMatrix: type ``matrix``/``saturate``/``hueRotate``/``luminanceToAlpha``."""
     return _apply_fx(
@@ -920,7 +1006,12 @@ def apply_color_matrix(
 
 
 def apply_color_overlay(
-    doc: Document, target: str, *, color: str, opacity: float = 1.0, name: str | None = None,
+    doc: Document,
+    target: str,
+    *,
+    color: str,
+    opacity: float = 1.0,
+    name: str | None = None,
     replace: bool = False,
 ) -> NodeRef:
     """Tint a node by flooding a color and compositing it inside the source alpha."""
@@ -937,8 +1028,13 @@ def apply_blend(
 
 
 def apply_morphology(
-    doc: Document, target: str, *, operator: str = "dilate", radius: float = 1,
-    name: str | None = None, replace: bool = False,
+    doc: Document,
+    target: str,
+    *,
+    operator: str = "dilate",
+    radius: float = 1,
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """feMorphology: ``dilate`` (thicken) or ``erode`` (thin) by ``radius``."""
     return _apply_fx(
@@ -947,66 +1043,125 @@ def apply_morphology(
 
 
 def apply_inner_shadow(
-    doc: Document, target: str, *, dx: float = 0, dy: float = 2, size: float = 3,
-    color: str = "#000000", opacity: float = 0.6, name: str | None = None, replace: bool = False,
+    doc: Document,
+    target: str,
+    *,
+    dx: float = 0,
+    dy: float = 2,
+    size: float = 3,
+    color: str = "#000000",
+    opacity: float = 0.6,
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """Inset shadow hugging the inside of the edge, decaying over ``size`` (interior untouched)."""
     return _apply_fx(
-        doc, target, "inner_shadow",
-        {"dx": dx, "dy": dy, "size": size, "color": color, "opacity": opacity}, name,
+        doc,
+        target,
+        "inner_shadow",
+        {"dx": dx, "dy": dy, "size": size, "color": color, "opacity": opacity},
+        name,
         replace=replace,
     )
 
 
 def apply_outer_glow(
-    doc: Document, target: str, *, size: float = 4, color: str = "#ffffff",
-    opacity: float = 1.0, name: str | None = None, replace: bool = False,
+    doc: Document,
+    target: str,
+    *,
+    size: float = 4,
+    color: str = "#ffffff",
+    opacity: float = 1.0,
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """Soft colored halo around the shape, spreading over ``size`` (composite glow)."""
     return _apply_fx(
-        doc, target, "outer_glow", {"size": size, "color": color, "opacity": opacity}, name,
+        doc,
+        target,
+        "outer_glow",
+        {"size": size, "color": color, "opacity": opacity},
+        name,
         replace=replace,
     )
 
 
 def apply_inner_glow(
-    doc: Document, target: str, *, size: float = 4, color: str = "#ffffff",
-    opacity: float = 1.0, name: str | None = None, replace: bool = False,
+    doc: Document,
+    target: str,
+    *,
+    size: float = 4,
+    color: str = "#ffffff",
+    opacity: float = 1.0,
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """Colored glow inset from the edge over ``size``, inside the shape's alpha (composite)."""
     return _apply_fx(
-        doc, target, "inner_glow", {"size": size, "color": color, "opacity": opacity}, name,
+        doc,
+        target,
+        "inner_glow",
+        {"size": size, "color": color, "opacity": opacity},
+        name,
         replace=replace,
     )
 
 
 def apply_outline(
-    doc: Document, target: str, *, width: float = 2, color: str = "#000000",
-    opacity: float = 1.0, name: str | None = None, replace: bool = False,
+    doc: Document,
+    target: str,
+    *,
+    width: float = 2,
+    color: str = "#000000",
+    opacity: float = 1.0,
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """Outline hugging the shape's alpha (feMorphology dilate; a filter-based sticker stroke)."""
     return _apply_fx(
-        doc, target, "outline", {"width": width, "color": color, "opacity": opacity}, name,
+        doc,
+        target,
+        "outline",
+        {"width": width, "color": color, "opacity": opacity},
+        name,
         replace=replace,
     )
 
 
 def apply_bevel(
-    doc: Document, target: str, *, size: float = 4, softness: float = 2, angle: float = 135,
-    intensity: float = 0.7, name: str | None = None, replace: bool = False,
+    doc: Document,
+    target: str,
+    *,
+    size: float = 4,
+    softness: float = 2,
+    angle: float = 135,
+    intensity: float = 0.7,
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """Faux-3D raised edge: paired light/dark edges (highlight on the ``angle`` side)."""
     return _apply_fx(
-        doc, target, "bevel",
-        {"size": size, "softness": softness, "angle": angle, "intensity": intensity}, name,
+        doc,
+        target,
+        "bevel",
+        {"size": size, "softness": softness, "angle": angle, "intensity": intensity},
+        name,
         replace=replace,
     )
 
 
 def apply_gloss(
-    doc: Document, target: str, *, angle: float = 90, offset: float = 14, blur: float = 3,
-    rolloff: float = 0.8, intensity: float = 0.9, color: str = "#ffffff",
-    name: str | None = None, replace: bool = False,
+    doc: Document,
+    target: str,
+    *,
+    angle: float = 90,
+    offset: float = 14,
+    blur: float = 3,
+    rolloff: float = 0.8,
+    intensity: float = 0.9,
+    color: str = "#ffffff",
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """Contour-following glassy highlight on the lit EDGE, rolling off with a gradient at the angle.
 
@@ -1015,16 +1170,34 @@ def apply_gloss(
     broad FRONT-face light instead of an edge, use ``apply_front_light``. Base fill preserved.
     """
     return _apply_fx(
-        doc, target, "gloss",
-        {"angle": angle, "offset": offset, "blur": blur, "rolloff": rolloff,
-         "intensity": intensity, "color": color}, name, replace=replace,
+        doc,
+        target,
+        "gloss",
+        {
+            "angle": angle,
+            "offset": offset,
+            "blur": blur,
+            "rolloff": rolloff,
+            "intensity": intensity,
+            "color": color,
+        },
+        name,
+        replace=replace,
     )
 
 
 def apply_front_light(
-    doc: Document, target: str, *, angle: float = 90, offset: float = 14, blur: float = 6,
-    rolloff: float = 1.0, intensity: float = 0.5, color: str = "#ffffff",
-    name: str | None = None, replace: bool = False,
+    doc: Document,
+    target: str,
+    *,
+    angle: float = 90,
+    offset: float = 14,
+    blur: float = 6,
+    rolloff: float = 1.0,
+    intensity: float = 0.5,
+    color: str = "#ffffff",
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """The INVERSE of ``apply_gloss``: light the FRONT BODY behind the lit edge — exactly where
     gloss does NOT shine (a soft 3D front-lit / inflated look). Shares gloss's params so the two
@@ -1032,21 +1205,40 @@ def apply_front_light(
     softness, ``rolloff`` = how far the light reaches across the face. Base fill preserved.
     """
     return _apply_fx(
-        doc, target, "front_light",
-        {"angle": angle, "offset": offset, "blur": blur, "rolloff": rolloff,
-         "intensity": intensity, "color": color}, name, replace=replace,
+        doc,
+        target,
+        "front_light",
+        {
+            "angle": angle,
+            "offset": offset,
+            "blur": blur,
+            "rolloff": rolloff,
+            "intensity": intensity,
+            "color": color,
+        },
+        name,
+        replace=replace,
     )
 
 
 def apply_grain(
-    doc: Document, target: str, *, scale: float = 0.9, amount: float = 0.25,
+    doc: Document,
+    target: str,
+    *,
+    scale: float = 0.9,
+    amount: float = 0.25,
     monochrome: bool = True,
-    name: str | None = None, replace: bool = False,
+    name: str | None = None,
+    replace: bool = False,
 ) -> NodeRef:
     """Noise texture confined to the shape — ``scale`` (frequency), ``amount``, ``monochrome``."""
     return _apply_fx(
-        doc, target, "grain",
-        {"scale": scale, "amount": amount, "monochrome": float(monochrome)}, name, replace=replace,
+        doc,
+        target,
+        "grain",
+        {"scale": scale, "amount": amount, "monochrome": float(monochrome)},
+        name,
+        replace=replace,
     )
 
 

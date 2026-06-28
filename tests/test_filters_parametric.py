@@ -52,9 +52,9 @@ def test_get_filter_none_without_filter() -> None:
 
 def test_effects_stack_by_default() -> None:
     doc, _rid = _rect()
-    ops.apply_drop_shadow(doc, "r")          # below
-    ops.apply_gloss(doc, "r")                # above
-    ops.apply_inner_shadow(doc, "r")         # above
+    ops.apply_drop_shadow(doc, "r")  # below
+    ops.apply_gloss(doc, "r")  # above
+    ops.apply_inner_shadow(doc, "r")  # above
     assert [e["kind"] for e in _effects(doc, "r")] == ["drop_shadow", "gloss", "inner_shadow"]
 
 
@@ -102,7 +102,13 @@ def test_remove_effect_and_clear() -> None:
 
 def test_all_composites_apply_and_round_trip() -> None:
     for kind in (
-        "inner_shadow", "outer_glow", "inner_glow", "outline", "bevel", "gloss", "grain",
+        "inner_shadow",
+        "outer_glow",
+        "inner_glow",
+        "outline",
+        "bevel",
+        "gloss",
+        "grain",
     ):
         doc, _rid = _rect()
         getattr(ops, f"apply_{kind}")(doc, "r")

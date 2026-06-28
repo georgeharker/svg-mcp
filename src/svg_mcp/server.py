@@ -3558,12 +3558,25 @@ def apply_morphology(
 @mcp.tool
 @emits_change
 def apply_inner_shadow(
-    *, document_id: str | None = None, target: str, dx: float = 0, dy: float = 2, size: float = 3,
-    color: str = "#000000", opacity: float = 0.6, replace: bool = False,
+    *,
+    document_id: str | None = None,
+    target: str,
+    dx: float = 0,
+    dy: float = 2,
+    size: float = 3,
+    color: str = "#000000",
+    opacity: float = 0.6,
+    replace: bool = False,
 ) -> dict[str, str | None]:
     """Inset shadow hugging the inside edge, decaying over `size` (interior fill untouched)."""
     return ops.apply_inner_shadow(
-        _doc(document_id), target, dx=dx, dy=dy, size=size, color=color, opacity=opacity,
+        _doc(document_id),
+        target,
+        dx=dx,
+        dy=dy,
+        size=size,
+        color=color,
+        opacity=opacity,
         replace=replace,
     ).as_dict()
 
@@ -3571,8 +3584,13 @@ def apply_inner_shadow(
 @mcp.tool
 @emits_change
 def apply_outer_glow(
-    *, document_id: str | None = None, target: str, size: float = 4, color: str = "#ffffff",
-    opacity: float = 1.0, replace: bool = False,
+    *,
+    document_id: str | None = None,
+    target: str,
+    size: float = 4,
+    color: str = "#ffffff",
+    opacity: float = 1.0,
+    replace: bool = False,
 ) -> dict[str, str | None]:
     """Soft colored halo around the shape, spreading over `size` (composite glow)."""
     return ops.apply_outer_glow(
@@ -3583,8 +3601,13 @@ def apply_outer_glow(
 @mcp.tool
 @emits_change
 def apply_inner_glow(
-    *, document_id: str | None = None, target: str, size: float = 4, color: str = "#ffffff",
-    opacity: float = 1.0, replace: bool = False,
+    *,
+    document_id: str | None = None,
+    target: str,
+    size: float = 4,
+    color: str = "#ffffff",
+    opacity: float = 1.0,
+    replace: bool = False,
 ) -> dict[str, str | None]:
     """Colored glow inset from the edge over `size`, contained in the shape's alpha (composite)."""
     return ops.apply_inner_glow(
@@ -3595,8 +3618,13 @@ def apply_inner_glow(
 @mcp.tool
 @emits_change
 def apply_outline(
-    *, document_id: str | None = None, target: str, width: float = 2, color: str = "#000000",
-    opacity: float = 1.0, replace: bool = False,
+    *,
+    document_id: str | None = None,
+    target: str,
+    width: float = 2,
+    color: str = "#000000",
+    opacity: float = 1.0,
+    replace: bool = False,
 ) -> dict[str, str | None]:
     """Outline hugging the shape's alpha — a filter-based sticker stroke; stackable under a glow."""
     return ops.apply_outline(
@@ -3607,12 +3635,23 @@ def apply_outline(
 @mcp.tool
 @emits_change
 def apply_bevel(
-    *, document_id: str | None = None, target: str, size: float = 4, softness: float = 2,
-    angle: float = 135, intensity: float = 0.7, replace: bool = False,
+    *,
+    document_id: str | None = None,
+    target: str,
+    size: float = 4,
+    softness: float = 2,
+    angle: float = 135,
+    intensity: float = 0.7,
+    replace: bool = False,
 ) -> dict[str, str | None]:
     """Faux-3D raised edge: paired light/dark edges — highlight on the `angle` side."""
     return ops.apply_bevel(
-        _doc(document_id), target, size=size, softness=softness, angle=angle, intensity=intensity,
+        _doc(document_id),
+        target,
+        size=size,
+        softness=softness,
+        angle=angle,
+        intensity=intensity,
         replace=replace,
     ).as_dict()
 
@@ -3620,8 +3659,15 @@ def apply_bevel(
 @mcp.tool
 @emits_change
 def apply_gloss(
-    *, document_id: str | None = None, target: str, angle: float = 90, offset: float = 14,
-    blur: float = 3, rolloff: float = 0.8, intensity: float = 0.9, color: str = "#ffffff",
+    *,
+    document_id: str | None = None,
+    target: str,
+    angle: float = 90,
+    offset: float = 14,
+    blur: float = 3,
+    rolloff: float = 0.8,
+    intensity: float = 0.9,
+    color: str = "#ffffff",
     replace: bool = False,
 ) -> dict[str, str | None]:
     """Contour-following glassy highlight on the lit EDGE, rolling off with a gradient at the angle.
@@ -3631,16 +3677,30 @@ def apply_gloss(
     FRONT-face light instead, use `apply_front_light`. The base fill is preserved.
     """
     return ops.apply_gloss(
-        _doc(document_id), target, angle=angle, offset=offset, blur=blur, rolloff=rolloff,
-        intensity=intensity, color=color, replace=replace,
+        _doc(document_id),
+        target,
+        angle=angle,
+        offset=offset,
+        blur=blur,
+        rolloff=rolloff,
+        intensity=intensity,
+        color=color,
+        replace=replace,
     ).as_dict()
 
 
 @mcp.tool
 @emits_change
 def apply_front_light(
-    *, document_id: str | None = None, target: str, angle: float = 90, offset: float = 14,
-    blur: float = 6, rolloff: float = 1.0, intensity: float = 0.5, color: str = "#ffffff",
+    *,
+    document_id: str | None = None,
+    target: str,
+    angle: float = 90,
+    offset: float = 14,
+    blur: float = 6,
+    rolloff: float = 1.0,
+    intensity: float = 0.5,
+    color: str = "#ffffff",
     replace: bool = False,
 ) -> dict[str, str | None]:
     """INVERSE of `apply_gloss`: light the FRONT BODY behind the lit edge — exactly where gloss does
@@ -3649,20 +3709,36 @@ def apply_front_light(
     `rolloff` = how far the light reaches across the face. Base fill preserved.
     """
     return ops.apply_front_light(
-        _doc(document_id), target, angle=angle, offset=offset, blur=blur, rolloff=rolloff,
-        intensity=intensity, color=color, replace=replace,
+        _doc(document_id),
+        target,
+        angle=angle,
+        offset=offset,
+        blur=blur,
+        rolloff=rolloff,
+        intensity=intensity,
+        color=color,
+        replace=replace,
     ).as_dict()
 
 
 @mcp.tool
 @emits_change
 def apply_grain(
-    *, document_id: str | None = None, target: str, scale: float = 0.9, amount: float = 0.25,
-    monochrome: bool = True, replace: bool = False,
+    *,
+    document_id: str | None = None,
+    target: str,
+    scale: float = 0.9,
+    amount: float = 0.25,
+    monochrome: bool = True,
+    replace: bool = False,
 ) -> dict[str, str | None]:
     """Noise texture confined to the shape — `scale` (frequency), `amount`, `monochrome`."""
     return ops.apply_grain(
-        _doc(document_id), target, scale=scale, amount=amount, monochrome=monochrome,
+        _doc(document_id),
+        target,
+        scale=scale,
+        amount=amount,
+        monochrome=monochrome,
         replace=replace,
     ).as_dict()
 
