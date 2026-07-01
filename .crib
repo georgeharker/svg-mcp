@@ -1,0 +1,9 @@
+# Ties this repo to a crib memory project. `crib import` pulls the docs below
+# into the `svg-mcp` project (one-way: source wins, ids/history preserved).
+project: svg-mcp
+import:
+  - README.md
+  - index.md
+  - DESIGN.md
+  - INKEX_PRIMITIVES.md
+  - docs/**/*.md
