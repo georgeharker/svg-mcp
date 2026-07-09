@@ -19,12 +19,15 @@ from typing import Literal
 from weakref import WeakKeyDictionary
 
 from fastmcp import Context, FastMCP
+from fastmcp.apps.config import AppConfig
 from fastmcp.server.dependencies import get_context
+from fastmcp.tools.tool import ToolResult
 from mcp.server.session import ServerSession
 from pydantic import AnyUrl, BaseModel
 
 from . import ops
 from . import preview as _preview
+from . import widget as _widget
 from .model.document import Document
 from .ops.resources import FilterInfo as _FilterInfo
 from .ops.resources import FxParams as _FxParams
@@ -4405,6 +4408,51 @@ def set_preview_backdrop(*, backdrop: str) -> dict[str, str]:
     return {"backdrop": backdrop}
 
 
+# --- inline widget (MCP-Apps) ----------------------------------------------
+
+
+def _trim_num(value: str | int | None) -> str:
+    """Render a dimension without a pointless trailing ``.0`` (``360.0`` -> ``360``)."""
+    text = str(value)
+    return text[:-2] if text.endswith(".0") else text
+
+
+@mcp.tool(app=AppConfig(resource_uri=_widget.WIDGET_URI))
+def show_widget(
+    *,
+    document_id: str | None = None,
+    scale: float = 1.0,
+    background: str | None = None,
+) -> ToolResult:
+    """Show the document inline as a widget on MCP-Apps clients — the render with a caption.
+
+    Custom-HTML MCP-App: the rendered PNG is returned as tool ``content``, so Claude Code and the
+    model's own render-and-see loop always get the image; on a client that renders MCP Apps (e.g.
+    Claude Desktop chat) a small ext-apps widget reads that same image from the tool result and
+    paints it with a caption. It is a point-in-time snapshot; call again after an edit. For a full
+    interactive view — zoom, pan, backdrop, save — use ``start_preview`` (a local browser page);
+    this widget is intentionally the lightweight in-chat option.
+
+    Args:
+        document_id: Which document to show; defaults to the active one. When given, that document
+            is made active.
+        scale: Zoom factor for the rendered image.
+        background: Optional CSS background color for the render; omit for transparent.
+    """
+    if document_id is not None:
+        _store().set_active(document_id)
+    target = document_id or _store().active_id
+    doc = _doc(document_id)
+    svg = _export_svg(doc)
+    result = get_renderer().render(RenderRequest(svg=svg, scale=scale, background=background))
+    feedback = build_feedback(result)
+    info = _describe_document(doc)
+    width, height = info.get("width"), info.get("height")
+    size = f"{_trim_num(width)}×{_trim_num(height)}" if width and height else ""
+    caption = f"{target} · {size}" if size else (target or "document")
+    return ToolResult(content=[caption, feedback.image])
+
+
 # --- resources (readable ambient context) ----------------------------------
 
 
@@ -4425,6 +4473,17 @@ def document_render_resource(document_id: str) -> bytes:
     """A rendered PNG preview of a document."""
     svg = _export_svg(_store().peek(document_id))
     return get_renderer().render(RenderRequest(svg=svg)).png
+
+
+@mcp.resource(_widget.WIDGET_URI, app=AppConfig())
+def show_widget_view() -> str:
+    """The ``show_widget`` MCP-App view (paired with the ``show_widget`` tool).
+
+    A self-contained ext-apps HTML page (the SDK is vendored inline) that an MCP-Apps client loads
+    in a sandboxed iframe; it reads the rendered image out of the ``show_widget`` tool result and
+    paints it. No external origins, so no extra CSP is needed.
+    """
+    return _widget.build_widget_html()
 
 
 def main() -> None:

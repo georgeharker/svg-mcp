@@ -56,6 +56,8 @@ svg-mcp = "svg_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/svg_mcp"]
+# The vendored ext-apps SDK (a data file, not a module) must ride along in the wheel.
+force-include = { "src/svg_mcp/_ext_apps_inline.js" = "svg_mcp/_ext_apps_inline.js" }
 
 [tool.ruff]
 line-length = 100
