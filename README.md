@@ -140,8 +140,10 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
    Then **fully quit** Claude Desktop (**⌘Q** on macOS — not just the window) and reopen so it
    launches the server; confirm it under **Settings → Developer**. In a **chat**, ask Claude to draw
    something and call `show_widget` — the render appears as an interactive card you can zoom, pan,
-   re-backdrop, and **Save** (PNG · SVG · WebP · JPEG). *(Claude Desktop's "cowork"/agent mode is a
-   Code-style surface and won't render the widget — use plain chat.)*
+   re-backdrop, refresh (↻), and open in the full browser preview (↗). To **save a file**, ask
+   Claude to `export_render` / `export_svg` (a sandboxed widget can't trigger downloads). *(Claude
+   Desktop's "cowork"/agent mode is a Code-style surface and won't render the widget — use plain
+   chat.)*
 
    <b>claude.ai / remote</b> — run svg-mcp over HTTP and add it as a connector:
 
@@ -420,11 +422,12 @@ is the same render as the `svg://{id}/render` resource, refreshed by the same ch
 ## Inline widget (`show_widget`)
 
 `show_widget` is the in-chat companion to the live preview: instead of a browser page, it renders
-the active document **inside the conversation** as an interactive card — zoom, pan, backdrop, and
-**Save** (PNG · SVG · WebP · JPEG) — on Claude surfaces that render MCP-Apps widgets (**Claude
-Desktop chat**, claude.ai). The rendered PNG also rides in the tool result, so on surfaces that
-*don't* render widgets (**Claude Code**, and the model's own render-and-see loop) you still get the
-image inline — nothing is lost.
+the active document **inside the conversation** as an interactive card — zoom, pan, backdrop,
+refresh, and a jump to the full browser preview — on Claude surfaces that render MCP-Apps widgets
+(**Claude Desktop chat**, claude.ai). The rendered PNG also rides in the tool result, so on surfaces
+that *don't* render widgets (**Claude Code**, and the model's own render-and-see loop) you still get
+the image inline — nothing is lost. To save a file, ask the model to `export_render` / `export_svg`
+(a sandboxed widget can't trigger a browser download).
 
 Reach for `show_widget` when you want a quick look *in the chat* with no browser, and for
 [`start_preview`](#live-preview) when you want the always-on, auto-refreshing browser view (which

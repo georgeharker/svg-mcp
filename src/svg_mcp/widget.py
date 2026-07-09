@@ -4,10 +4,11 @@ This is the low-level (custom HTML) MCP-Apps pattern. ``show_widget`` returns th
 ordinary tool ``content`` (so Claude Code and the model's own render-and-see loop always get the
 image), and this HTML resource — loaded by an MCP-Apps client into a sandboxed iframe — reads that
 same image out of the pushed tool result via the ``@modelcontextprotocol/ext-apps`` bridge
-(``app.ontoolresult``) and paints it, with a small client-side toolbar: zoom, pan, backdrop, and
-Save (PNG/WebP/JPEG). Everything runs against the image already in hand — no server round-trip — so
-the furniture works wherever the widget renders. For the *full* interactive view use
-``start_preview`` (the loopback browser page), which this module deliberately does not touch.
+(``app.ontoolresult``) and paints it, with a small toolbar: zoom, pan, and backdrop (client-side),
+plus Refresh and "open live preview" via the ext-apps reverse channel. File *save* is deliberately
+not offered — sandboxed iframes block downloads, so saving is done by asking the model to run
+``export_render`` / ``export_svg``. For the *full* interactive view use ``start_preview`` (the
+loopback browser page), which this module deliberately does not touch.
 
 The ext-apps SDK is **vendored inline** (``_ext_apps_inline.js``), not loaded from a CDN: an earlier
 version imported it from unpkg, which failed under the host's iframe CSP, so the widget never ran
@@ -60,11 +61,6 @@ _TEMPLATE = """<!doctype html>
          cursor: pointer; text-decoration: none; }
   button.on { outline: 2px solid #4b6a96; outline-offset: 1px; }
   .swatch { width: 18px; height: 18px; padding: 0; }
-  .save { position: relative; margin-left: auto; }
-  .save .menu { display: none; position: absolute; right: 0; top: 112%; z-index: 9;
-                flex-direction: column; gap: 2px; padding: 5px; background: var(--bg);
-                border: 1px solid var(--bd); border-radius: 8px; min-width: 96px; }
-  .save.open .menu { display: flex; }
   main { flex: 1; overflow: auto; display: grid; place-items: center; min-height: 140px;
          touch-action: none; }
   #stage { transform-origin: center; transition: transform .08s ease-out; }
@@ -87,18 +83,9 @@ _TEMPLATE = """<!doctype html>
     <button class="swatch" data-bd="#808080" style="background:#808080" title="grey"></button>
     <button class="swatch" data-bd="#111111" style="background:#111111" title="black"></button>
   </div>
-  <div class="group">
+  <div class="group" style="margin-left:auto">
     <button id="refresh" title="re-render the active document">↻</button>
     <button id="openprev" title="open the full interactive preview in a browser">↗ Preview</button>
-  </div>
-  <div class="save" id="save">
-    <button>Save ▾</button>
-    <div class="menu" id="savemenu">
-      <a href="#" data-fmt="svg">SVG</a>
-      <a href="#" data-fmt="png">PNG</a>
-      <a href="#" data-fmt="webp">WebP</a>
-      <a href="#" data-fmt="jpeg">JPEG</a>
-    </div>
   </div>
 </header>
 <main id="view"><div id="stage"><div id="empty">Waiting for the render…</div></div></main>
@@ -141,42 +128,6 @@ view.addEventListener("pointermove", e => {
 view.addEventListener("pointerup", () => { drag = null; });
 view.addEventListener("dragstart", e => e.preventDefault());
 
-function download(href, name) {
-  const a = document.createElement("a");
-  a.href = href; a.download = name;
-  document.body.appendChild(a); a.click(); a.remove();
-}
-function saveRaster(fmt) {
-  if (!imgSrc) return;
-  if (fmt === "png") { download(imgSrc, "svg-mcp.png"); return; }
-  const im = new Image();
-  im.onload = () => {
-    const c = document.createElement("canvas");
-    c.width = im.naturalWidth; c.height = im.naturalHeight;
-    const ctx = c.getContext("2d");
-    if (fmt === "jpeg") { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height); }
-    ctx.drawImage(im, 0, 0);
-    c.toBlob(b => {
-      if (!b) return;
-      const url = URL.createObjectURL(b);
-      download(url, "svg-mcp." + (fmt === "jpeg" ? "jpg" : fmt));
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
-    }, "image/" + fmt);
-  };
-  im.src = imgSrc;
-}
-const save = document.getElementById("save");
-save.querySelector("button").onclick = e => { e.stopPropagation(); save.classList.toggle("open"); };
-document.body.addEventListener("click", () => save.classList.remove("open"));
-document.querySelectorAll("#savemenu a").forEach(a => {
-  a.onclick = e => {
-    e.preventDefault();
-    const f = a.dataset.fmt;
-    if (f === "svg") saveSvg(); else saveRaster(f);
-    save.classList.remove("open");
-  };
-});
-
 function paint(content) {
   const img = content?.find(c => c.type === "image");
   const txt = content?.find(c => c.type === "text");
@@ -194,18 +145,9 @@ app.ontoolresult = ({ content }) => paint(content);
 
 // Reverse-channel actions (widget -> server). These work on a direct connection; a proxy that
 // doesn't forward ui/tools-call will make them no-ops (caught below), leaving the client-side
-// toolbar fully functional.
-async function saveSvg() {
-  try {
-    const r = await app.callServerTool({ name: "export_svg", arguments: {} });
-    const svg = r?.content?.find(c => c.type === "text")?.text;
-    if (svg) {
-      const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
-      download(url, "svg-mcp.svg");
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
-    }
-  } catch (e) { cap.textContent = "SVG export isn't available in this client"; }
-}
+// toolbar (zoom/pan/backdrop) fully functional. In-widget file *save* is intentionally not
+// offered: sandboxed iframes block downloads, so saving is done by asking the model to run
+// export_render / export_svg (which write files directly).
 async function refresh() {
   try {
     const r = await app.callServerTool({ name: "show_widget", arguments: {} });
