@@ -102,23 +102,56 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
    </details>
 
-3. **(Optional) Connect an MCP client.** svg-mcp is a standard MCP server, so this step only
-   applies if you drive it from a client. If you use **Claude**, point it at the **entrypoint
-   from step 2** (always the **absolute** path):
+3. **Connect a client.** svg-mcp is a standard **stdio** MCP server — point your client at the
+   **absolute entrypoint from step 2** (Claude can't resolve `PATH`). Which Claude surface you use
+   decides what you get: the inline **PNG** render works everywhere, but the interactive
+   **`show_widget`** widget (zoom · pan · backdrop · save) only renders on a **chat** surface — not
+   in Claude Code.
 
-   - **Claude Code** — easiest is to install it as a plugin (no manual wiring) — see
-     [Install as a Claude Code plugin](#install-as-a-claude-code-plugin). Or add the entrypoint
-     explicitly:
+   | Surface | Wire it up | inline PNG | interactive `show_widget` |
+   |---|---|:---:|:---:|
+   | **Claude Code** (CLI · IDE · desktop app) | plugin · `claude mcp add` · `.mcp.json` | ✅ | — (falls back to the PNG) |
+   | **Claude Desktop — chat** | `claude_desktop_config.json` | ✅ | ✅ |
+   | **claude.ai / remote** | HTTP transport + a connector | ✅ | ✅ |
 
-     ```bash
-     claude mcp add svg-mcp -- "$(which svg-mcp)"
-     ```
+   In **Claude Code**, `show_widget` shows the same PNG; for an interactive view there, use
+   [`start_preview`](#live-preview) — a loopback browser page.
 
-   - **Claude Desktop** — add to `claude_desktop_config.json` and restart the app:
+   <b>Claude Code</b> — the [plugin](#install-as-a-claude-code-plugin) is easiest (no wiring). Or add
+   the entrypoint explicitly, or commit a project-scoped `.mcp.json`:
 
-     ```json
-     { "mcpServers": { "svg-mcp": { "command": "/ABSOLUTE/PATH/TO/<venv>/bin/svg-mcp" } } }
-     ```
+   ```bash
+   claude mcp add svg-mcp -- "$(which svg-mcp)"          # user scope
+   ```
+   ```json
+   { "mcpServers": { "svg-mcp": { "command": "/ABSOLUTE/PATH/TO/svg-mcp" } } }   // .mcp.json at repo root
+   ```
+
+   <b>Claude Desktop (chat)</b> — the surface that renders the interactive widget. Add svg-mcp to
+   `claude_desktop_config.json` (create it if missing) using the **absolute** entrypoint:
+
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+   ```json
+   { "mcpServers": { "svg-mcp": { "command": "/ABSOLUTE/PATH/TO/svg-mcp" } } }
+   ```
+
+   Then **fully quit** Claude Desktop (**⌘Q** on macOS — not just the window) and reopen so it
+   launches the server; confirm it under **Settings → Developer**. In a **chat**, ask Claude to draw
+   something and call `show_widget` — the render appears as an interactive card you can zoom, pan,
+   re-backdrop, and **Save** (PNG · SVG · WebP · JPEG). *(Claude Desktop's "cowork"/agent mode is a
+   Code-style surface and won't render the widget — use plain chat.)*
+
+   <b>claude.ai / remote</b> — run svg-mcp over HTTP and add it as a connector:
+
+   ```bash
+   svg-mcp --transport streamable-http --host 127.0.0.1 --port 7731   # serves MCP at /mcp
+   ```
+
+   claude.ai can't reach `localhost`, so expose it with a tunnel — e.g.
+   `cloudflared tunnel --url http://127.0.0.1:7731` — and add the resulting public `https://…/mcp`
+   URL under **Settings → Connectors**.
 
 4. **Try it** — ask Claude:
 
@@ -383,6 +416,21 @@ build in a browser while the model keeps working, with no render bytes spent on 
 
 The page just mirrors the read-only [`svg://` resources](#resources): `GET /<token>/active/render`
 is the same render as the `svg://{id}/render` resource, refreshed by the same change signal.
+
+## Inline widget (`show_widget`)
+
+`show_widget` is the in-chat companion to the live preview: instead of a browser page, it renders
+the active document **inside the conversation** as an interactive card — zoom, pan, backdrop, and
+**Save** (PNG · SVG · WebP · JPEG) — on Claude surfaces that render MCP-Apps widgets (**Claude
+Desktop chat**, claude.ai). The rendered PNG also rides in the tool result, so on surfaces that
+*don't* render widgets (**Claude Code**, and the model's own render-and-see loop) you still get the
+image inline — nothing is lost.
+
+Reach for `show_widget` when you want a quick look *in the chat* with no browser, and for
+[`start_preview`](#live-preview) when you want the always-on, auto-refreshing browser view (which
+works on every surface). The widget is self-contained — the [ext-apps](https://github.com/modelcontextprotocol)
+runtime is vendored inline (`scripts/vendor_ext_apps.py` regenerates it), so it needs no server and
+no network.
 
 ## Experiment with an LLM
 
