@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# SessionStart: converge svg-mcp's MCP registration to match the environment, and
+# keep one warm svg-mcp behind it when we own the registration.
+#
+# See mcp-companion's docs/designs/backend-self-registration.md. The switch is a
+# GLOBAL toggle — set once in zshenv, never varied per session (the user-scope MCP
+# registry it drives is global, so two sessions disagreeing would thrash):
+#
+#   MCP_COMBINER=1                   a combiner serves my MCPs -> don't register
+#   MCP_COMBINER_SERVES_SVG_MCP=0/1  per-backend override (wins)
+#   (nothing set)                    standalone -> register + warm svg-mcp
+#
+# Both branches mutate, so this converges either way: setting the switch flips to
+# combiner and removes our entry, unsetting it flips back and re-adds. The env is the
+# source of truth, not the registry.
+#
+# WHY HTTP + sharedserver rather than the old per-session stdio `uv run`:
+#   * the registered URL is stable across plugin versions. A stdio command would
+#     have to bake ${CLAUDE_PLUGIN_ROOT} — a VERSIONED path — into global config,
+#     going stale on every plugin update.
+#   * one warm process is shared by every session instead of paying svg-mcp's cold
+#     start (numpy + pillow) per session.
+# This is safe because svg-mcp partitions state per MCP session: _SESSION_STORES is
+# a WeakKeyDictionary[ServerSession, DocumentStore], so each connection gets its own
+# documents exactly as separate stdio processes did. (Behind a combiner the same
+# isolation needs `isolate: true`, which opens a distinct upstream session per chat.)
+#
+# WHICH svg-mcp RUNS:
+#   default              uvx svg-mcp@<plugin version>   (published release, pinned)
+#   SVG_MCP_DEV=<path>   uv run --project <path>        (a dev checkout)
+#   SVG_MCP_DEV=1        uv run --project <plugin dir>  (the bundled copy)
+set -euo pipefail
+dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+NAME=svg-mcp
+PORT="${SVG_MCP_PORT:-7731}"
+URL="http://127.0.0.1:${PORT}/mcp"
+
+_truthy() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    ''|0|false|no|off) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# Does a combiner serve $1? The per-backend override wins over the global switch.
+combiner_serves() {
+  local name per per_set
+  name=$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')
+  eval "per=\${MCP_COMBINER_SERVES_$name-}"
+  eval "per_set=\${MCP_COMBINER_SERVES_$name+set}"
+  if [ -n "$per_set" ]; then _truthy "$per"; return; fi
+  _truthy "${MCP_COMBINER-}"
+}
+
+# Is $NAME already in the user-scope MCP config?
+#
+# The fast path reads the config JSON directly (~35ms) because this runs on EVERY
+# session start; `claude mcp get` is authoritative but costs ~1.7s, which in steady
+# state is pure waste. This is only the CHECK — every mutation still goes through the
+# supported CLI. Exit 2 ("can't tell") falls back to the slow-but-correct probe
+# rather than guessing "absent", which would re-add and reload MCP every session.
+_registered() {
+  local rc=0
+  python3 -c '
+import json, os, sys
+try:
+    cands = []
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg:
+        cands.append(os.path.join(os.path.expanduser(cfg), ".claude.json"))
+    cands += [os.path.expanduser("~/.claude.json"),
+              os.path.expanduser("~/.config/claude/.claude.json")]
+    for p in cands:
+        if os.path.exists(p):
+            with open(p) as fh:
+                d = json.load(fh)
+            sys.exit(0 if sys.argv[1] in (d.get("mcpServers") or {}) else 1)
+    sys.exit(2)
+except Exception:
+    sys.exit(2)
+' "$NAME" || rc=$?
+  if [ "$rc" -le 1 ]; then return "$rc"; fi
+  claude mcp get "$NAME" >/dev/null 2>&1
+}
+
+# The argv that serves svg-mcp: a pinned published release by default, or a local
+# checkout when SVG_MCP_DEV is set. Pinning to the PLUGIN's own version keeps the
+# marketplace version and the served code in lockstep — note this means every plugin
+# version must have a matching PyPI release, or uvx cannot resolve it.
+_serve_argv() {
+  local project ver
+  if [ -n "${SVG_MCP_DEV:-}" ]; then
+    if [ -d "$SVG_MCP_DEV" ]; then project="$SVG_MCP_DEV"; else project="$dir"; fi
+    printf '%s\0' uv run --project "$project" svg-mcp \
+      --transport streamable-http --port "$PORT"
+    return
+  fi
+  ver=$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        print(json.load(fh)["version"])
+except Exception:
+    print("")
+' "$dir/.claude-plugin/plugin.json" 2>/dev/null || true)
+  if [ -n "$ver" ]; then
+    printf '%s\0' uvx "svg-mcp@${ver}" --transport streamable-http --port "$PORT"
+  else
+    printf '%s\0' uvx svg-mcp --transport streamable-http --port "$PORT"
+  fi
+}
+
+# All `claude`/sharedserver output is silenced: this hook's stdout IS the
+# SessionStart JSON payload, and a stray line would corrupt it.
+if combiner_serves "$NAME"; then
+  # The combiner is the MCP. Ensure we are not registered alongside it, and do not
+  # start (or sync) anything — the combiner owns svg-mcp's lifecycle.
+  if _registered; then
+    claude mcp remove "$NAME" --scope user >/dev/null 2>&1 || true
+  fi
+  exit 0
+fi
+
+# Standalone: ensure we are registered, and keep one warm svg-mcp behind the URL.
+if ! _registered; then
+  claude mcp add --transport http "$NAME" "$URL" --scope user >/dev/null 2>&1 || true
+fi
+
+ss="${SHAREDSERVER_BIN:-$(command -v sharedserver || true)}"
+if [[ -z "$ss" ]]; then
+  printf '%s' '{"systemMessage":"svg-mcp: `sharedserver` not on PATH — the svg-mcp backend will not start. Install it (cargo install sharedserver), serve svg-mcp yourself, or set MCP_COMBINER=1 if a combiner already serves it."}'
+  exit 0
+fi
+if [ -z "${SVG_MCP_DEV:-}" ] && ! command -v uvx >/dev/null 2>&1; then
+  printf '%s' '{"systemMessage":"svg-mcp: `uvx` not on PATH — the svg-mcp backend will not start. Install uv: https://docs.astral.sh/uv/getting-started/installation/"}'
+  exit 0
+fi
+
+argv=()
+while IFS= read -r -d '' a; do argv+=("$a"); done < <(_serve_argv)
+"$ss" use "$NAME" --pid "$PPID" --grace-period 1h -- "${argv[@]}" >/dev/null 2>&1 || true
+exit 0

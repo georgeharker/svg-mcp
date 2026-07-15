@@ -248,25 +248,57 @@ for the full layering rationale.
 ## Install as a Claude Code plugin
 
 The repo doubles as a [Claude Code](https://code.claude.com) plugin marketplace. The plugin
-runs the server with `uv run`, which creates and syncs its own venv from the bundled
-`uv.lock` on first launch (no manual `pip install`).
+runs the published release with `uvx`, behind **one warm server shared by every session**
+(via `sharedserver`) rather than a cold start per session. Your documents stay isolated
+regardless: svg-mcp partitions state per MCP session, so each chat gets its own document
+store exactly as separate processes did.
 
 **Prerequisites:**
 
-- **[uv](https://docs.astral.sh/uv/)** on `PATH`. If it's missing the plugin still loads, but
-  the MCP server won't start — a `SessionStart` hook reports this with an install link.
+- **[uv](https://docs.astral.sh/uv/)** (for `uvx`) on `PATH`. If it's missing the plugin still
+  loads, but the server won't start — a `SessionStart` hook reports this with an install link.
+- **[sharedserver](https://github.com/georgeharker/sharedserver)** on `PATH`
+  (`cargo install sharedserver`) — it owns the warm server's lifecycle, refcounted so the
+  process stops once the last session leaves. Missing it is likewise reported, not fatal.
 - **Linux only:** install the [system packages (Linux)](#system-packages-linux) *before* the
-  first launch. Plugin users never run `pip install`, so the first `uv run` builds `lxml` and
-  `PyGObject` from source; without those dev headers the sync **fails** and the server won't
-  start. macOS installs entirely from wheels — nothing extra.
+  first launch, so `lxml`/`PyGObject` can build. macOS installs entirely from wheels.
 
 ```
 /plugin marketplace add georgeharker/svg-mcp
 /plugin install svg-mcp@svg-mcp
 ```
 
-The first session pays a one-time sync/build cost (tens of seconds, longer on Linux source
-builds); later sessions reuse the venv and start fast.
+The first session pays a one-time resolve/build cost; later sessions attach to the warm
+server and start immediately.
+
+### If a combiner already serves svg-mcp
+
+**The plugin writes to your user-scope MCP config** (`claude mcp add|remove`) rather than
+declaring a server in its manifest — that is what lets one plugin serve both deployments.
+If an aggregator such as [mcp-companion](https://github.com/georgeharker/mcp-companion)
+already proxies svg-mcp, registering a second copy would mount every tool twice. Set the
+global switch **once** (e.g. in `~/.zshenv`) and the plugin will not register:
+
+```sh
+export MCP_COMBINER=1                  # a combiner serves my MCPs
+export MCP_COMBINER_SERVES_SVG_MCP=0   # …except svg-mcp — override, wins over the global
+```
+
+It is a **machine-wide toggle**, not per-session: it must be set before Claude Code starts,
+and the registry it drives is global. Both directions converge — setting it removes our
+entry, unsetting it re-adds — but a change lands in the **next** session.
+
+### Running a local checkout (development)
+
+By default the plugin serves `uvx svg-mcp@<plugin version>` — the published release, pinned so
+the marketplace version and the served code agree. To serve your own working tree instead:
+
+```sh
+export SVG_MCP_DEV=~/Development/svg-mcp   # a checkout to run via `uv run --project`
+export SVG_MCP_DEV=1                       # or: the plugin's own bundled copy
+```
+
+`SVG_MCP_PORT` (default `7731`) moves both the registered URL and the server's bind port.
 
 ## Install (manual / development)
 

@@ -1,5 +1,6 @@
 {
   "name": "svg-mcp",
+  "description": "Structured, hierarchical SVG authoring for an LLM with a render-and-see feedback loop, backed by an inkex document model. Serves one warm svg-mcp shared across sessions; set MCP_COMBINER=1 if an aggregator already proxies it.",
   "owner": {
     "name": "George Harker",
     "email": "george@georgeharker.com"
