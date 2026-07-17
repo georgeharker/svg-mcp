@@ -271,6 +271,21 @@ store exactly as separate processes did.
 The first session pays a one-time resolve/build cost; later sessions attach to the warm
 server and start immediately.
 
+## Install as an OpenCode plugin
+
+The OpenCode counterpart lives in [`plugins/opencode-svg-mcp`](./plugins/opencode-svg-mcp)
+and behaves identically (same warm `sharedserver`-managed server, same
+`uvx svg-mcp@<version>` pin, same combiner stand-down). Add it to your `opencode.json`:
+
+```json
+{ "plugin": ["@geohar/opencode-svg-mcp@latest"] }
+```
+
+It registers svg-mcp as a `type: "remote"` MCP endpoint (`:7731`) and keeps one warm
+server behind it. Full options (`port`, `gracePeriod`, `dev`, `manage`, …) are in the
+plugin's [README](./plugins/opencode-svg-mcp/README.md). The same `MCP_COMBINER` /
+`MCP_COMBINER_SERVES_SVG_MCP` switch below applies — the OpenCode plugin honours it too.
+
 ### If a combiner already serves svg-mcp
 
 **The plugin writes to your user-scope MCP config** (`claude mcp add|remove`) rather than
