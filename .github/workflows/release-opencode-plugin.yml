@@ -1,0 +1,56 @@
+name: Release (opencode-svg-mcp)
+
+# Publishes the @geohar/opencode-svg-mcp npm plugin when a version tag is pushed —
+# the SAME `v*` tag that release.yml uses for PyPI, because the plugin version tracks
+# the svg-mcp release (the plugin pins `uvx svg-mcp@<version>`). The version-match
+# check below enforces that lockstep: bump plugins/opencode-svg-mcp/package.json in
+# the release commit or this job fails loudly.
+#
+# Mirrors release.yml's shape: tag-triggered, trusted publishing (OIDC, no secrets),
+# an environment gate. npm equivalent of PyPI Trusted Publishing:
+#
+#   One-time setup at https://www.npmjs.com/ → the package → Settings → Trusted
+#   Publisher (or create the publisher first if the package is new), with:
+#       repository:   georgeharker/svg-mcp
+#       workflow:     release-opencode-plugin.yml
+#       environment:  npm
+#   Then create a GitHub environment named "npm" (repo Settings → Environments) to
+#   gate releases with required reviewers.
+#
+# No NPM_TOKEN needed once the trusted publisher is configured — OIDC authenticates
+# the publish and generates provenance.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write          # OIDC: trusted publishing + provenance
+      contents: read
+    defaults:
+      run:
+        working-directory: plugins/opencode-svg-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@latest
+      - name: Verify tag matches package version
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::tag v$tag does not match plugin version $pkg — bump plugins/opencode-svg-mcp/package.json to match the svg-mcp release"
+            exit 1
+          fi
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - name: Publish to npm (trusted publishing + provenance)
+        run: npm publish --provenance --access public
