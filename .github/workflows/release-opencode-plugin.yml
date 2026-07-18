@@ -1,10 +1,11 @@
 name: Release (opencode-svg-mcp)
 
-# Publishes the @geohar/opencode-svg-mcp npm plugin when a version tag is pushed —
-# the SAME `v*` tag that release.yml uses for PyPI, because the plugin version tracks
-# the svg-mcp release (the plugin pins `uvx svg-mcp@<version>`). The version-match
-# check below enforces that lockstep: bump plugins/opencode-svg-mcp/package.json in
-# the release commit or this job fails loudly.
+# Publishes the @geohar/opencode-svg-mcp npm plugin on its OWN scoped tag
+# (opencode-svg-mcp-v*), decoupled from the svg-mcp PyPI release so shipping the
+# plugin never forces a Python release. The plugin version should equal the svg-mcp
+# version it pins (`uvx svg-mcp@<version>`); the version-match check enforces
+# package.json == tag. Release: bump plugins/opencode-svg-mcp/package.json, then
+#   git tag opencode-svg-mcp-v<version> && git push origin opencode-svg-mcp-v<version>
 #
 # Mirrors release.yml's shape: tag-triggered, trusted publishing (OIDC, no secrets),
 # an environment gate. npm equivalent of PyPI Trusted Publishing:
@@ -22,7 +23,7 @@ name: Release (opencode-svg-mcp)
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["opencode-svg-mcp-v*"]
 
 jobs:
   publish:
@@ -46,9 +47,9 @@ jobs:
       - name: Verify tag matches package version
         run: |
           pkg="$(node -p "require('./package.json').version")"
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${GITHUB_REF_NAME#opencode-svg-mcp-v}"
           if [ "$pkg" != "$tag" ]; then
-            echo "::error::tag v$tag does not match plugin version $pkg — bump plugins/opencode-svg-mcp/package.json to match the svg-mcp release"
+            echo "::error::tag opencode-svg-mcp-v$tag does not match plugin version $pkg — bump plugins/opencode-svg-mcp/package.json"
             exit 1
           fi
       - run: npm install --no-audit --no-fund
