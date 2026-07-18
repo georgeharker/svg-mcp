@@ -1,0 +1,53 @@
+{
+    "name": "@geohar/opencode-svg-mcp",
+    "version": "0.3.0",
+    "description": "OpenCode plugin: run the svg-mcp MCP server via sharedserver and register its endpoint with OpenCode. Stands down when a combiner already serves svg-mcp.",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "files": [
+        "dist",
+        "README.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "build": "tsc",
+        "clean": "rm -rf dist",
+        "typecheck": "tsc --noEmit",
+        "prepublishOnly": "npm run clean && npm run build"
+    },
+    "keywords": [
+        "opencode",
+        "opencode-plugin",
+        "mcp",
+        "svg-mcp",
+        "svg",
+        "sharedserver",
+        "plugin"
+    ],
+    "author": "George Harker <george@georgeharker.com>",
+    "license": "GPL-2.0-or-later",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/georgeharker/svg-mcp.git",
+        "directory": "plugins/opencode-svg-mcp"
+    },
+    "bugs": {
+        "url": "https://github.com/georgeharker/svg-mcp/issues"
+    },
+    "homepage": "https://github.com/georgeharker/svg-mcp/tree/main/plugins/opencode-svg-mcp#readme",
+    "publishConfig": {
+        "access": "public"
+    },
+    "peerDependencies": {
+        "@opencode-ai/plugin": ">=1.3.0"
+    },
+    "devDependencies": {
+        "@opencode-ai/plugin": "^1.3.0",
+        "@types/node": "^22.0.0",
+        "typescript": "^5.6.0"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}

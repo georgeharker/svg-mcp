@@ -1,0 +1,58 @@
+name: Release (opencode-svg-mcp)
+
+# Publishes the @geohar/opencode-svg-mcp npm plugin on its OWN scoped tag
+# (opencode-svg-mcp-v*), decoupled from the svg-mcp PyPI release so shipping the
+# plugin never forces a Python release. The plugin version should equal the svg-mcp
+# version it pins (`uvx svg-mcp@<version>`); the version-match check enforces
+# package.json == tag. Release: bump plugins/opencode-svg-mcp/package.json, then
+#   git tag opencode-svg-mcp-v<version> && git push origin opencode-svg-mcp-v<version>
+#
+# Mirrors release.yml's shape: tag-triggered, trusted publishing (OIDC, no secrets),
+# an environment gate. npm equivalent of PyPI Trusted Publishing:
+#
+#   One-time setup at https://www.npmjs.com/ → the package → Settings → Trusted
+#   Publisher (or create the publisher first if the package is new), with:
+#       repository:   georgeharker/svg-mcp
+#       workflow:     release-opencode-plugin.yml
+#       environment:  npm
+#   Then create a GitHub environment named "npm" (repo Settings → Environments) to
+#   gate releases with required reviewers.
+#
+# No NPM_TOKEN needed once the trusted publisher is configured — OIDC authenticates
+# the publish and generates provenance.
+
+on:
+  push:
+    tags: ["opencode-svg-mcp-v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write          # OIDC: trusted publishing + provenance
+      contents: read
+    defaults:
+      run:
+        working-directory: plugins/opencode-svg-mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          # NB: no registry-url — it writes an .npmrc expecting NODE_AUTH_TOKEN,
+          # which shadows OIDC trusted publishing and makes `npm publish` 404.
+      - name: Upgrade npm (OIDC trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@latest
+      - name: Verify tag matches package version
+        run: |
+          pkg="$(node -p "require('./package.json').version")"
+          tag="${GITHUB_REF_NAME#opencode-svg-mcp-v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::tag opencode-svg-mcp-v$tag does not match plugin version $pkg — bump plugins/opencode-svg-mcp/package.json"
+            exit 1
+          fi
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - name: Publish to npm (trusted publishing + provenance)
+        run: npm publish --provenance --access public
