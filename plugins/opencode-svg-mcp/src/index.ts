@@ -23,7 +23,7 @@
 //   SVG_MCP_DEV=1      uv run --project <repo>     (in-repo source, if resolvable)
 
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -75,18 +75,13 @@ const DEFAULT_PORT = 7731
 const DEFAULT_NAME = "svg-mcp"
 const DEFAULT_GRACE = "1h"
 
-// ── package version (the default pin) ──────────────────────────────
+// ── pinned svg-mcp tool version ────────────────────────────────────
 
-/** This package's version — the default `uvx svg-mcp@<v>` pin, so the published
- *  plugin and the served code stay in lockstep. `undefined` if unreadable. */
-function pkgVersion(): string | undefined {
-    try {
-        const p = fileURLToPath(new URL("../package.json", import.meta.url))
-        return JSON.parse(readFileSync(p, "utf8")).version as string
-    } catch {
-        return undefined
-    }
-}
+/** The svg-mcp PyPI release this plugin runs by default (`uvx svg-mcp@<v>`).
+ *  Decoupled from this package's OWN version so the plugin can version
+ *  independently; keep it pointing at a real svg-mcp release. Override
+ *  per-launch with the `version` option or `$SVG_MCP_VERSION`. */
+const SVG_MCP_TOOL_VERSION = "0.2.6"
 
 /** Repo root guess for `SVG_MCP_DEV=1` — three levels up from dist/index.js
  *  (plugins/opencode-svg-mcp/dist → repo root), only if it holds svg-mcp source. */
@@ -169,7 +164,7 @@ function resolveServeArgv(
         }
     }
     if (!onPath("uvx", env)) return { argv: [], missing: "uvx" }
-    const ver = opts.version ?? env.SVG_MCP_VERSION ?? pkgVersion()
+    const ver = opts.version ?? env.SVG_MCP_VERSION ?? SVG_MCP_TOOL_VERSION
     const spec = ver ? `svg-mcp@${ver}` : "svg-mcp"
     return { argv: ["uvx", spec, "--transport", "streamable-http", "--port", String(port)] }
 }
