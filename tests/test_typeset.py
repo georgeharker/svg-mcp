@@ -2,21 +2,43 @@
 
 from __future__ import annotations
 
+import functools
+
+import pytest
+
 from svg_mcp import ops
 from svg_mcp.schemas import ShapeStyle
 from svg_mcp.serialize import export_svg
 from svg_mcp.session import DocumentStore
 from svg_mcp.typeset import list_font_families, measure_text, text_to_path_d
 
-_PREFERRED = ["Helvetica", "Arial", "Menlo", "Courier New", "Times New Roman", "Verdana"]
+# Pin the font these tests measure against. Glyph metrics differ per family, so an unpinned
+# choice makes width assertions machine-dependent: a box that passes on a mac (Helvetica) can
+# fail on a Linux dev box that falls back to, say, a CJK face with narrow Latin glyphs. Order
+# is macOS faces first, then the families a Linux/CI box reliably has.
+_PREFERRED = [
+    "Helvetica",
+    "Arial",
+    "Verdana",
+    "DejaVu Sans",
+    "Liberation Sans",
+    "Nimbus Sans",
+    "FreeSans",
+    "Noto Sans",
+    "Menlo",
+    "Courier New",
+    "Times New Roman",
+]
 
 
+@functools.lru_cache(maxsize=1)
 def _a_text_font() -> str:
+    """A Latin-designed family present on this machine, for stable glyph metrics."""
     families = list_font_families()
     for name in _PREFERRED:
         if name in families:
             return name
-    return families[0]
+    pytest.skip(f"none of the pinned test fonts are installed: {', '.join(_PREFERRED)}")
 
 
 def test_list_font_families() -> None:
@@ -75,8 +97,13 @@ def test_text_to_path_follows_textpath() -> None:
     assert ref.tag == "path"
     svg = export_svg(doc)
     assert "<text" not in svg and "textPath" not in svg
+    # Glyphs span along the curve: the outline is much wider than one glyph, but narrower than
+    # the flat advance (the arc bends the run back in). Measured against the font's own advance
+    # rather than a fixed pixel count, which would only hold for one family.
+    advance, _ = measure_text("curved", font_family=font, font_size=28)
     box = ops.path_bbox(doc, ref.id)
-    assert box is not None and box["width"] > 60  # glyphs span along the curve
+    assert box is not None
+    assert advance / 2 < box["width"] < advance
 
 
 def test_clear_clip_prunes_orphan_def() -> None:
