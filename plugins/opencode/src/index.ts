@@ -23,9 +23,9 @@
 //   SVG_MCP_DEV=1      uv run --project <repo>     (in-repo source, if resolvable)
 
 import { spawnSync } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { Plugin } from "@opencode-ai/plugin"
 
@@ -37,6 +37,9 @@ type Options = {
     url?: string
     /** Register the MCP endpoint with OpenCode. Default `true`. */
     register?: boolean
+    /** Inject the svg-mcp diagram-authoring directive into the system prompt.
+     *  Default `true`. */
+    instructions?: boolean
 
     // ── Process management ────────────────────────────────────────
     /** Launch/attach svg-mcp via sharedserver. Default `true`.
@@ -83,8 +86,27 @@ const DEFAULT_GRACE = "1h"
  *  per-launch with the `version` option or `$SVG_MCP_VERSION`. */
 const SVG_MCP_TOOL_VERSION = "0.2.6"
 
+// ── the diagram-authoring directive ────────────────────────────────
+// Appended to the system prompt so the agent reaches for svg-mcp's tools instead of
+// hand-writing SVG XML (the analogue of the Claude Code plugin's SessionStart
+// additionalContext). Canonical source: CLAUDE.md.example at the repo root
+// (plugins/claude/instructions.txt symlinks it). A release-time `prepack` copies that
+// file to this package's root as instructions.txt (see package.json `prepack`/`files`);
+// we read the copy ONCE here so the published npm package is self-contained without
+// duplicating the text in source. A dev/unbuilt run (no copy present) falls back to an
+// empty string and simply injects nothing.
+const SVG_DIAGRAM_DIRECTIVE: string = (() => {
+    try {
+        // dist/index.js lives in dist/; the packed copy ships at the package root.
+        const here = dirname(fileURLToPath(import.meta.url))
+        return readFileSync(join(here, "..", "instructions.txt"), "utf8")
+    } catch {
+        return ""
+    }
+})()
+
 /** Repo root guess for `SVG_MCP_DEV=1` — three levels up from dist/index.js
- *  (plugins/opencode-svg-mcp/dist → repo root), only if it holds svg-mcp source. */
+ *  (plugins/opencode/dist → repo root), only if it holds svg-mcp source. */
 function inRepoSource(): string | undefined {
     try {
         const root = fileURLToPath(new URL("../../..", import.meta.url))
@@ -314,6 +336,7 @@ const SvgMcpPlugin: Plugin = async ({ client }, options) => {
     const mcpName = opts.mcpName ?? DEFAULT_NAME
     const name = opts.name ?? DEFAULT_NAME
     const register = opts.register !== false
+    const wantInstructions = opts.instructions !== false
     const url = opts.url ?? `http://127.0.0.1:${port}/mcp`
 
     const served = combinerServes(mcpName, env)
@@ -335,7 +358,19 @@ const SvgMcpPlugin: Plugin = async ({ client }, options) => {
         cfg.mcp[mcpName] = { type: "remote", url, enabled: true }
         log("info", `registered mcp "${mcpName}" → ${url}`)
     }
-    const hooks = { config: configHook }
+
+    // The directive: appended to the system prompt each session (analogue of the CC
+    // plugin's SessionStart additionalContext). Injected regardless of `served` — the
+    // tools are present via the combiner too.
+    const systemHook = async (_input: unknown, output: { system: string[] }) => {
+        if (!wantInstructions || !SVG_DIAGRAM_DIRECTIVE) return
+        output.system.push(SVG_DIAGRAM_DIRECTIVE)
+    }
+
+    const hooks = {
+        config: configHook,
+        "experimental.chat.system.transform": systemHook,
+    }
 
     // The process half — skipped when combiner-served or manage=false.
     if (served) {

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+bun.lock
+package-lock.json
+*.tgz
+
+# Release artifact: `prepack` copies CLAUDE.md.example here so the npm package is
+# self-contained. Generated at pack/publish time — never commit it.
+instructions.txt

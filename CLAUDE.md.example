@@ -1,0 +1,12 @@
+# Diagrams & SVGs (svg-mcp)
+
+- **Author diagrams and SVGs with the svg-mcp MCP tools, not by hand-writing XML.**
+  When you need a diagram, chart, icon, logo, or any SVG, build it through the tools —
+  `create_document`, the `add_*` primitives (`add_rect`, `add_path`, `add_text`, …),
+  `boolean` for path union/difference/intersection, gradients/filters/transforms — and
+  **render and look**: `export_render` (or `render_document`) to see the result, then
+  iterate. This construct → render → see → iterate loop is the point of svg-mcp.
+- **Edit existing SVGs through the tools too** — `import_svg` to load, `find` /
+  `describe_node` to locate nodes, then `edit_*` / `apply_*` / `delete_node` to change
+  them. Prefer this over textually patching raw `<svg>` markup, which is error-prone and
+  skips the visual feedback loop.

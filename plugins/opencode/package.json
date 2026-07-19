@@ -7,6 +7,7 @@
     "types": "dist/index.d.ts",
     "files": [
         "dist",
+        "instructions.txt",
         "README.md",
         "LICENSE"
     ],
@@ -14,6 +15,7 @@
         "build": "tsc",
         "clean": "rm -rf dist",
         "typecheck": "tsc --noEmit",
+        "prepack": "node -e \"require('fs').copyFileSync('../../CLAUDE.md.example', './instructions.txt')\"",
         "prepublishOnly": "npm run clean && npm run build"
     },
     "keywords": [
@@ -30,12 +32,12 @@
     "repository": {
         "type": "git",
         "url": "git+https://github.com/georgeharker/svg-mcp.git",
-        "directory": "plugins/opencode-svg-mcp"
+        "directory": "plugins/opencode"
     },
     "bugs": {
         "url": "https://github.com/georgeharker/svg-mcp/issues"
     },
-    "homepage": "https://github.com/georgeharker/svg-mcp/tree/main/plugins/opencode-svg-mcp#readme",
+    "homepage": "https://github.com/georgeharker/svg-mcp/tree/main/plugins/opencode#readme",
     "publishConfig": {
         "access": "public"
     },

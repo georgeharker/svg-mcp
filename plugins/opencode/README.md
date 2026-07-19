@@ -9,6 +9,11 @@ serves svg-mcp.
 It is the OpenCode counterpart of svg-mcp's Claude Code plugin (a SessionStart
 shell hook), and mirrors its behaviour exactly.
 
+> **Using it:** author and edit diagrams and SVGs through svg-mcp's tools —
+> `create_document`, the `add_*` primitives, `boolean` for path union/difference, and
+> `export_render` to render-and-see — rather than hand-writing or textually patching raw
+> SVG XML. That construct → render → see → iterate loop is the point of svg-mcp.
+
 ## What it does
 
 1. **Stand-down switch.** If a combiner already serves svg-mcp, the plugin does

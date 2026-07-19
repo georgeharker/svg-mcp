@@ -273,7 +273,7 @@ server and start immediately.
 
 ## Install as an OpenCode plugin
 
-The OpenCode counterpart lives in [`plugins/opencode-svg-mcp`](https://github.com/georgeharker/svg-mcp/tree/main/plugins/opencode-svg-mcp)
+The OpenCode counterpart lives in [`plugins/opencode`](https://github.com/georgeharker/svg-mcp/tree/main/plugins/opencode)
 and behaves identically (same warm `sharedserver`-managed server, same
 `uvx svg-mcp@<version>` pin, same combiner stand-down). Add it to your `opencode.json`:
 
@@ -283,7 +283,7 @@ and behaves identically (same warm `sharedserver`-managed server, same
 
 It registers svg-mcp as a `type: "remote"` MCP endpoint (`:7731`) and keeps one warm
 server behind it. Full options (`port`, `gracePeriod`, `dev`, `manage`, …) are in the
-plugin's [README](https://github.com/georgeharker/svg-mcp/blob/main/plugins/opencode-svg-mcp/README.md). The same `MCP_COMBINER` /
+plugin's [README](https://github.com/georgeharker/svg-mcp/blob/main/plugins/opencode/README.md). The same `MCP_COMBINER` /
 `MCP_COMBINER_SERVES_SVG_MCP` switch below applies — the OpenCode plugin honours it too.
 
 ### If a combiner already serves svg-mcp

@@ -1,11 +1,10 @@
 name: Release (opencode-svg-mcp)
 
-# Publishes the @geohar/opencode-svg-mcp npm plugin on its OWN scoped tag
-# (opencode-svg-mcp-v*), decoupled from the svg-mcp PyPI release so shipping the
-# plugin never forces a Python release. The plugin version should equal the svg-mcp
-# version it pins (`uvx svg-mcp@<version>`); the version-match check enforces
-# package.json == tag. Release: bump plugins/opencode-svg-mcp/package.json, then
-#   git tag opencode-svg-mcp-v<version> && git push origin opencode-svg-mcp-v<version>
+# Publishes the @geohar/opencode-svg-mcp npm plugin on the unified release tag
+# (v*), in lockstep with the whole repo — one vX.Y.Z tag releases pyproject, the
+# Claude Code plugin, and this npm package together. The version-match check enforces
+# package.json == tag. Release: bump every manifest with scripts/bump-version.sh
+# <version>, then push the vX.Y.Z tag.
 #
 # Mirrors release.yml's shape: tag-triggered, trusted publishing (OIDC, no secrets),
 # an environment gate. npm equivalent of PyPI Trusted Publishing:
@@ -23,7 +22,7 @@ name: Release (opencode-svg-mcp)
 
 on:
   push:
-    tags: ["opencode-svg-mcp-v*"]
+    tags: ["v*"]
 
 jobs:
   publish:
@@ -34,7 +33,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: plugins/opencode-svg-mcp
+        working-directory: plugins/opencode
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -47,9 +46,9 @@ jobs:
       - name: Verify tag matches package version
         run: |
           pkg="$(node -p "require('./package.json').version")"
-          tag="${GITHUB_REF_NAME#opencode-svg-mcp-v}"
+          tag="${GITHUB_REF_NAME#v}"
           if [ "$pkg" != "$tag" ]; then
-            echo "::error::tag opencode-svg-mcp-v$tag does not match plugin version $pkg — bump plugins/opencode-svg-mcp/package.json"
+            echo "::error::tag v$tag does not match plugin version $pkg — bump plugins/opencode/package.json"
             exit 1
           fi
       - run: npm install --no-audit --no-fund

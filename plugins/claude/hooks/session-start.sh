@@ -36,6 +36,20 @@ NAME=svg-mcp
 PORT="${SVG_MCP_PORT:-7731}"
 URL="http://127.0.0.1:${PORT}/mcp"
 
+# Nudge the session to author/edit diagrams and SVGs through svg-mcp's tools rather than
+# hand-writing raw SVG XML. Emitted as SessionStart additionalContext on EVERY exit path
+# (the combiner and missing-binary branches exit early, so a trap is used instead of a
+# tail fall-through), mirroring the sibling cribsheet plugin's instructions.txt pattern.
+_emit_instructions() {
+  local txt="$dir/instructions.txt"
+  if [[ -f "$txt" ]] && command -v jq >/dev/null 2>&1; then
+    jq -Rs '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:.}}' <"$txt"
+  elif [[ -f "$txt" ]]; then
+    cat "$txt"
+  fi
+}
+trap _emit_instructions EXIT
+
 _truthy() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
     ''|0|false|no|off) return 1 ;;

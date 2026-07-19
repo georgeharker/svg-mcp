@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "svg-mcp",
-      "source": "./",
+      "source": "./plugins/claude",
       "description": "Structured, hierarchical SVG authoring for an LLM with a render-and-see feedback loop, backed by an inkex document model."
     }
   ]

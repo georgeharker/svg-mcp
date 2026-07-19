@@ -1,143 +1,142 @@
 #!/usr/bin/env bash
 #
-# Bump the version in lockstep across the Python package and the Claude Code
-# plugin, then commit and tag.
+# Bump the whole repo's version in FULL LOCKSTEP, then commit and tag.
 #
-# Single source of truth: this script writes ONE version into both
-#   - pyproject.toml                       (version = "X.Y.Z")
-#   - the plugin.json under .claude-plugin ("version": "X.Y.Z", auto-detected)
-# and creates the annotated tag vX.Y.Z. (The marketplace manifest carries no
-# version of its own — it points at the plugin, whose plugin.json is the one
-# Claude Code reads.)
+# Writes ONE version into EVERY version-bearing manifest this repo has:
+#   - pyproject.toml            (version = "X.Y.Z")                  — if present
+#   - Cargo.toml                ([package] version = "X.Y.Z")        — if present
+#   - the Claude Code plugin    plugins/*/.claude-plugin/plugin.json ("version")
+#   - the opencode plugin       plugins/opencode/package.json        ("version")
+# and creates ONE release tag:
+#   - vX.Y.Z                    (the unified release trigger for PyPI / npm / crate)
+#
+# Baseline is the highest current version among the manifests, so nothing ever
+# moves backward. A repo with no nvim version manifest still takes its nvim
+# release from the same vX.Y.Z tag.
 #
 # Usage:
-#   scripts/bump-version.sh 0.3.0        # set an explicit version
-#   scripts/bump-version.sh patch        # bump the patch component
-#   scripts/bump-version.sh minor        # bump the minor component, zero patch
-#   scripts/bump-version.sh major        # bump the major component, zero minor+patch
+#   scripts/bump-version.sh 0.4.0        # explicit version
+#   scripts/bump-version.sh patch        # bump patch from the highest current
+#   scripts/bump-version.sh minor        # bump minor, zero patch
+#   scripts/bump-version.sh major        # bump major, zero minor+patch
 #
 # Options:
-#   --no-tag       update + commit, but skip the git tag
+#   --no-tag       update + commit, skip the tag
 #   --no-commit    update files only (implies --no-tag)
 #   -n, --dry-run  print what would change; touch nothing
 #
-# It refuses to run on a dirty tree (unless --no-commit) so the version bump
-# lands as its own clean commit. Pushing is left to you.
+# Refuses a dirty tree (unless --no-commit) so the bump is its own clean commit.
+# Pushing is left to you.
 
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYPROJECT="$ROOT/pyproject.toml"
-
 die() { echo "error: $*" >&2; exit 1; }
 
-# Locate the plugin.json: either top-level .claude-plugin/plugin.json or one
-# nested under plugins/*/.claude-plugin/plugin.json. Exactly one is expected.
+# ---- locate manifests -------------------------------------------------------
+MANIFESTS=()   # every file that gets the new version
+TARGETS=()     # parallel: "toml" | "json"
+
+PYPROJECT="$ROOT/pyproject.toml"
+[ -f "$PYPROJECT" ] && { MANIFESTS+=("$PYPROJECT"); TARGETS+=("toml"); }
+
+# Cargo.toml: the one with a top-level [package] version (rust/ or root). Skip target/.
+mapfile -t _cg < <(find "$ROOT" -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null \
+                   | while read -r f; do grep -qE '^version *= *"' "$f" && echo "$f"; done)
+CARGO=""
+if [ "${#_cg[@]}" -eq 1 ]; then CARGO="${_cg[0]}"; MANIFESTS+=("$CARGO"); TARGETS+=("toml")
+elif [ "${#_cg[@]}" -gt 1 ]; then die "multiple versioned Cargo.toml found; pick one: ${_cg[*]}"; fi
+
 mapfile -t _pj < <(find "$ROOT" -path '*/.claude-plugin/plugin.json' -not -path '*/node_modules/*' 2>/dev/null)
-[ "${#_pj[@]}" -ge 1 ] || die "no .claude-plugin/plugin.json found under $ROOT"
-[ "${#_pj[@]}" -eq 1 ] || die "multiple plugin.json found; edit this script to pick one:"$'\n'"$(printf '  %s\n' "${_pj[@]}")"
-PLUGIN_JSON="${_pj[0]}"
+[ "${#_pj[@]}" -eq 1 ] || die "expected exactly one .claude-plugin/plugin.json, found ${#_pj[@]}: ${_pj[*]:-none}"
+PLUGIN_JSON="${_pj[0]}"; MANIFESTS+=("$PLUGIN_JSON"); TARGETS+=("json")
 
-do_commit=1
-do_tag=1
-dry_run=0
-arg=""
+OPENCODE_PKG="$ROOT/plugins/opencode/package.json"
+if [ ! -f "$OPENCODE_PKG" ]; then
+  mapfile -t _oc < <(find "$ROOT/plugins" -maxdepth 2 -name package.json -not -path '*/node_modules/*' 2>/dev/null)
+  [ "${#_oc[@]}" -eq 1 ] || die "could not uniquely locate the opencode package.json"
+  OPENCODE_PKG="${_oc[0]}"
+fi
+MANIFESTS+=("$OPENCODE_PKG"); TARGETS+=("json")
 
-for a in "$@"; do
-  case "$a" in
-    --no-tag)    do_tag=0 ;;
-    --no-commit) do_commit=0; do_tag=0 ;;
-    -n|--dry-run) dry_run=1 ;;
-    -h|--help)   sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    -*)          die "unknown option: $a" ;;
-    *)           [ -z "$arg" ] || die "unexpected extra argument: $a"; arg="$a" ;;
-  esac
-done
-
+# ---- args -------------------------------------------------------------------
+do_commit=1; do_tag=1; dry_run=0; arg=""
+for a in "$@"; do case "$a" in
+  --no-tag)     do_tag=0 ;;
+  --no-commit)  do_commit=0; do_tag=0 ;;
+  -n|--dry-run) dry_run=1 ;;
+  -h|--help)    sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -*)           die "unknown option: $a" ;;
+  *)            [ -z "$arg" ] || die "unexpected extra argument: $a"; arg="$a" ;;
+esac; done
 [ -n "$arg" ] || die "need a version or bump type (X.Y.Z | patch | minor | major); see --help"
-[ -f "$PYPROJECT" ]   || die "not found: $PYPROJECT"
-[ -f "$PLUGIN_JSON" ] || die "not found: $PLUGIN_JSON"
 
-# Read the current versions from each file.
-py_cur="$(grep -E '^version *= *"' "$PYPROJECT" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
-pl_cur="$(grep -E '"version" *:' "$PLUGIN_JSON" | head -1 | sed -E 's/.*"version" *: *"([^"]+)".*/\1/')"
-[ -n "$py_cur" ] || die "could not read version from $PYPROJECT"
-[ -n "$pl_cur" ] || die "could not read version from $PLUGIN_JSON"
-
-# Baseline = the highest of the two current versions (they may have drifted).
-highest() {
-  printf '%s\n%s\n' "$1" "$2" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+read_ver() { # $1=file $2=kind
+  case "$2" in
+    toml) grep -E '^version *= *"' "$1" | head -1 | sed -E 's/.*"([^"]+)".*/\1/' ;;
+    json) grep -E '"version" *:'    "$1" | head -1 | sed -E 's/.*"version" *: *"([^"]+)".*/\1/' ;;
+  esac
 }
-base="$(highest "$py_cur" "$pl_cur")"
+write_ver() { # $1=file $2=kind $3=new
+  case "$2" in
+    toml) sed -i -E "0,/^version *= *\"[^\"]+\"/s//version = \"$3\"/" "$1" ;;
+    json) sed -i -E "0,/\"version\" *: *\"[^\"]+\"/s//\"version\": \"$3\"/" "$1" ;;
+  esac
+}
 
-# Resolve the requested version.
+highest() { printf '%s\n' "$@" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1; }
+
+curs=(); for i in "${!MANIFESTS[@]}"; do
+  v="$(read_ver "${MANIFESTS[$i]}" "${TARGETS[$i]}")"
+  [ -n "$v" ] || die "could not read version from ${MANIFESTS[$i]}"
+  curs+=("$v")
+done
+base="$(highest "${curs[@]}")"
+
 case "$arg" in
   major|minor|patch)
     IFS=. read -r M m p <<<"$base"
-    [[ "$M" =~ ^[0-9]+$ && "$m" =~ ^[0-9]+$ && "$p" =~ ^[0-9]+$ ]] \
-      || die "baseline version '$base' is not numeric X.Y.Z; pass an explicit version"
-    case "$arg" in
-      major) M=$((M+1)); m=0; p=0 ;;
-      minor) m=$((m+1)); p=0 ;;
-      patch) p=$((p+1)) ;;
-    esac
-    new="$M.$m.$p"
-    ;;
-  *)
-    [[ "$arg" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "'$arg' is not a valid X.Y.Z version"
-    new="$arg"
-    ;;
+    [[ "$M" =~ ^[0-9]+$ && "$m" =~ ^[0-9]+$ && "$p" =~ ^[0-9]+$ ]] || die "baseline '$base' not X.Y.Z; pass an explicit version"
+    case "$arg" in major) M=$((M+1)); m=0; p=0 ;; minor) m=$((m+1)); p=0 ;; patch) p=$((p+1)) ;; esac
+    new="$M.$m.$p" ;;
+  *) [[ "$arg" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "'$arg' is not a valid X.Y.Z version"; new="$arg" ;;
 esac
+TAG="v$new"
 
-tag="v$new"
-
-echo "pyproject.toml : $py_cur"
-echo "plugin.json    : $pl_cur   ($PLUGIN_JSON)"
+echo "manifests:"
+for i in "${!MANIFESTS[@]}"; do printf '  %-7s %s  (%s)\n' "${curs[$i]}" "${MANIFESTS[$i]#"$ROOT"/}" "${TARGETS[$i]}"; done
 echo "baseline (max) : $base"
-echo "new version    : $new   (tag $tag)"
+echo "new version    : $new   (tag $TAG)"
 
-# Guard: don't move backwards unless explicitly re-setting the same number.
 if [ "$(highest "$base" "$new")" = "$base" ] && [ "$new" != "$base" ]; then
   die "new version $new is lower than baseline $base; refusing to go backwards"
 fi
 
-if [ "$dry_run" = 1 ]; then
-  echo "(dry run) no files changed"
-  exit 0
-fi
+if [ "$dry_run" = 1 ]; then echo "(dry run) no files changed"; exit 0; fi
 
 if [ "$do_commit" = 1 ]; then
-  # Only the version files may be dirty going in — keep the bump commit clean.
-  pj_rel="$(git -C "$ROOT" rev-parse --show-prefix >/dev/null 2>&1 && realpath --relative-to="$ROOT" "$PLUGIN_JSON")"
-  if [ -n "$(git -C "$ROOT" status --porcelain -- ":!pyproject.toml" ":!$pj_rel")" ]; then
+  excl=(); for f in "${MANIFESTS[@]}"; do excl+=( ":!${f#"$ROOT"/}" ); done
+  if [ -n "$(git -C "$ROOT" status --porcelain -- "${excl[@]}")" ]; then
     die "working tree has unrelated changes; commit or stash them first"
   fi
 fi
 
-if git -C "$ROOT" rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-  die "tag $tag already exists"
+if [ "$do_tag" = 1 ] && git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+  die "tag $TAG already exists"
 fi
 
-# Rewrite in place.
-sed -i -E "0,/^version *= *\"[^\"]+\"/s//version = \"$new\"/" "$PYPROJECT"
-sed -i -E "0,/\"version\" *: *\"[^\"]+\"/s//\"version\": \"$new\"/" "$PLUGIN_JSON"
+for i in "${!MANIFESTS[@]}"; do write_ver "${MANIFESTS[$i]}" "${TARGETS[$i]}" "$new"; done
+echo "updated ${#MANIFESTS[@]} manifests -> $new"
 
-echo "updated pyproject.toml and plugin.json -> $new"
+[ "$do_commit" = 0 ] && { echo "files updated; skipped commit (--no-commit)"; exit 0; }
 
-if [ "$do_commit" = 0 ]; then
-  echo "files updated; skipped commit (--no-commit)"
-  exit 0
-fi
-
-git -C "$ROOT" add "$PYPROJECT" "$PLUGIN_JSON"
-git -C "$ROOT" commit -m "release: v$new — bump pyproject + plugin in lockstep"
+git -C "$ROOT" add "${MANIFESTS[@]}"
+git -C "$ROOT" commit -m "release: $TAG — lockstep version across all manifests"
 echo "committed."
 
 if [ "$do_tag" = 1 ]; then
-  git -C "$ROOT" tag -a "$tag" -m "$new"
-  echo "tagged $tag"
-  echo
-  echo "push with:  git push && git push origin $tag"
+  git -C "$ROOT" tag -a "$TAG" -m "$new"
+  echo "tagged $TAG"
+  echo; echo "push with:  git push && git push origin $TAG"
 else
   echo "skipped tag (--no-tag)"
 fi
