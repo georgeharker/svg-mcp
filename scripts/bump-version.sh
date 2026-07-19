@@ -32,6 +32,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 die() { echo "error: $*" >&2; exit 1; }
 
+# bash 3.2 — what macOS still ships as /bin/bash — has no `mapfile`, and the
+# `declare -n` nameref that would replace it only arrived in 4.3. Read lines into
+# a named array the portable way instead, so this script runs on a stock Mac and
+# not just one with a Homebrew bash on PATH.
+#   Usage: read_lines <arrayname> < <(cmd)
+read_lines() { # $1 = array name
+  local __arr="$1" __line
+  eval "$__arr=()"
+  while IFS= read -r __line; do eval "$__arr+=(\"\$__line\")"; done
+}
+
 # ---- locate manifests -------------------------------------------------------
 MANIFESTS=()   # every file that gets the new version
 TARGETS=()     # parallel: "toml" | "json"
@@ -40,19 +51,19 @@ PYPROJECT="$ROOT/pyproject.toml"
 [ -f "$PYPROJECT" ] && { MANIFESTS+=("$PYPROJECT"); TARGETS+=("toml"); }
 
 # Cargo.toml: the one with a top-level [package] version (rust/ or root). Skip target/.
-mapfile -t _cg < <(find "$ROOT" -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null \
+read_lines _cg < <(find "$ROOT" -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null \
                    | while read -r f; do grep -qE '^version *= *"' "$f" && echo "$f"; done)
 CARGO=""
 if [ "${#_cg[@]}" -eq 1 ]; then CARGO="${_cg[0]}"; MANIFESTS+=("$CARGO"); TARGETS+=("toml")
 elif [ "${#_cg[@]}" -gt 1 ]; then die "multiple versioned Cargo.toml found; pick one: ${_cg[*]}"; fi
 
-mapfile -t _pj < <(find "$ROOT" -path '*/.claude-plugin/plugin.json' -not -path '*/node_modules/*' 2>/dev/null)
+read_lines _pj < <(find "$ROOT" -path '*/.claude-plugin/plugin.json' -not -path '*/node_modules/*' 2>/dev/null)
 [ "${#_pj[@]}" -eq 1 ] || die "expected exactly one .claude-plugin/plugin.json, found ${#_pj[@]}: ${_pj[*]:-none}"
 PLUGIN_JSON="${_pj[0]}"; MANIFESTS+=("$PLUGIN_JSON"); TARGETS+=("json")
 
 OPENCODE_PKG="$ROOT/plugins/opencode/package.json"
 if [ ! -f "$OPENCODE_PKG" ]; then
-  mapfile -t _oc < <(find "$ROOT/plugins" -maxdepth 2 -name package.json -not -path '*/node_modules/*' 2>/dev/null)
+  read_lines _oc < <(find "$ROOT/plugins" -maxdepth 2 -name package.json -not -path '*/node_modules/*' 2>/dev/null)
   [ "${#_oc[@]}" -eq 1 ] || die "could not uniquely locate the opencode package.json"
   OPENCODE_PKG="${_oc[0]}"
 fi
@@ -77,10 +88,23 @@ read_ver() { # $1=file $2=kind
   esac
 }
 write_ver() { # $1=file $2=kind $3=new
-  case "$2" in
-    toml) sed -i -E "0,/^version *= *\"[^\"]+\"/s//version = \"$3\"/" "$1" ;;
-    json) sed -i -E "0,/\"version\" *: *\"[^\"]+\"/s//\"version\": \"$3\"/" "$1" ;;
-  esac
+  # NB: python3, not `sed -i -E "0,/re/s//../"`. That form is doubly GNU-only —
+  # BSD/macOS sed reads `-i`'s argument as the backup suffix (so `-E` became one,
+  # littering *-E files) and rejects the `0,/re/` address. The net effect on macOS
+  # was a SILENT no-op: "updated N manifests" while every version stayed put, and
+  # the follow-up commit then failed with "nothing added to commit". Replacing only
+  # the first match, and erroring when there is none, keeps that failure loud.
+  python3 - "$1" "$2" "$3" <<'PY'
+import re, sys
+path, kind, new = sys.argv[1:4]
+pat = {"toml": r'^version *= *"[^"]+"', "json": r'"version" *: *"[^"]+"'}[kind]
+rep = {"toml": f'version = "{new}"', "json": f'"version": "{new}"'}[kind]
+src = open(path).read()
+out, n = re.subn(pat, rep.replace("\\", "\\\\"), src, count=1, flags=re.M)
+if n != 1:
+    sys.exit(f"error: no {kind} version field matched in {path}")
+open(path, "w").write(out)
+PY
 }
 
 highest() { printf '%s\n' "$@" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1; }
