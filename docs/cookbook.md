@@ -12,7 +12,8 @@ svg-mcp is a *render-and-see* tool. The rhythm is always:
 2. Add content (`add_squircle`, `add_path`, `add_text`, …). Each returns the new node's
    `{id, tag, name}` — keep the `id`, or pass a `name` to refer back by name.
 3. `render_document(scale=…)` to **see** the result, then adjust. For a window the user can watch
-   live, call `start_preview` once and hand them the URL — it refreshes on every change.
+   live, call `start_preview` once and hand them the URL — it refreshes on every change. Do this
+   up front on anything non-trivial, without waiting to be asked, so they can steer as you build.
 4. `export_render(format=…)` to save (png/jpeg/webp/pdf/ps/eps/svg), or `export_svg` for the source.
 
 > **Naming tip.** A `@name` paint shorthand resolves by name, so don't give a gradient and a shape

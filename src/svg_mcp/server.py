@@ -221,12 +221,16 @@ RESOURCES
   source), and `svg://{document_id}/render` (a PNG preview). Reading them never changes state.
 
 LIVE PREVIEW
-- When the user asks to *see* the work — "show me", "let me see it", "open a preview", "can I
-  watch", "I want to see that" — call `start_preview` and then give them the EXACT `url` it
-  returns in your reply (e.g. "Live preview: <url> — it refreshes on every change"). The URL is
-  per-chat (it carries a session token like `/a1b2c3.../`), so always surface the value returned
-  by the tool rather than a guessed address. Do this once; if a preview is already running, just
-  remind them of that URL.
+- **Offer the preview URL early — don't wait to be asked.** As soon as you start any drawing
+  that will take more than a couple of calls, call `start_preview` and give the user the EXACT
+  `url` it returns, up front in your reply (e.g. "Live preview: <url> — it refreshes on every
+  change, so you can watch as I build"). Watching the work take shape lets them redirect you
+  early instead of waiting for a finished result they may not want.
+- Also do this whenever they ask to *see* the work — "show me", "let me see it", "open a
+  preview", "can I watch", "I want to see that".
+- The URL is per-chat (it carries a session token like `/a1b2c3.../`), so always surface the
+  value returned by the tool rather than a guessed address. Share it once; if a preview is
+  already running, just remind them of that URL rather than starting another.
 - The preview tracks the ACTIVE document and refreshes automatically on each edit, so you do NOT
   need to call `render_document` for the user's benefit — keep building and let the preview update.
   Reserve `render_document` for when YOU need to inspect the result, and prefer batching the
@@ -4378,6 +4382,10 @@ def start_preview(
     ACTIVE document and refreshes automatically on every change, so the user sees progress without
     you spending tokens or calls on ``render_document`` for their benefit. Reserve
     ``render_document`` for when YOU need to inspect the result.
+
+    Call this EARLY — at the start of any drawing that takes more than a couple of calls — rather
+    than waiting for the user to ask. Seeing the work in progress lets them redirect you before
+    you finish something they didn't want.
 
     Idempotent: if a preview is already running it just returns the existing URL. After calling
     this, give the returned ``url`` to the user (e.g. "Live preview: <url> — refreshes on each

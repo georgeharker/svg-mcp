@@ -6,6 +6,10 @@
   `boolean` for path union/difference/intersection, gradients/filters/transforms — and
   **render and look**: `export_render` (or `render_document`) to see the result, then
   iterate. This construct → render → see → iterate loop is the point of svg-mcp.
+- **Share the live preview URL early, unprompted.** For anything beyond a couple of tool calls,
+  call `start_preview` at the start and put the exact URL it returns in your reply ("Live
+  preview: <url> — it refreshes on every change"). The user watching the drawing take shape can
+  redirect you mid-build instead of waiting for a finished result they may not want.
 - **Edit existing SVGs through the tools too** — `import_svg` to load, `find` /
   `describe_node` to locate nodes, then `edit_*` / `apply_*` / `delete_node` to change
   them. Prefer this over textually patching raw `<svg>` markup, which is error-prone and

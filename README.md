@@ -455,8 +455,9 @@ build in a browser while the model keeps working, with no render bytes spent on 
   <img src="./docs/preview.png" alt="svg-mcp live preview" width="720">
 </p>
 
-- **Start it:** ask the model to *"show me"* (or *"open a preview"*) and it calls the
-  `start_preview` tool, then hands you the URL. Or set `SVG_MCP_PREVIEW=1` to auto-start on boot.
+- **Start it:** the model is instructed to open a preview and hand you the URL up front on any
+  non-trivial drawing, so you can watch (and redirect) as it builds. You can also ask for it
+  outright — *"show me"*, *"open a preview"* — or set `SVG_MCP_PREVIEW=1` to auto-start on boot.
 - **Watch it:** open the URL once and leave it — it repaints on each change. Toggle **PNG**
   (faithful resvg output) vs **SVG** (crisp vector), zoom, drag to pan, and **Save** the current
   frame as PNG/SVG/WebP/JPEG/PDF straight from the page.
