@@ -40,12 +40,42 @@ URL="http://127.0.0.1:${PORT}/mcp"
 # hand-writing raw SVG XML. Emitted as SessionStart additionalContext on EVERY exit path
 # (the combiner and missing-binary branches exit early, so a trap is used instead of a
 # tail fall-through), mirroring the sibling cribsheet plugin's instructions.txt pattern.
+# stdout IS the SessionStart payload, so it must carry exactly ONE JSON object.
+# Warnings go inside it as `systemMessage`: printing them separately produced two
+# concatenated objects and one was silently dropped. (SessionStart stderr is invisible
+# at exit 0, so stderr alone would not be seen either.)
+_warnings=""
+warn() {
+  _warnings="${_warnings}${_warnings:+ }$1"
+  echo "$1" >&2
+}
+
 _emit_instructions() {
-  local txt="$dir/instructions.txt"
-  if [[ -f "$txt" ]] && command -v jq >/dev/null 2>&1; then
-    jq -Rs '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:.}}' <"$txt"
-  elif [[ -f "$txt" ]]; then
-    cat "$txt"
+  local txt="$dir/instructions.txt" ctx=""
+  [[ -f "$txt" ]] && ctx="$(cat "$txt")"
+  [[ -z "$ctx" && -z "$_warnings" ]] && return 0
+  if command -v jq >/dev/null 2>&1; then
+    jq -n --arg ctx "$ctx" --arg sys "$_warnings" \
+      '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$ctx}}
+       + (if $sys == "" then {} else {systemMessage:$sys} end)'
+  else
+    # Pure-bash JSON escaping. Backslash first (it escapes everything after), newline
+    # last (so the \n it introduces is not re-escaped), then delete raw C0 controls —
+    # JSON forbids all of U+0000–U+001F, and one stray byte would invalidate the
+    # envelope and lose the instructions AND the warnings.
+    local ctx_e="$ctx" sys_e="$_warnings" f s
+    for f in ctx_e sys_e; do
+      s="${!f}"
+      s=${s//\\/\\\\}; s=${s//\"/\\\"}
+      s=${s//$'\t'/\\t}; s=${s//$'\r'/\\r}; s=${s//$'\n'/\\n}
+      s=${s//[$'\x01'-$'\x1f']/}
+      printf -v "$f" '%s' "$s"
+    done
+    if [[ -n "$_warnings" ]]; then
+      printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"},"systemMessage":"%s"}\n' "$ctx_e" "$sys_e"
+    else
+      printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$ctx_e"
+    fi
   fi
 }
 trap _emit_instructions EXIT
@@ -143,11 +173,11 @@ fi
 
 ss="${SHAREDSERVER_BIN:-$(command -v sharedserver || true)}"
 if [[ -z "$ss" ]]; then
-  printf '%s' '{"systemMessage":"svg-mcp: `sharedserver` not on PATH — the svg-mcp backend will not start. Install it (cargo install sharedserver), serve svg-mcp yourself, or set MCP_COMBINER=1 if a combiner already serves it."}'
+  warn 'svg-mcp: `sharedserver` not on PATH — the svg-mcp backend will not start. Install it (cargo install sharedserver, or the prebuilt installer), serve svg-mcp yourself, or set MCP_COMBINER=1 if a combiner already serves it.'
   exit 0
 fi
 if [ -z "${SVG_MCP_DEV:-}" ] && ! command -v uvx >/dev/null 2>&1; then
-  printf '%s' '{"systemMessage":"svg-mcp: `uvx` not on PATH — the svg-mcp backend will not start. Install uv: https://docs.astral.sh/uv/getting-started/installation/"}'
+  warn 'svg-mcp: `uvx` not on PATH — the svg-mcp backend will not start. Install uv: https://docs.astral.sh/uv/getting-started/installation/'
   exit 0
 fi
 

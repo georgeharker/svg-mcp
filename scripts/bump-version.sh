@@ -7,6 +7,7 @@
 #   - Cargo.toml                ([package] version = "X.Y.Z")        — if present
 #   - the Claude Code plugin    plugins/*/.claude-plugin/plugin.json ("version")
 #   - the opencode plugin       plugins/opencode/package.json        ("version")
+#   - the marketplace listing   .claude-plugin/marketplace.json      (plugins[].version)
 # and creates ONE release tag:
 #   - vX.Y.Z                    (the unified release trigger for PyPI / npm / crate)
 #
@@ -47,8 +48,13 @@ read_lines() { # $1 = array name
 MANIFESTS=()   # every file that gets the new version
 TARGETS=()     # parallel: "toml" | "json"
 
-PYPROJECT="$ROOT/pyproject.toml"
-[ -f "$PYPROJECT" ] && { MANIFESTS+=("$PYPROJECT"); TARGETS+=("toml"); }
+# pyproject.toml: the project's own (root OR a package subdir, e.g. combiner/),
+# excluding vendored/submodule copies (vendor/, node_modules/).
+read_lines _py < <(find "$ROOT" -name pyproject.toml \
+                   -not -path '*/vendor/*' -not -path '*/node_modules/*' -not -path '*/target/*' -not -path '*/.git/*' 2>/dev/null \
+                   | while read -r f; do grep -qE '^version *= *"' "$f" && echo "$f"; done)
+if [ "${#_py[@]}" -eq 1 ]; then MANIFESTS+=("${_py[0]}"); TARGETS+=("toml")
+elif [ "${#_py[@]}" -gt 1 ]; then die "multiple versioned pyproject.toml found; pick one: ${_py[*]}"; fi
 
 # Cargo.toml: the one with a top-level [package] version (rust/ or root). Skip target/.
 read_lines _cg < <(find "$ROOT" -name Cargo.toml -not -path '*/target/*' -not -path '*/node_modules/*' 2>/dev/null \
@@ -68,6 +74,15 @@ if [ ! -f "$OPENCODE_PKG" ]; then
   OPENCODE_PKG="${_oc[0]}"
 fi
 MANIFESTS+=("$OPENCODE_PKG"); TARGETS+=("json")
+
+# The repo marketplace listing (.claude-plugin/marketplace.json) pins the Claude
+# plugin's version in its plugins[] entry — it advertises the installable
+# version to `/plugin marketplace`, so it must move in lockstep too. Its single
+# "version" key is the plugin entry's (the manifest itself is unversioned).
+MARKETPLACE_JSON="$ROOT/.claude-plugin/marketplace.json"
+if [ -f "$MARKETPLACE_JSON" ] && grep -qE '"version" *:' "$MARKETPLACE_JSON"; then
+  MANIFESTS+=("$MARKETPLACE_JSON"); TARGETS+=("json")
+fi
 
 # ---- args -------------------------------------------------------------------
 do_commit=1; do_tag=1; dry_run=0; arg=""
@@ -107,7 +122,25 @@ open(path, "w").write(out)
 PY
 }
 
-highest() { printf '%s\n' "$@" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1; }
+# Semver precedence, not plain numeric sort. A prerelease ranks BELOW the release it
+# leads to (0.6.4-alpha.5 < 0.6.4) — `sort -k3,3n` reads both third fields as 4 and
+# breaks the tie the wrong way, so promoting a prerelease to its final version was
+# rejected as "going backwards".
+highest() {
+  printf '%s\n' "$@" | python3 -c '
+import sys
+def key(v):
+    core, _, pre = v.strip().partition("-")
+    nums = [int(x) if x.isdigit() else 0 for x in (core.split(".") + ["0", "0"])[:3]]
+    # No prerelease sorts above any prerelease of the same core version.
+    if not pre:
+        return (nums, 1, [])
+    # Dot-separated identifiers: numeric ones compare numerically and below alphas.
+    ids = [(0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split(".")]
+    return (nums, 0, ids)
+print(max((l for l in sys.stdin if l.strip()), key=key).strip())
+'
+}
 
 curs=(); for i in "${!MANIFESTS[@]}"; do
   v="$(read_ver "${MANIFESTS[$i]}" "${TARGETS[$i]}")"
@@ -122,7 +155,14 @@ case "$arg" in
     [[ "$M" =~ ^[0-9]+$ && "$m" =~ ^[0-9]+$ && "$p" =~ ^[0-9]+$ ]] || die "baseline '$base' not X.Y.Z; pass an explicit version"
     case "$arg" in major) M=$((M+1)); m=0; p=0 ;; minor) m=$((m+1)); p=0 ;; patch) p=$((p+1)) ;; esac
     new="$M.$m.$p" ;;
-  *) [[ "$arg" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "'$arg' is not a valid X.Y.Z version"; new="$arg" ;;
+  # A semver prerelease suffix is allowed (0.6.4-alpha.1, 1.0.0-rc.2). That is the
+  # DEV RELEASE channel: cargo-dist marks any prerelease-suffixed tag as a GitHub
+  # prerelease and — per the `announcement_is_prerelease` guard it generates — SKIPS
+  # the crates.io publish job. So a prerelease tag exercises the full binary build,
+  # installer generation and hosting with nothing irreversible happening on crates.io.
+  # Only reachable as an explicit version; `patch`/`minor`/`major` never invent one.
+  *) [[ "$arg" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] \
+       || die "'$arg' is not a valid X.Y.Z or X.Y.Z-prerelease version"; new="$arg" ;;
 esac
 TAG="v$new"
 
@@ -151,9 +191,24 @@ fi
 for i in "${!MANIFESTS[@]}"; do write_ver "${MANIFESTS[$i]}" "${TARGETS[$i]}" "$new"; done
 echo "updated ${#MANIFESTS[@]} manifests -> $new"
 
+# Keep any Cargo.lock next to a bumped Cargo.toml in sync (the crate's own
+# self-version entry, so a `--locked` build/publish doesn't fail).
+LOCKS=()
+for i in "${!MANIFESTS[@]}"; do
+  [ "${TARGETS[$i]}" = "toml" ] || continue
+  m="${MANIFESTS[$i]}"; case "$m" in */Cargo.toml) : ;; *) continue ;; esac
+  lock="${m%/Cargo.toml}/Cargo.lock"; [ -f "$lock" ] || continue
+  cname="$(grep -E '^name *= *"' "$m" | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+  [ -n "$cname" ] || continue
+  # `-i.bak` + rm: portable across GNU and BSD sed (bare `-i` differs — see write_ver).
+  sed -i.bak "/^name = \"$cname\"\$/{n;s/^version = \"[^\"]*\"\$/version = \"$new\"/;}" "$lock"
+  rm -f "$lock.bak"
+  LOCKS+=("$lock"); echo "  synced $(basename "$lock") ($cname -> $new)"
+done
+
 [ "$do_commit" = 0 ] && { echo "files updated; skipped commit (--no-commit)"; exit 0; }
 
-git -C "$ROOT" add "${MANIFESTS[@]}"
+git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"}
 git -C "$ROOT" commit -m "release: $TAG — lockstep version across all manifests"
 echo "committed."
 
