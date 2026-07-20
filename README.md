@@ -257,9 +257,11 @@ store exactly as separate processes did.
 
 - **[uv](https://docs.astral.sh/uv/)** (for `uvx`) on `PATH`. If it's missing the plugin still
   loads, but the server won't start — a `SessionStart` hook reports this with an install link.
-- **[sharedserver](https://github.com/georgeharker/sharedserver)** on `PATH`
-  (`cargo install sharedserver`) — it owns the warm server's lifecycle, refcounted so the
-  process stops once the last session leaves. Missing it is likewise reported, not fatal.
+- **[sharedserver](https://github.com/georgeharker/sharedserver)** — it owns the warm
+  server's lifecycle, refcounted so the process stops once the last session leaves.
+  **You don't need to install it:** the plugin fetches a prebuilt release on first use
+  when none is present, so no Rust toolchain is required. An `sharedserver` already on
+  `PATH`, or `$SHAREDSERVER_BIN`, is used as-is and never silently replaced.
 - **Linux only:** install the [system packages (Linux)](#system-packages-linux) *before* the
   first launch, so `lxml`/`PyGObject` can build. macOS installs entirely from wheels.
 

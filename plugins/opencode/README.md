@@ -97,9 +97,12 @@ With options (all optional — defaults shown):
 
 ## Requirements
 
-- [`sharedserver`](https://github.com/georgeharker/sharedserver) on `PATH`
-  (`cargo install sharedserver`) — unless `manage: false`.
-- [`uv`](https://docs.astral.sh/uv/) on `PATH` for `uvx` (or `uv run` in dev mode).
+- `curl` and [`uv`](https://docs.astral.sh/uv/) — **nothing else**. The plugin fetches
+  [`sharedserver`](https://github.com/georgeharker/sharedserver) itself on first use if
+  it isn't already present (prebuilt, so no Rust toolchain), and runs svg-mcp via `uvx`.
+- To supply your own instead: an `svg-mcp` or `sharedserver` already on `PATH` is used
+  as-is, as are the `binary` option and `$SHAREDSERVER_BIN`. Neither is silently
+  replaced.
 
 ## Relationship to the other plugins
 

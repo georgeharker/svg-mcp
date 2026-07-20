@@ -132,6 +132,19 @@ except Exception:
 # checkout when SVG_MCP_DEV is set. Pinning to the PLUGIN's own version keeps the
 # marketplace version and the served code in lockstep — note this means every plugin
 # version must have a matching PyPI release, or uvx cannot resolve it.
+_version_ge() { # _version_ge A B -> success when dotted-numeric prefix of A >= B
+  local a b i x y
+  local IFS=.
+  read -r -a a <<<"${1%%[!0-9.]*}"
+  read -r -a b <<<"${2%%[!0-9.]*}"
+  for i in 0 1 2; do
+    x="${a[i]:-0}"; y="${b[i]:-0}"
+    ((10#${x:-0} > 10#${y:-0})) && return 0
+    ((10#${x:-0} < 10#${y:-0})) && return 1
+  done
+  return 0
+}
+
 _serve_argv() {
   local project ver
   if [ -n "${SVG_MCP_DEV:-}" ]; then
@@ -148,6 +161,20 @@ try:
 except Exception:
     print("")
 ' "$dir/.claude-plugin/plugin.json" 2>/dev/null || true)
+
+  # An svg-mcp already on PATH wins when it is at least the version this plugin ships
+  # against — it is the user's own `uv tool install`, and costs no fetch. Previously
+  # this went straight to uvx, silently ignoring it. Too old and we fall through to the
+  # pinned release rather than limp, so staleness self-heals.
+  if command -v svg-mcp >/dev/null 2>&1; then
+    local path_ver
+    path_ver="$(svg-mcp --version 2>/dev/null | awk '{print $NF}')"
+    if [ -n "$path_ver" ] && [ -n "$ver" ] && _version_ge "$path_ver" "$ver"; then
+      printf '%s\0' svg-mcp --transport streamable-http --port "$PORT"
+      return
+    fi
+  fi
+
   if [ -n "$ver" ]; then
     printf '%s\0' uvx "svg-mcp@${ver}" --transport streamable-http --port "$PORT"
   else
@@ -171,9 +198,13 @@ if ! _registered; then
   claude mcp add --transport http "$NAME" "$URL" --scope user >/dev/null 2>&1 || true
 fi
 
-ss="${SHAREDSERVER_BIN:-$(command -v sharedserver || true)}"
-if [[ -z "$ss" ]]; then
-  warn 'svg-mcp: `sharedserver` not on PATH — the svg-mcp backend will not start. Install it (cargo install sharedserver, or the prebuilt installer), serve svg-mcp yourself, or set MCP_COMBINER=1 if a combiner already serves it.'
+# bin/sharedserver resolves $SHAREDSERVER_BIN -> PATH -> standard dirs and downloads a
+# release when none is usable, so nothing needs installing by hand. It is vendored
+# byte-identical from georgeharker/sharedserver by scripts/sync-vendored.sh; per-repo
+# policy lives in bin/sharedserver.conf beside it.
+ss="$dir/bin/sharedserver"
+if [[ ! -x "$ss" ]]; then
+  warn 'svg-mcp: the bundled bin/sharedserver wrapper is missing or not executable — the svg-mcp backend will not start.'
   exit 0
 fi
 if [ -z "${SVG_MCP_DEV:-}" ] && ! command -v uvx >/dev/null 2>&1; then

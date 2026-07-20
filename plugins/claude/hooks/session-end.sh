@@ -29,6 +29,9 @@ combiner_serves() {
 # Combiner-served: we never took a reference, so we must not release one.
 combiner_serves "$NAME" && exit 0
 
-ss="${SHAREDSERVER_BIN:-$(command -v sharedserver || true)}"
-[[ -n "$ss" ]] && "$ss" unuse "$NAME" --pid "$PPID" >/dev/null 2>&1 || true
+# The same vendored wrapper session-start.sh used. It must resolve to the same binary
+# that took the reference, or the detach matches nothing and the refcount leaks until
+# sharedserver's dead-client poller reclaims it.
+ss="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/sharedserver"
+[[ -x "$ss" ]] && "$ss" unuse "$NAME" --pid "$PPID" >/dev/null 2>&1 || true
 exit 0
