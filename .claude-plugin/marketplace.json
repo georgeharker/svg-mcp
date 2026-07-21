@@ -10,7 +10,7 @@
       "name": "svg-mcp",
       "source": "./plugins/claude",
       "description": "Structured, hierarchical SVG authoring for an LLM with a render-and-see feedback loop, backed by an inkex document model.",
-      "version": "0.4.3"
+      "version": "0.4.4"
     }
   ]
 }
