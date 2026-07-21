@@ -1,16 +1,38 @@
 # Diagrams & SVGs (svg-mcp)
 
-- **Author diagrams and SVGs with the svg-mcp MCP tools, not by hand-writing XML.**
-  When you need a diagram, chart, icon, logo, or any SVG, build it through the tools —
-  `create_document`, the `add_*` primitives (`add_rect`, `add_path`, `add_text`, …),
-  `boolean` for path union/difference/intersection, gradients/filters/transforms — and
-  **render and look**: `export_render` (or `render_document`) to see the result, then
-  iterate. This construct → render → see → iterate loop is the point of svg-mcp.
-- **Share the live preview URL early, unprompted.** For anything beyond a couple of tool calls,
-  call `start_preview` at the start and put the exact URL it returns in your reply ("Live
-  preview: <url> — it refreshes on every change"). The user watching the drawing take shape can
-  redirect you mid-build instead of waiting for a finished result they may not want.
-- **Edit existing SVGs through the tools too** — `import_svg` to load, `find` /
-  `describe_node` to locate nodes, then `edit_*` / `apply_*` / `delete_node` to change
-  them. Prefer this over textually patching raw `<svg>` markup, which is error-prone and
-  skips the visual feedback loop.
+<!-- Canonical reach-for-svg-mcp directive. Copy into your global
+     $CLAUDE_CONFIG_DIR/CLAUDE.md, or let an svg-mcp plugin inject it each session
+     (the plugins symlink this file). It directs *approach*; the MCP tool
+     descriptions carry the mechanics. -->
+
+Two rules. Each fires on a **cue you can catch yourself in the middle of**, not on a
+topic you have to remember to think about. That's deliberate: you will not remember to
+"use the tools" — but you can notice yourself about to type a `<` .
+
+### 1. About to write `<svg`, or hand-edit XML inside one? That's the cue.
+
+Writing markup by hand is the wrong move **even when the shape looks trivial** — that's
+exactly when it feels justified, and it skips the only part that matters: seeing the
+result. At that exact moment:
+
+| your next move was | do this instead |
+|---|---|
+| write `<svg>`/`<path>`/`<rect>` markup for something new | `create_document`, then the `add_*` primitives — `boolean` for union/difference/intersection, plus gradients / filters / transforms |
+| hand-patch the markup of an SVG you have | `import_svg` → `find` / `describe_node` to locate → `edit_*` / `apply_*` / `delete_node` |
+| hand a result back after building it | `export_render` (or `render_document`) and **actually look at the image** first |
+
+Construct → render → see → iterate. **The loop is the product, not the XML.** One pass
+without rendering isn't a faster version of this — it's a different, worse thing.
+
+**Catch yourself:** if you're about to show or save SVG source you have never rendered,
+you are guessing at your own output. Render it, look, *then* hand it over.
+
+### 2. More than a couple of tool calls? Start the preview and say so.
+
+Cue: you can tell the build will take more than two or three calls. Call `start_preview`
+**at the start**, not when you're done, and put the exact URL in your reply unprompted:
+"Live preview: <url> — it refreshes on every change."
+
+The reason is timing, not courtesy. Someone watching the drawing take shape can redirect
+you mid-build; the same person handed a finished image can only accept it or ask for the
+whole thing again. A preview URL shared at the end has none of that value.
