@@ -12,6 +12,18 @@
   --surface-warm: #2c2620;
   --surface-note: #30301f;
 
+  /* The four callout statuses, re-mixed for a dark ground: the wash darkened until it sits just
+   * above the canvas, the accent LIGHTENED until it separates from the wash. Same four hues, same
+   * card-quiet / edge-loud relationship — inverting the ground would otherwise flip it. */
+  --surface-info: #16222f;
+  --stroke-info: #6ea8e0;
+  --surface-warning: #2c2317;
+  --stroke-warning: #d9a94b;
+  --surface-success: #16261a;
+  --stroke-success: #63b077;
+  --surface-danger: #2c1a1a;
+  --stroke-danger: #e07272;
+
   --ink: #eceef1;
   --ink-muted: #98a1ac;
   --stroke: #5b6672;

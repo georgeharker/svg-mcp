@@ -36,6 +36,16 @@ tint, no border) marks a region; `swimlane` (tinted and outlined) says who owns 
 picture. `add_diagram_container` fits the box to its members and `reflow` re-fits it after they
 move, so the grouping survives a layout pass.
 
+## Annotation
+
+`add_legend` is **generated**: called with no entries it scans the document and gives you one row
+per node kind, edge kind, container kind and chart series actually in use — each swatch wearing
+that kind's real class, so a variant switch recolours the key along with the picture. Add a kind
+later and the key does not know: call `edit_legend(regenerate=true)`. `add_callout` points a card
+at a node by **id**, not by position — `note` (neutral) · `info` · `warning` · `success` ·
+`danger` — and its leader is re-derived by every `reflow` and `layout_diagram`, so the note stays
+attached to the thing it is about however far that thing moves.
+
 ## Text roles
 
 `title` · `subtitle` · `label` · `caption` · `code`

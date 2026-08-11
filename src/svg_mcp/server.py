@@ -195,6 +195,16 @@ CHARTS
 - `edit_chart(target, data=…)` re-derives the whole plot in place, keeping the group's id,
   classes and position. `get_params` hands the data back exactly as it went in.
 
+LEGENDS & CALLOUTS
+- Finished a diagram or a chart? `add_legend()` with NO entries generates the key from what the
+  document actually draws — every node/edge/container kind and chart series in use, each swatch
+  wearing that kind's real class, so a variant switch recolours the key too. Add a kind later
+  and `edit_legend(target, regenerate=true)` picks it up.
+- To annotate a node, `add_callout(target, text, kind)` — "note"/"info"/"warning"/"success"/
+  "danger". It wraps the text, places the card off the roomiest side, and draws a LEADER that
+  `reflow`/`layout_diagram` re-anchor, so the note stays attached however far the node moves.
+  Do NOT hand-place a text box beside a node: that annotation dies at the next layout pass.
+
 EDITING GEOMETRY IN PLACE
 - To change an existing node, edit it IN PLACE — do NOT delete + re-add (that drops its clip,
   mask, filters, and z-order). Each `edit_*` mirrors its `add_*` twin (same params + inline
@@ -3750,6 +3760,225 @@ def edit_chart(
         height=height,
     )
     return {**result.ref.as_dict(), "children": result.children}
+
+
+# --- annotation facades -----------------------------------------------------
+
+
+@mcp.tool
+@emits_change
+def add_legend(
+    *,
+    document_id: str | None = None,
+    entries: list[ops.LegendItem] | None = None,
+    title: str = "",
+    columns: int = 1,
+    x: float | None = None,
+    y: float | None = None,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | float | bool | None | list[str]]:
+    """Add a KEY to the picture — by default GENERATED from what the document already draws.
+
+    Call it with no `entries` and it scans the document: one row per diagram node kind, then per
+    edge kind, then per container kind, then per chart series — each in first-use order, and each
+    swatch drawn wearing the REAL class that kind is painted by. So the key cannot drift from the
+    picture, and a theme swap or `set_theme_variant` recolours both together.
+
+    A kind nothing uses gets no row. Added a kind since? `edit_legend(regenerate=true)`.
+
+    Args:
+        entries: Spell the key out yourself instead: [{label, swatch}], where `swatch` names a
+            diagram kind ("service", "data", "cluster"), a chart palette slot ("series-2"), or a
+            materialized class ("house-service"). Add `form: "line"` to draw it as a line rather
+            than a chip (kinds the document uses on an edge already default to a line).
+        title: Text above the entries; "" for an untitled key.
+        columns: Entries per row, filled row-major.
+        x: Left edge; omit to auto-place.
+        y: Top edge; omit to stack under the previous facade in this parent.
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label for the group.
+        style: Inline style on the group (wins over the theme).
+        styles: Extra named styles / theme classes to attach.
+        themed: false = skip the theme's hooks, leaving the legend and its swatches unpainted.
+
+    Returns:
+        The group's {id, tag, name}, plus `auto_styles`, the box {x, y, w, h}, the `entries` it
+        drew, and `auto` — true when they were generated and can be regenerated.
+    """
+    doc = _doc(document_id)
+    placed = ops.add_legend(
+        doc,
+        entries=entries,
+        title=title,
+        columns=columns,
+        x=x,
+        y=y,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        styles=styles,
+        themed=themed,
+    )
+    return {
+        **_placed(doc, placed.ref),
+        "x": placed.x,
+        "y": placed.y,
+        "w": placed.w,
+        "h": placed.h,
+        "entries": placed.entries,
+        "auto": placed.auto,
+    }
+
+
+@mcp.tool
+@emits_change
+def edit_legend(
+    *,
+    document_id: str | None = None,
+    target: str,
+    entries: list[ops.LegendItem] | None = None,
+    title: str | None = None,
+    columns: int | None = None,
+    regenerate: bool = False,
+) -> dict[str, str | bool | None | list[str]]:
+    """Edit a legend — and with `regenerate`, re-scan the document for what it should now say.
+
+    `regenerate=true` is the call to make after adding a kind the key does not mention yet. It
+    only applies to a legend that was generated in the first place: re-scanning over entries
+    somebody wrote by hand would throw their work away, so that is refused.
+
+    The legend keeps its position — where a key sits is a composition decision.
+
+    Args:
+        target: The legend group's id or name.
+        entries: A complete new set of entries (same shape `add_legend` takes).
+        title: New title ("" removes it).
+        columns: New column count.
+        regenerate: Re-scan the document for the entries.
+
+    Returns:
+        {id, tag, name, entries, regenerated}.
+    """
+    result = ops.edit_legend(
+        _doc(document_id),
+        target,
+        entries=entries,
+        title=title,
+        columns=columns,
+        regenerate=regenerate,
+    )
+    return {**result.ref.as_dict(), "entries": result.entries, "regenerated": result.regenerated}
+
+
+@mcp.tool
+@emits_change
+def add_callout(
+    *,
+    document_id: str | None = None,
+    target: str,
+    text: str,
+    kind: Literal["note", "info", "warning", "success", "danger"] = "note",
+    side: Literal["auto", "N", "S", "E", "W"] = "auto",
+    distance: float | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    max_width: float = 160.0,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | float | int | bool | None | list[str]]:
+    """Annotate a node: a wrapped card plus a LEADER line to the thing it is about.
+
+    Use this rather than hand-placing a text box beside a node. The leader is DERIVED from where
+    the card and the target are, so `reflow` and `layout_diagram` re-anchor it at both ends — a
+    hand-drawn line would be pointing at empty canvas after the first layout pass.
+
+    Left to itself the card sits off the side of the target with the most free canvas, one
+    `--callout-gap` clear of it. Give x/y and the card is placed verbatim.
+
+    Args:
+        target: The node id or name the callout points at.
+        text: The words. Wrapped at `max_width`; the card is sized to what it wrapped to.
+        kind: "note" (neutral), "info", "warning", "success", "danger" — or any role a resident
+            theme serves.
+        side: Which face of the target to sit off; "auto" picks the roomiest.
+        distance: Gap between the target's edge and the card's, in user units; omit for the
+            theme's `--callout-gap`.
+        x: Left edge of the card; give x AND y to place it by hand.
+        y: Top edge of the card.
+        max_width: Longest line of text before it wraps.
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label for the group.
+        style: Inline style on the group (wins over the theme).
+        styles: Extra named styles / theme classes to attach.
+        themed: false = skip the theme's hooks, leaving the card and leader unpainted.
+
+    Returns:
+        The group's {id, tag, name}, plus `auto_styles`, the card's {x, y, w, h}, `lines` (how
+        many it wrapped to), the `side` it used, and `auto` (false when you placed it).
+    """
+    doc = _doc(document_id)
+    placed = ops.add_callout(
+        doc,
+        target=target,
+        text=text,
+        kind=kind,
+        side=side,
+        distance=distance,
+        x=x,
+        y=y,
+        max_width=max_width,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        styles=styles,
+        themed=themed,
+    )
+    return {
+        **_placed(doc, placed.ref),
+        "x": placed.x,
+        "y": placed.y,
+        "w": placed.w,
+        "h": placed.h,
+        "lines": placed.lines,
+        "side": placed.side,
+        "auto": placed.auto,
+    }
+
+
+@mcp.tool
+@emits_change
+def edit_callout(
+    *,
+    document_id: str | None = None,
+    target: str,
+    text: str | None = None,
+    kind: Literal["note", "info", "warning", "success", "danger"] | None = None,
+    side: Literal["auto", "N", "S", "E", "W"] | None = None,
+) -> dict[str, str | int | bool | None]:
+    """Edit a callout — new words, a new kind, a new side — and re-derive its leader.
+
+    New `text` is re-wrapped and the card re-sized around it. An auto-placed card is re-placed
+    around its target (its size changed, so its old corner means nothing); a card you positioned
+    keeps its corner, because that was a decision.
+
+    Args:
+        target: The callout group's id or name.
+        text: Replacement text, re-wrapped at the callout's `max_width`.
+        kind: New kind (swaps the theme class).
+        side: New face of the target to sit off / point at.
+
+    Returns:
+        {id, tag, name, lines, replaced} — `replaced` is true when the card had to move.
+    """
+    result = ops.edit_callout(_doc(document_id), target, text=text, kind=kind, side=side)
+    return {**result.ref.as_dict(), "lines": result.lines, "replaced": result.replaced}
 
 
 @mcp.tool

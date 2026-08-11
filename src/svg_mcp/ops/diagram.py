@@ -70,13 +70,15 @@ SHAPES: tuple[str, ...] = ("rect", "squircle", "pill", "polygon", "circle", "ell
 _NODE_ATTR = "data-diagram-node"
 _EDGE_ATTR = "data-diagram-edge"
 _CONTAINER_ATTR = "data-diagram-container"
-# The chart facade's spec lives here. It is declared alongside its siblings (and not in
-# ``ops.chart``, which imports this module) so the ONE list of what auto-placement stacks under
-# can name it without a cycle.
+# The chart and annotation facades' specs live here. They are declared alongside their siblings
+# (and not in ``ops.chart`` / ``ops.annotate``, which import this module) so the ONE list of what
+# auto-placement stacks under can name them without a cycle.
 _CHART_ATTR = "data-chart"
-# What a new auto-placed facade stacks below: another node, or a chart. An edge is routed and a
-# container is fitted, so neither takes part in the flow.
-_STACKABLE_ATTRS: tuple[str, ...] = (_NODE_ATTR, _CHART_ATTR)
+_LEGEND_ATTR = "data-legend"
+_CALLOUT_ATTR = "data-callout"
+# What a new auto-placed facade stacks below: another node, a chart, or an annotation. An edge is
+# routed and a container is fitted, so neither takes part in the flow.
+_STACKABLE_ATTRS: tuple[str, ...] = (_NODE_ATTR, _CHART_ATTR, _LEGEND_ATTR, _CALLOUT_ATTR)
 # The one arrowhead every edge shares, marked so it is found again without trusting its id.
 _ARROW_ATTR = "data-diagram-arrow"
 _ARROW_ID = "diagram-arrow"
@@ -121,6 +123,7 @@ class Reflow(BaseModel):
     skipped: list[str] = Field(default_factory=list)
     containers_refit: int = 0
     skipped_containers: list[str] = Field(default_factory=list)
+    callouts_reanchored: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1450,10 +1453,23 @@ def reflow(
     was and reported in ``skipped``; a container none of whose members resolves any more is
     likewise left alone and reported in ``skipped_containers``.
 
-    Containers with an explicit box are never touched — that geometry was a decision.
+    The edge pass also re-anchors every CALLOUT leader — an annotation is derived geometry in the
+    same way an edge is, and a callout whose target has gone is reported in ``skipped`` alongside
+    them. The cards themselves stay put; only the two ends of each leader move.
+
+    Containers with an explicit box are never touched — that geometry was a decision. Legends are
+    never touched at all: what a key says, and where it sits, are both deliberate.
     """
     ids = {str(doc.resolve(entry).get_id()) for entry in scope} if scope else None
     result = _reroute(doc, scope=ids) if edges else Reflow()
+    if edges:
+        # ``ops.annotate`` imports this module, not vice versa — hence the deferred import, the
+        # same shape ``ops.themes`` uses to reach back into ``ops.construct``.
+        from .annotate import reanchor_callouts
+
+        reanchored, lost = reanchor_callouts(doc, scope=ids)
+        result.callouts_reanchored = reanchored
+        result.skipped.extend(lost)
     if containers:
         refit, skipped = _refit_containers(doc, scope=ids)
         result.containers_refit = refit

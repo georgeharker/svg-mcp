@@ -26,6 +26,7 @@ type ParamValue = (
     | list[float]
     | list[list[float]]
     | dict[str, JsonValue]
+    | list[JsonValue]
     | None
 )
 type ShapeParams = dict[str, ParamValue]
@@ -267,6 +268,22 @@ _FACADES: tuple[
         (),
         ("data",),
     ),
+    (
+        "data-legend",
+        "legend",
+        ("title",),
+        ("columns",),
+        (),
+        ("entries",),
+    ),
+    (
+        "data-callout",
+        "callout",
+        ("target", "text", "kind", "side"),
+        ("distance", "max_width"),
+        (),
+        (),
+    ),
 )
 
 
@@ -283,7 +300,9 @@ def _read_facade(element: inkex.BaseElement) -> tuple[str, ShapeParams] | None:
             params.update({key: [str(item) for item in spec[key]] for key in list_keys})
             for key in json_keys:
                 value = spec[key]
-                if not isinstance(value, dict):
+                # A chart's `data` is an object and a legend's `entries` is an array; both are
+                # structured enough that flattening them would lose the spec rather than report it.
+                if not isinstance(value, dict | list):
                     return None
                 params[key] = value
         except (ValueError, TypeError, KeyError):

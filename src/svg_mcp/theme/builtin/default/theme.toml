@@ -31,6 +31,13 @@ roles = [
   "cluster",
   "zone",
   "swimlane",
+  # annotation: the legend's box, and the five things a callout can be. `note` is deliberately
+  # NOT repeated here — a callout that is commentary wears the same pale sticky a note node does.
+  "legend",
+  "info",
+  "warning",
+  "success",
+  "danger",
 ]
 
 # The primitive each diagram kind wants when a facade draws it — the shape half of a role,

@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+from .annotate import (
+    CalloutEdit,
+    CalloutSide,
+    LegendEdit,
+    LegendEntry,
+    LegendItem,
+    PlacedCallout,
+    PlacedLegend,
+    SwatchForm,
+    add_callout,
+    add_legend,
+    edit_callout,
+    edit_legend,
+)
 from .chart import (
     BarData,
     ChartData,
@@ -237,6 +251,19 @@ __all__ = [
     "SparklineData",
     "add_chart",
     "edit_chart",
+    # annotation facades
+    "CalloutEdit",
+    "CalloutSide",
+    "LegendEdit",
+    "LegendEntry",
+    "LegendItem",
+    "PlacedCallout",
+    "PlacedLegend",
+    "SwatchForm",
+    "add_legend",
+    "edit_legend",
+    "add_callout",
+    "edit_callout",
     # paths
     "add_arc",
     "add_star",

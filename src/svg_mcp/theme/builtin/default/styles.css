@@ -30,6 +30,21 @@
   /* Pale yellow, the sticky note everybody already recognises. */
   --surface-note: #fdf6d3;
 
+  /* --- callout surfaces: the four statuses a note can be instead of neutral ---
+   * Each is a wash plus an accent stroke of the same hue, so the CARD stays quiet enough to read
+   * text on and the EDGE carries the signal. Hue is doing real work here (unlike the node kinds,
+   * which separate by value so they survive greyscale) because a status has no natural ordering
+   * to encode in lightness — but every one of them is still darker in stroke than in fill, so a
+   * greyscale print keeps the card/edge relationship even where it loses which status it is. */
+  --surface-info: #e6f0fb;
+  --stroke-info: #3f7cc0;
+  --surface-warning: #fbf0dc;
+  --stroke-warning: #b8862b;
+  --surface-success: #e6f4e9;
+  --stroke-success: #3f8f52;
+  --surface-danger: #fbeaea;
+  --stroke-danger: #c04a4a;
+
   /* --- ink ------------------------------------------------------------ */
   --ink: #1a1d21;
   --ink-muted: #6b7280;
@@ -68,6 +83,10 @@
   /* --- routing: how far an edge leaves a node before it turns --------- */
   --edge-stub: 12;
   --edge-radius: 8;
+
+  /* The clear air a callout leaves between the node it annotates and its own card — wide enough
+   * that the leader reads as a line rather than as a join. */
+  --callout-gap: 40;
 
   /* --- charts --------------------------------------------------------- */
 
@@ -237,6 +256,87 @@
   stroke: none;
   font-family: var(--font);
   font-size: 11px;
+}
+
+/* --- annotation: legends and callouts ----------------------------------
+ *
+ * A legend is a card of swatches, and every swatch wears the REAL class of the kind it stands
+ * for — so there is nothing to write here for them: `.service` paints the service chip and
+ * `.data` paints the data line, exactly as they paint the diagram. All the legend needs of its
+ * own is a ground to sit the swatches on.
+ *
+ * A callout is the same card idea with words in it, and `note` is deliberately shared with the
+ * diagram node kind: commentary is commentary, whether it is a box in the flow or a card pointing
+ * at one. The four status kinds below are the alternatives to neutral.
+ */
+
+/** A legend: the key to the picture. Canvas ground with a hairline edge, so it reads as a panel
+ * laid over the drawing rather than as another node in it. */
+.legend {
+  fill: var(--canvas);
+  stroke: var(--stroke);
+  stroke-width: var(--stroke-width-hairline);
+}
+
+/** A legend's own type — its title and one line per entry. The swatches beside them carry their
+ * own classes, so this rule reaches only the words. */
+.legend text {
+  fill: var(--ink);
+  stroke: none;
+  fill-opacity: 1;
+  font-family: var(--font);
+  font-size: 11px;
+}
+
+/** An informational callout: a fact worth knowing. Pale blue, with the accent doing the signalling. */
+.info {
+  fill: var(--surface-info);
+  stroke: var(--stroke-info);
+  stroke-width: var(--stroke-width);
+}
+
+/** A warning callout: something to watch. Pale amber. */
+.warning {
+  fill: var(--surface-warning);
+  stroke: var(--stroke-warning);
+  stroke-width: var(--stroke-width);
+}
+
+/** A success callout: something that holds. Pale green. */
+.success {
+  fill: var(--surface-success);
+  stroke: var(--stroke-success);
+  stroke-width: var(--stroke-width);
+}
+
+/** A danger callout: something that bites. Pale red. */
+.danger {
+  fill: var(--surface-danger);
+  stroke: var(--stroke-danger);
+  stroke-width: var(--stroke-width);
+}
+
+/** The wrapped text inside a callout card. This is a PART class rather than a `.note text`
+ * descendant rule on purpose: `.note` is shared with the diagram note kind, and a descendant rule
+ * would resize every note node's label as a side effect of adding callouts. */
+.callout-text {
+  fill: var(--ink);
+  fill-opacity: 1;
+  stroke: none;
+  font-family: var(--font);
+  font-size: 11px;
+}
+
+/** The line from a callout's card to what it points at, and the dot it lands on. Ink at 55% —
+ * as a stroke-opacity and a fill-opacity rather than an rgba(), so the palette stays one token
+ * per colour and the dark variant inverts it for free. A leader is a gesture, not a connection:
+ * it should be visible when looked for and invisible when not. */
+.leader {
+  stroke: var(--ink);
+  stroke-opacity: 0.55;
+  stroke-width: var(--stroke-width-hairline);
+  fill: var(--ink);
+  fill-opacity: 0.55;
 }
 
 /* --- text roles --------------------------------------------------------
