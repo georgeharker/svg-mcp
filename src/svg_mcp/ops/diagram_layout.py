@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from ..model.document import Document
 from ..model.errors import InvalidArgument
+from ..query.outline import _bbox_xywh
 from .diagram import (
     _DEFAULT_GAP,
     _box_of,
@@ -549,6 +550,20 @@ def layout_diagram(
         target = placement.positions[node_id]
         translate_node(doc, node_id, target[0] - at_x, target[1] - at_y)
     flow = reflow(doc, edges=True, containers=True, scope=sorted(known))
+    # Auto containers add padding + label headroom OUTSIDE the node extents the placement
+    # normalized, so a fitted box can overflow the origin (clipping its label at the canvas
+    # edge). Measure the refit boxes and shift the whole scope down/right by any deficit.
+    shift_x, shift_y = 0.0, 0.0
+    for group, _spec in _container_groups(doc):
+        if str(group.get_id()) in containers:
+            box = _bbox_xywh(group)
+            if box is not None:
+                shift_x = max(shift_x, origin_x - box[0])
+                shift_y = max(shift_y, origin_y - box[1])
+    if shift_x > 0 or shift_y > 0:
+        for node_id, _node, _at in found:
+            translate_node(doc, node_id, shift_x, shift_y)
+        flow = reflow(doc, edges=True, containers=True, scope=sorted(known))
     return DiagramLayout(
         nodes_placed=len(nodes),
         ranks=placement.ranks,

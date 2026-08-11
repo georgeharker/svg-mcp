@@ -8,8 +8,9 @@ import pytest
 
 from svg_mcp import ops
 from svg_mcp.model import Document
-from svg_mcp.ops.diagram import _box_of
+from svg_mcp.ops.diagram import _box_of, _container_groups
 from svg_mcp.ops.diagram_layout import LayoutNode, layout_grid, layout_layered, layout_tree
+from svg_mcp.query.outline import _bbox_xywh
 from svg_mcp.render import get_renderer
 from svg_mcp.render.base import RenderRequest
 from svg_mcp.serialize import export_svg
@@ -419,3 +420,16 @@ def test_a_laid_out_diamond_renders_with_its_container_behind_it() -> None:
     corner = image.getpixel((int(zone.x + 3), int(zone.y + 3)))
     assert isinstance(corner, tuple)
     assert 0 < corner[3] <= 24  # the zone's wash, with nothing of its own drawn over it
+
+
+def test_a_fitted_container_never_overflows_the_layout_origin() -> None:
+    doc = _doc()
+    ids = _diamond(doc)
+    ops.add_diagram_container(doc, members=[ids[0], ids[1]], label="zone", kind="zone")
+    ops.layout_diagram(doc, origin_x=20, origin_y=20)
+    for group, _spec in _container_groups(doc):
+        box = _bbox_xywh(group)
+        assert box is not None
+        # The padded, label-headroomed box must sit inside the origin, not just the nodes.
+        assert box[0] >= 20 - 1e-6
+        assert box[1] >= 20 - 1e-6
