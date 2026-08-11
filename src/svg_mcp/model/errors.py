@@ -21,3 +21,7 @@ class AmbiguousReference(SvgMcpError):
 
 class InvalidArgument(SvgMcpError):
     """A tool/op argument was structurally valid but semantically wrong."""
+
+
+class ThemeError(SvgMcpError):
+    """A theme could not be discovered, parsed, linted, or materialized."""

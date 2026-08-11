@@ -29,6 +29,7 @@ from . import ops
 from . import preview as _preview
 from . import widget as _widget
 from .model.document import Document
+from .model.handles import NodeRef
 from .ops.resources import FilterInfo as _FilterInfo
 from .ops.resources import FxParams as _FxParams
 from .query import convert_units as _convert_units
@@ -44,6 +45,8 @@ from .query import get_subtree as _get_subtree
 from .query import get_transform as _get_transform
 from .query import list_resources as _list_resources
 from .query import outline as _outline
+from .query.inspect import DocumentInfo as _DocumentInfo
+from .query.inspect import DocumentValue as _DocumentValue
 from .query.inspect import Geometry as _Geometry
 from .query.inspect import ShapeParams as _ShapeParams
 from .query.inspect import TransformEntry as _TransformEntry
@@ -159,7 +162,9 @@ EDITING GEOMETRY IN PLACE
 REUSABLE RESOURCES (defs)
 - `define_linear_gradient`/`define_radial_gradient`/`define_pattern` return an id — use it as a
   fill: `style={"fill": "url(#<id>)"}` or `@<name>`.
-- `define_style(name, style)` creates a named CSS class; `apply_styles(target, [name])` applies it.
+- `define_style(name, style)` creates a named CSS class; `apply_styles(target, [name])` APPENDS it
+  to the node's ordered class list (`remove_styles` unlinks). A node's inline `style` is its
+  EXPLICIT style and beats every class rule.
 - `define_clip`/`define_mask`/`define_symbol`/`define_marker` take `content`: a list of EXISTING
   node ids, which are MOVED into the new resource. So: create the shapes first, then define the
   resource from them, then `apply_clip`/`apply_mask`/`apply_marker` (or `add_use` for a symbol).
@@ -359,10 +364,10 @@ def _doc(document_id: str | None) -> Document:
     return _store().get(document_id)
 
 
-def _documents_index() -> dict[str, str | list[dict[str, str | int | None]] | None]:
+def _documents_index() -> dict[str, str | list[_DocumentInfo] | None]:
     """Index of open documents: id, size, counts, and which one is active."""
     active = _store().active_id
-    docs: list[dict[str, str | int | None]] = []
+    docs: list[_DocumentInfo] = []
     for did in _store().list_ids():
         info = _describe_document(_store().peek(did))
         docs.append({"id": did, "active": did == active, **info})
@@ -388,6 +393,15 @@ def _publish_preview() -> None:
 
 def _style(style: ShapeStyle | None) -> dict[str, str] | None:
     return style.to_style_dict() if style is not None else None
+
+
+def _classes(doc: Document, node_id: str) -> list[str]:
+    return str(doc.resolve(node_id).get("class") or "").split()
+
+
+def _placed(doc: Document, ref: NodeRef) -> dict[str, str | None | list[str]]:
+    """A construction tool's response: the node handle plus the style classes it was linked to."""
+    return {**ref.as_dict(), "auto_styles": _classes(doc, ref.id)}
 
 
 async def _emit_change(ctx: Context) -> None:
@@ -611,7 +625,10 @@ def add_rect(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a rectangle to the document.
 
     Args:
@@ -625,12 +642,18 @@ def add_rect(
         name: Friendly label for later reference by name.
         style: Fill/stroke/etc. Fill may be a color or a paint ref (url(#id) or @name).
         transform: Optional SVG transform string applied at creation.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_rect(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_rect(
+        doc,
         x=x,
         y=y,
         width=width,
@@ -641,7 +664,11 @@ def add_rect(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -656,7 +683,10 @@ def add_circle(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a circle to the document.
 
     Args:
@@ -667,12 +697,18 @@ def add_circle(
         name: Friendly label.
         style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_circle(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_circle(
+        doc,
         cx=cx,
         cy=cy,
         r=r,
@@ -680,7 +716,11 @@ def add_circle(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -696,7 +736,10 @@ def add_ellipse(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add an ellipse to the document.
 
     Args:
@@ -708,12 +751,18 @@ def add_ellipse(
         name: Friendly label.
         style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_ellipse(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_ellipse(
+        doc,
         cx=cx,
         cy=cy,
         rx=rx,
@@ -722,7 +771,11 @@ def add_ellipse(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -738,7 +791,10 @@ def add_line(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a straight line segment from (x1,y1) to (x2,y2).
 
     Give it a visible stroke via style (e.g. stroke and stroke_width); lines have no fill.
@@ -752,12 +808,18 @@ def add_line(
         name: Friendly label.
         style: Stroke color/width/etc.
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_line(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_line(
+        doc,
         x1=x1,
         y1=y1,
         x2=x2,
@@ -766,7 +828,11 @@ def add_line(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -779,7 +845,10 @@ def add_polyline(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add an open polyline through a list of points.
 
     Args:
@@ -788,18 +857,28 @@ def add_polyline(
         name: Friendly label.
         style: Fill/stroke/etc.
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_polyline(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_polyline(
+        doc,
         points=points,
         parent=parent,
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -812,7 +891,10 @@ def add_polygon(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a closed polygon through a list of points.
 
     Args:
@@ -821,18 +903,28 @@ def add_polygon(
         name: Friendly label.
         style: Fill/stroke/etc.
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_polygon(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_polygon(
+        doc,
         points=points,
         parent=parent,
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -845,7 +937,10 @@ def add_path(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add an arbitrary path from SVG path data.
 
     Args:
@@ -854,18 +949,28 @@ def add_path(
         name: Friendly label.
         style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_path(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_path(
+        doc,
         d=d,
         parent=parent,
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -883,7 +988,10 @@ def add_variable_width_path(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Expand a polyline into a VARIABLE-WIDTH line — a filled ribbon that swells and tapers.
 
     SVG `stroke-width` is constant per element, so true variable-width lines (calligraphy,
@@ -905,13 +1013,19 @@ def add_variable_width_path(
         name: Friendly label.
         style: Fill/etc; fill may be a color or paint ref (url(#id) or @name).
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
     width_list = [float(widths)] * len(points) if isinstance(widths, int | float) else widths
-    return ops.add_variable_width_path(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_variable_width_path(
+        doc,
         points=points,
         widths=width_list,
         closed=closed,
@@ -922,7 +1036,11 @@ def add_variable_width_path(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -940,7 +1058,10 @@ def add_squircle(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a SQUIRCLE — a rounded rectangle with iOS/Figma corner smoothing (Apple's icon shape).
 
     A plain rounded rect joins its straight edges to circular corner arcs abruptly; a squircle eases
@@ -960,12 +1081,18 @@ def add_squircle(
         name: Friendly label.
         style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_squircle(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_squircle(
+        doc,
         x=x,
         y=y,
         width=width,
@@ -976,7 +1103,11 @@ def add_squircle(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -995,7 +1126,10 @@ def add_rounded_polygon(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a regular N-gon with smoothed corners — the squircle idea generalized to `sides` sides.
 
     A convex regular polygon (triangle, pentagon, hexagon, octagon, …) inscribed in `radius`, with
@@ -1015,12 +1149,18 @@ def add_rounded_polygon(
         name: Friendly label.
         style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_rounded_polygon(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_rounded_polygon(
+        doc,
         cx=cx,
         cy=cy,
         radius=radius,
@@ -1032,7 +1172,11 @@ def add_rounded_polygon(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -1050,7 +1194,10 @@ def add_superellipse(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a Lamé SUPERELLIPSE — one continuous curve with no edges or corners (≠ squircle).
 
     `|x/rx|^n + |y/ry|^n = 1`: the `exponent` n morphs the whole silhouette — n=1 a diamond, n=2 an
@@ -1067,12 +1214,18 @@ def add_superellipse(
         name: Friendly label.
         style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_superellipse(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_superellipse(
+        doc,
         cx=cx,
         cy=cy,
         rx=rx,
@@ -1083,7 +1236,11 @@ def add_superellipse(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -1100,7 +1257,10 @@ def add_pill(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a PILL / stadium — a rectangle whose short sides are fully rounded into semicircles.
 
     The corner radius is fixed at half the shorter side (exact semicircular ends) — ideal for
@@ -1115,12 +1275,18 @@ def add_pill(
         name: Friendly label.
         style: Fill/stroke/etc; fill may be a color or paint ref (url(#id) or @name).
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_pill(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_pill(
+        doc,
         x=x,
         y=y,
         width=width,
@@ -1130,7 +1296,11 @@ def add_pill(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -1140,6 +1310,9 @@ def add_variable_width_paths(
     document_id: str | None = None,
     strokes: list[VariableWidthStroke],
     parent: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> dict[str, int | list[str]]:
     """Add MANY variable-width ribbons in ONE call — a bulk version of add_variable_width_path.
 
@@ -1152,9 +1325,15 @@ def add_variable_width_paths(
         strokes: A list of {points, widths, closed?, cap?, style?, name?} — each as in
             add_variable_width_path. `widths` may be a list (per vertex) or a single number.
         parent: Group/layer id (or name) to nest all of them under; omit for the document root.
+        role: Theme role for these nodes (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        {count, ids}: how many were added and their node ids (in order).
+        {count, ids, auto_styles} — how many were added, their node ids in order, and the
+        style classes each was linked to.
     """
     doc = _doc(document_id)
     ids: list[str] = []
@@ -1173,24 +1352,39 @@ def add_variable_width_paths(
             parent=parent,
             name=s.name,
             style=_style(s.style),
+            role=role,
+            styles=styles,
+            themed=themed,
         )
         ids.append(ref.id)
-    return {"count": len(ids), "ids": ids}
+    return {"count": len(ids), "ids": ids, "auto_styles": _classes(doc, ids[0]) if ids else []}
 
 
 @mcp.tool
 @emits_change
 def add_rects(
-    *, document_id: str | None = None, rects: list[RectSpec], parent: str | None = None
+    *,
+    document_id: str | None = None,
+    rects: list[RectSpec],
+    parent: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> dict[str, int | list[str]]:
     """Add MANY rectangles in one call (bulk add_rect) — one round-trip instead of N.
 
     Args:
         rects: A list of {x, y, width, height, rx?, ry?, style?, name?}.
         parent: Group/layer id (or name) to nest them all under; omit for the document root.
+        role: Theme role for these nodes (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        {count, ids} — how many were added and their node ids, in order.
+        {count, ids, auto_styles} — how many were added, their node ids in order, and the
+        style classes each was linked to.
     """
     doc = _doc(document_id)
     ids = [
@@ -1205,49 +1399,85 @@ def add_rects(
             parent=parent,
             name=r.name,
             style=_style(r.style),
+            role=role,
+            styles=styles,
+            themed=themed,
         ).id
         for r in rects
     ]
-    return {"count": len(ids), "ids": ids}
+    return {"count": len(ids), "ids": ids, "auto_styles": _classes(doc, ids[0]) if ids else []}
 
 
 @mcp.tool
 @emits_change
 def add_circles(
-    *, document_id: str | None = None, circles: list[CircleSpec], parent: str | None = None
+    *,
+    document_id: str | None = None,
+    circles: list[CircleSpec],
+    parent: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> dict[str, int | list[str]]:
     """Add MANY circles in one call (bulk add_circle) — ideal for dot fields / scatter plots.
 
     Args:
         circles: A list of {cx, cy, r, style?, name?}.
         parent: Group/layer id (or name) to nest them all under; omit for the document root.
+        role: Theme role for these nodes (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        {count, ids} — how many were added and their node ids, in order.
+        {count, ids, auto_styles} — how many were added, their node ids in order, and the
+        style classes each was linked to.
     """
     doc = _doc(document_id)
     ids = [
         ops.add_circle(
-            doc, cx=c.cx, cy=c.cy, r=c.r, parent=parent, name=c.name, style=_style(c.style)
+            doc,
+            cx=c.cx,
+            cy=c.cy,
+            r=c.r,
+            parent=parent,
+            name=c.name,
+            style=_style(c.style),
+            role=role,
+            styles=styles,
+            themed=themed,
         ).id
         for c in circles
     ]
-    return {"count": len(ids), "ids": ids}
+    return {"count": len(ids), "ids": ids, "auto_styles": _classes(doc, ids[0]) if ids else []}
 
 
 @mcp.tool
 @emits_change
 def add_lines(
-    *, document_id: str | None = None, lines: list[LineSpec], parent: str | None = None
+    *,
+    document_id: str | None = None,
+    lines: list[LineSpec],
+    parent: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> dict[str, int | list[str]]:
     """Add MANY line segments in one call (bulk add_line) — grids, hatching, axes.
 
     Args:
         lines: A list of {x1, y1, x2, y2, style?, name?}.
         parent: Group/layer id (or name) to nest them all under; omit for the document root.
+        role: Theme role for these nodes (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        {count, ids} — how many were added and their node ids, in order.
+        {count, ids, auto_styles} — how many were added, their node ids in order, and the
+        style classes each was linked to.
     """
     doc = _doc(document_id)
     ids = [
@@ -1260,32 +1490,56 @@ def add_lines(
             parent=parent,
             name=ln.name,
             style=_style(ln.style),
+            role=role,
+            styles=styles,
+            themed=themed,
         ).id
         for ln in lines
     ]
-    return {"count": len(ids), "ids": ids}
+    return {"count": len(ids), "ids": ids, "auto_styles": _classes(doc, ids[0]) if ids else []}
 
 
 @mcp.tool
 @emits_change
 def add_paths(
-    *, document_id: str | None = None, paths: list[PathSpec], parent: str | None = None
+    *,
+    document_id: str | None = None,
+    paths: list[PathSpec],
+    parent: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> dict[str, int | list[str]]:
     """Add MANY paths in one call (bulk add_path) — procedural/vector art with one round-trip.
 
     Args:
         paths: A list of {d, style?, name?} where d is SVG path data.
         parent: Group/layer id (or name) to nest them all under; omit for the document root.
+        role: Theme role for these nodes (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        {count, ids} — how many were added and their node ids, in order.
+        {count, ids, auto_styles} — how many were added, their node ids in order, and the
+        style classes each was linked to.
     """
     doc = _doc(document_id)
     ids = [
-        ops.add_path(doc, d=p.d, parent=parent, name=p.name, style=_style(p.style)).id
+        ops.add_path(
+            doc,
+            d=p.d,
+            parent=parent,
+            name=p.name,
+            style=_style(p.style),
+            role=role,
+            styles=styles,
+            themed=themed,
+        ).id
         for p in paths
     ]
-    return {"count": len(ids), "ids": ids}
+    return {"count": len(ids), "ids": ids, "auto_styles": _classes(doc, ids[0]) if ids else []}
 
 
 @mcp.tool
@@ -1300,7 +1554,10 @@ def add_text(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a single-line text element anchored at (x, y).
 
     For multiple lines or styled spans, follow up with add_text_run on the returned id. Set the
@@ -1315,12 +1572,18 @@ def add_text(
         name: Friendly label.
         style: Font and fill properties (e.g. font-size as "24px").
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new node's {id, tag, name}.
+        The new node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_text(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_text(
+        doc,
         x=x,
         y=y,
         content=content,
@@ -1328,7 +1591,11 @@ def add_text(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -1381,7 +1648,10 @@ def add_text_block(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a MULTI-LINE text block — split `content` on `\\n` into evenly-spaced lines.
 
     No manual per-line `y` math: each line is a `<tspan>` at `x` with `dy = line_height` em
@@ -1394,9 +1664,15 @@ def add_text_block(
         y: Baseline y of the FIRST line.
         content: The text, with `\\n` between lines.
         line_height: Line spacing as a multiple of font size.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
     """
-    return ops.add_text_block(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_text_block(
+        doc,
         x=x,
         y=y,
         content=content,
@@ -1405,7 +1681,11 @@ def add_text_block(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -2398,7 +2678,10 @@ def add_text_run(
     dy: float | None = None,
     name: str | None = None,
     style: ShapeStyle | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Append a styled text run (<tspan>) to an existing text node.
 
     Use this for multi-line text (give a new absolute y, or a dy offset) or for differently
@@ -2413,12 +2696,18 @@ def add_text_run(
         dy: Optional y offset relative to the preceding text.
         name: Friendly label.
         style: Font/fill overrides for this run.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new tspan's {id, tag, name}.
+        The new tspan's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_text_run(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_text_run(
+        doc,
         parent=parent,
         text=text,
         x=x,
@@ -2427,7 +2716,11 @@ def add_text_run(
         dy=dy,
         name=name,
         style=_style(style),
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -2444,7 +2737,10 @@ def add_text_on_path(
     parent: str | None = None,
     name: str | None = None,
     style: ShapeStyle | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add text that flows along an existing path.
 
     Create the path first, then pass its id here. The path must already exist in the document.
@@ -2459,12 +2755,18 @@ def add_text_on_path(
         parent: Group/layer id (or name); omit for the document root.
         name: Friendly label.
         style: Font/fill properties.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new text node's {id, tag, name}.
+        The new text node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_text_on_path(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_text_on_path(
+        doc,
         path=path,
         content=content,
         x=x,
@@ -2474,7 +2776,11 @@ def add_text_on_path(
         parent=parent,
         name=name,
         style=_style(style),
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -2494,7 +2800,10 @@ def add_image(
     parent: str | None = None,
     name: str | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a raster image. Provide exactly one source: href, data_base64, or path.
 
     Args:
@@ -2510,12 +2819,18 @@ def add_image(
         parent: Group/layer id (or name); omit for the document root.
         name: Friendly label.
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new image node's {id, tag, name}.
+        The new image node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_image(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_image(
+        doc,
         x=x,
         y=y,
         width=width,
@@ -2528,7 +2843,11 @@ def add_image(
         parent=parent,
         name=name,
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 # --- resources: named styles, gradients, clip/mask, filters ----------------
@@ -2593,18 +2912,264 @@ def delete_style(*, document_id: str | None = None, name: str) -> str:
 @mcp.tool
 @emits_change
 def apply_styles(
-    *, document_id: str | None = None, target: str, names: list[str]
+    *, document_id: str | None = None, target: str, names: list[str], replace: bool = False
 ) -> dict[str, str | None]:
-    """Apply one or more named styles (defined via define_style) to a node, setting its class.
+    """Apply named styles (from define_style, or a theme's hooks) to a node's class list.
+
+    The class list is an ordered list of style REFS the node stays linked to — APPENDING by
+    default, so earlier refs (e.g. a theme hook) survive and keep their position. A name already
+    present is not duplicated or moved. Use `remove_styles` to unlink one, `replace=true` to set
+    the whole list at once. Inline style (set via `restyle` or an add_*/edit_* `style` arg) is the
+    node's EXPLICIT style and still wins over every class rule.
 
     Args:
         target: Node id or name.
-        names: Style names to apply.
+        names: Style names to link.
+        replace: false (default) = append to the existing class list; true = overwrite it.
 
     Returns:
         The node's {id, tag, name}.
     """
-    return ops.apply_styles(_doc(document_id), target, names).as_dict()
+    return ops.apply_styles(_doc(document_id), target, names, replace=replace).as_dict()
+
+
+@mcp.tool
+@emits_change
+def remove_styles(
+    *, document_id: str | None = None, target: str, names: list[str]
+) -> dict[str, str | None]:
+    """Unlink named styles from a node's class list, keeping the remaining refs in order.
+
+    Idempotent — names the node doesn't carry are ignored; emptying the list drops the `class`
+    attribute. Removes only the LINK: the style itself stays defined (use `delete_style` for that),
+    and the node's inline/explicit style is untouched.
+
+    Args:
+        target: Node id or name.
+        names: Style names to unlink.
+
+    Returns:
+        The node's {id, tag, name}.
+    """
+    return ops.remove_styles(_doc(document_id), target, names).as_dict()
+
+
+# --- themes ----------------------------------------------------------------
+
+
+@mcp.tool
+@emits_change
+def load_theme(
+    *,
+    document_id: str | None = None,
+    name: str,
+    roles: list[str] | None = None,
+    variant: str | None = None,
+    expect_free: bool = False,
+    search_paths: list[str] | None = None,
+) -> ops.ThemeResidency:
+    """Load a theme into the document and route the node categories/roles it serves to it.
+
+    Themes are a role-routed SET, not a stack: each resident theme serves a set of route keys —
+    the categories (shape, text, connector, container, image) plus any role names it declares —
+    and a key is served by exactly one theme. New nodes then hook into whichever theme serves
+    their category, so `add_rect` after this call is already themed. Several themes can be
+    resident at once, each covering different keys; loading one that wants a key another holds
+    TAKES IT OVER, reported in `evicted`.
+
+    Args:
+        name: Theme name — a `<name>/` directory (styles.css + optional theme.toml, variants,
+            guidance.md) or a bare `<name>.css` on the search path.
+        roles: Route keys this theme should serve, overriding its manifest — e.g. ["text",
+            "title"] to take only the text category and the title role. A bare .css theme
+            declares nothing, so name its roles here or it will style nothing automatically.
+        variant: Variant to materialize (a token overlay, e.g. "dark").
+        expect_free: true = error instead of taking over a key another theme already serves.
+        search_paths: Directories to look in; defaults to the project's `.svg-mcp/themes` then
+            the user's `~/.config/svg-mcp/themes`.
+
+    Returns:
+        {theme, variant, routes_taken, evicted, guidance, styles}: what it now serves, which
+        routes it took from which theme, the theme's authoring notes, and every class it
+        defines (with descriptions) for use in `styles`/`apply_styles`.
+    """
+    return ops.load_theme(
+        _doc(document_id),
+        name,
+        roles=roles,
+        variant=variant,
+        expect_free=expect_free,
+        search_paths=[Path(path) for path in search_paths] if search_paths is not None else None,
+    )
+
+
+@mcp.tool
+@emits_change
+def unload_theme(*, document_id: str | None = None, name: str) -> ops.ThemeRemoval:
+    """Remove a theme's rules, routes, and metadata from the document.
+
+    Class attributes on nodes are NOT stripped — any of the theme's classes still carried are
+    reported as `dangling_classes` (nodes asking for rules that no longer exist). Unlink them
+    with `remove_styles`, or load a theme that defines them again.
+
+    Args:
+        name: The resident theme to unload.
+
+    Returns:
+        {theme, routes_freed, dangling_classes}.
+    """
+    return ops.unload_theme(_doc(document_id), name)
+
+
+@mcp.tool
+@emits_change
+def sync_theme(*, document_id: str | None = None, name: str) -> ops.ThemeResidency:
+    """Re-read a resident theme from disk, keeping its variant and routes — pick up a CSS edit.
+
+    Args:
+        name: The resident theme to re-read (from where it was loaded).
+
+    Returns:
+        {theme, variant, routes_taken, guidance, styles} for the refreshed theme.
+    """
+    return ops.sync_theme(_doc(document_id), name)
+
+
+@mcp.tool
+@emits_change
+def replace_theme(
+    *,
+    document_id: str | None = None,
+    name: str,
+    roles: list[str] | None = None,
+    variant: str | None = None,
+    expect_free: bool = False,
+    search_paths: list[str] | None = None,
+) -> ops.ThemeResidency:
+    """Unload EVERY resident theme, then load this one — swap the whole look in one call.
+
+    Use `load_theme` to add a theme alongside the others (each covering different route keys);
+    use this when the document should be dressed by one theme only.
+
+    Args:
+        name: The theme to become the document's only resident.
+        roles: Route keys it should serve, overriding its manifest.
+        variant: Variant to materialize (e.g. "dark").
+        expect_free: Kept for symmetry with `load_theme`; every route is free after the unloads.
+        search_paths: Directories to look in; defaults to project then user themes.
+
+    Returns:
+        {theme, variant, routes_taken, unloaded, guidance, styles} — `unloaded` lists the themes
+        this replaced.
+    """
+    return ops.replace_theme(
+        _doc(document_id),
+        name,
+        roles=roles,
+        variant=variant,
+        expect_free=expect_free,
+        search_paths=[Path(path) for path in search_paths] if search_paths is not None else None,
+    )
+
+
+@mcp.tool
+@emits_change
+def set_theme_variant(
+    *, document_id: str | None = None, variant: str | None = None
+) -> ops.VariantSwitch:
+    """Switch EVERY resident theme to a variant — the one-call way to say "go dark".
+
+    A variant is a token overlay, so this re-materializes each resident theme against the
+    overlay's values; nothing moves, no node is re-classed, routing is untouched. The variant
+    NAME is the only vocabulary shared between themes: a resident that declares no variant of
+    that name quietly keeps its base tokens rather than blocking the switch.
+
+    Nodes with an INLINE style do not follow — those props were pinned deliberately — which is
+    what `pinned_nodes` counts, so you can see what stayed behind.
+
+    Args:
+        variant: The variant to switch to (e.g. "dark"); null returns every theme to its base.
+
+    Returns:
+        {variant, themes: [{theme, variant_used}], pinned_nodes} — `variant_used` is null for a
+        theme that fell back to its base tokens.
+    """
+    return ops.set_theme_variant(_doc(document_id), variant)
+
+
+@mcp.tool
+@emits_change
+def apply_theme(
+    *,
+    document_id: str | None = None,
+    target: str,
+    theme: str,
+    mode: Literal["paste", "replace"] = "paste",
+    variant: str | None = None,
+    search_paths: list[str] | None = None,
+) -> ops.ThemeScopeChange:
+    """Dress an EXISTING subtree in a theme — scoped, one-off, and without changing routing.
+
+    `load_theme` decides how nodes built NEXT are dressed; this dresses what is already there,
+    over one node and its descendants. The theme's CSS is materialized into the document if it
+    isn't already, but no route is taken, so new nodes keep hooking into whatever they did.
+
+    Roles are carried across by class SUFFIX: a node wearing `house-service` is a service, so it
+    gains `alt-service` if the applied theme defines one. A node wearing no theme class at all
+    gets the theme's category hooks, derived from the primitive it was built as (groups, layers,
+    and imported nodes derive nothing). Classes from `define_style` are never touched.
+
+    Args:
+        target: Node id or name — it and everything under it are dressed.
+        theme: Theme to apply.
+        mode: "paste" keeps existing theme classes and layers this theme on top (it wins the
+            cascade); "replace" strips the other themes' classes first, carrying roles across.
+        variant: Variant to materialize (e.g. "dark").
+        search_paths: Directories to look in; defaults to project, then user, then builtin themes.
+
+    Returns:
+        {theme, variant, nodes_touched, classes_added, classes_removed}.
+    """
+    return ops.apply_theme(
+        _doc(document_id),
+        target,
+        theme,
+        mode=mode,
+        variant=variant,
+        search_paths=[Path(path) for path in search_paths] if search_paths is not None else None,
+    )
+
+
+@mcp.tool
+@emits_change
+def clear_theme(
+    *, document_id: str | None = None, target: str, theme: str | None = None
+) -> ops.ThemeScopeChange:
+    """Strip theme classes from a subtree — one theme's, or every resident theme's.
+
+    The counterpart to `apply_theme`: it unlinks nodes from theme rules but leaves the rules in
+    the document (use `unload_theme` to remove those). Doc-local styles from `define_style` are
+    left alone, and a node left with no classes loses the attribute entirely.
+
+    Args:
+        target: Node id or name — it and everything under it are stripped.
+        theme: The theme whose classes to remove; null removes every resident theme's.
+
+    Returns:
+        {theme, nodes_touched, classes_removed}.
+    """
+    return ops.clear_theme(_doc(document_id), target, theme)
+
+
+@mcp.tool
+def list_styles(*, document_id: str | None = None) -> list[ops.StyleInfo]:
+    """Every style this document can attach: each resident theme's classes, then doc-local ones.
+
+    Returns:
+        [{name, theme, description}] — `theme` is null for a style from `define_style`. Attach
+        any of them with `apply_styles`, or with the `styles` argument on a constructor.
+    """
+    return ops.list_styles(_doc(document_id))
 
 
 @mcp.tool
@@ -2790,7 +3355,10 @@ def boolean(
     op: Literal["union", "difference", "intersection", "exclusion"],
     targets: list[str],
     name: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Combine 2+ shapes with a boolean op — union/difference/intersection/exclusion.
 
     Realized with native SVG constructs (no geometry engine): `union` groups the inputs;
@@ -2815,11 +3383,20 @@ def boolean(
         op: "union", "difference", "intersection", or "exclusion".
         targets: ≥ 2 node ids/names; targets[0] is the subject, the rest are operands.
         name: Friendly label for the result node.
+        role: Theme role for the result (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The result node's {id, tag, name}.
+        The result node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.boolean(_doc(document_id), op=op, targets=targets, name=name).as_dict()
+    doc = _doc(document_id)
+    ref = ops.boolean(
+        doc, op=op, targets=targets, name=name, role=role, styles=styles, themed=themed
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -2961,18 +3538,23 @@ def apply_blend(*, document_id: str | None = None, target: str, mode: str) -> di
 
 
 @mcp.tool
-def describe_document(*, document_id: str | None = None) -> dict[str, str | int | None]:
-    """Summarize a document at a glance.
+def describe_document(*, document_id: str | None = None) -> _DocumentInfo:
+    """Summarize a document at a glance, including which themes it currently holds.
 
     Returns:
-        {width, height, viewBox, unit, layers, shapes}.
+        {width, height, viewBox, unit, layers, shapes, resident_themes, theme_routing}:
+        `resident_themes` is [{name, variant, routes}] and `theme_routing` maps each route key
+        (a category or role) to the theme serving it.
     """
     return _describe_document(_doc(document_id))
 
 
 @mcp.tool
 def get_computed_style(*, document_id: str | None = None, target: str) -> dict[str, str]:
-    """Return a node's fully resolved presentation style (cascade + inheritance applied).
+    """Return a node's resolved presentation style (inline props + inheritance applied).
+
+    Document `<style>` class rules (theme hooks, named styles) are NOT folded in — use
+    `describe_node` to see the node's `style_refs`.
 
     Args:
         target: Node id or name.
@@ -3060,15 +3642,18 @@ def convert_units(*, document_id: str | None = None, value: str, to_unit: str) -
 @mcp.tool
 def describe_node(
     *, document_id: str | None = None, target: str
-) -> dict[str, str | int | None | list[float] | dict[str, str]]:
+) -> dict[str, str | int | None | list[float] | list[str] | dict[str, str]]:
     """Get everything about one node in a single call.
 
     Args:
         target: Node id or name to inspect.
 
     Returns:
-        {id, name, tag, kind, parent, children, world_bbox, computed_style, transform} — the
-        node's kind, world-absolute bbox, fully-cascaded style, and local + composed transforms.
+        {id, name, tag, kind, parent, children, world_bbox, computed_style, style_refs,
+        explicit_style, transform} — the node's kind, world-absolute bbox, style, and local +
+        composed transforms. The two styling facets: `style_refs` is the ordered class list (theme
+        hooks and named styles it stays LINKED to, updated when the style changes);
+        `explicit_style` is its inline props, which WIN over any class rule.
     """
     return _describe_node(_doc(document_id), target)
 
@@ -3130,7 +3715,10 @@ def add_arc(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add an elliptical arc, pie slice, or chord as a path.
 
     Args:
@@ -3143,12 +3731,18 @@ def add_arc(
         name: Friendly label.
         style: Fill/stroke/etc.
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new path node's {id, tag, name}.
+        The new path node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_arc(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_arc(
+        doc,
         cx=cx,
         cy=cy,
         rx=rx,
@@ -3158,7 +3752,11 @@ def add_arc(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -3177,7 +3775,10 @@ def add_star(
     name: str | None = None,
     style: ShapeStyle | None = None,
     transform: str | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add a star or regular polygon as a path.
 
     Args:
@@ -3192,12 +3793,18 @@ def add_star(
         name: Friendly label.
         style: Fill/stroke/etc.
         transform: Optional SVG transform string.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new path node's {id, tag, name}.
+        The new path node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_star(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_star(
+        doc,
         cx=cx,
         cy=cy,
         outer_radius=outer_radius,
@@ -3209,7 +3816,11 @@ def add_star(
         name=name,
         style=_style(style),
         transform=transform,
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -4047,7 +4658,10 @@ def add_flowed_text(
     parent: str | None = None,
     name: str | None = None,
     style: ShapeStyle | None = None,
-) -> dict[str, str | None]:
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | None | list[str]]:
     """Add Inkscape flowed (auto-wrapping) text in a rectangular region.
 
     Note: flowed text has limited renderer support — for reliably rendered text, prefer add_text
@@ -4062,12 +4676,18 @@ def add_flowed_text(
         parent: Group/layer id (or name); omit for the document root.
         name: Friendly label.
         style: Font/fill properties.
+        role: Theme role for this node (e.g. "title") — attaches the role hook of the
+            theme serving that role.
+        styles: Named styles / theme classes to attach ("@name" or "name"), applied after
+            the theme hooks so they win ties.
+        themed: false = skip the theme's automatic hooks (explicit `styles` still apply).
 
     Returns:
-        The new flowRoot node's {id, tag, name}.
+        The new flowRoot node's {id, tag, name}, plus `auto_styles` (the classes attached).
     """
-    return ops.add_flowed_text(
-        _doc(document_id),
+    doc = _doc(document_id)
+    ref = ops.add_flowed_text(
+        doc,
         x=x,
         y=y,
         width=width,
@@ -4076,7 +4696,11 @@ def add_flowed_text(
         parent=parent,
         name=name,
         style=_style(style),
-    ).as_dict()
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
+    return _placed(doc, ref)
 
 
 @mcp.tool
@@ -4419,7 +5043,7 @@ def set_preview_backdrop(*, backdrop: str) -> dict[str, str]:
 # --- inline widget (MCP-Apps) ----------------------------------------------
 
 
-def _trim_num(value: str | int | None) -> str:
+def _trim_num(value: _DocumentValue) -> str:
     """Render a dimension without a pointless trailing ``.0`` (``360.0`` -> ``360``)."""
     text = str(value)
     return text[:-2] if text.endswith(".0") else text
@@ -4465,7 +5089,7 @@ def show_widget(
 
 
 @mcp.resource("svg://documents", mime_type="application/json")
-def documents_resource() -> dict[str, str | list[dict[str, str | int | None]] | None]:
+def documents_resource() -> dict[str, str | list[_DocumentInfo] | None]:
     """Index of open documents: id, size, counts, and which one is active."""
     return _documents_index()
 

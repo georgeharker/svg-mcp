@@ -29,6 +29,8 @@ dependencies = [
   "pydantic-settings>=2.2",
   "lxml>=5.0",
   "pillow>=10.0",
+  # CSS tokenizer/parser for the theme engine (parse -> lint -> namespace -> re-serialize).
+  "tinycss2>=1.2",
   # Pure-Python font handling for text_to_path (glyph outlines + family lookup via name tables).
   "fonttools>=4.50",
   # inkex is the SVG DOM (transforms, styles, layers, masks, bbox, composed_transform).

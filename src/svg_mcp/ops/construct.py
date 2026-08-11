@@ -29,9 +29,11 @@ from ..geom import (
 from ..model.document import Document
 from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef, names_node
+from ..theme.model import Category
 from ..typeset import FontNotFound, glyph_run, is_bold, parse_font_size, text_on_path_d
 from .geometry import _merge_style_and_transform
 from .paint import resolve_paint_refs as _resolve_paint_refs
+from .themes import apply_auto_styles
 
 Style = dict[str, str]
 Point = tuple[float, float]
@@ -48,6 +50,12 @@ _SQUIRCLE_ATTR = "data-squircle"
 _ROUNDED_POLYGON_ATTR = "data-rounded-polygon"
 _SUPERELLIPSE_ATTR = "data-superellipse"
 _PILL_ATTR = "data-pill"
+
+# What a node IS, recorded where it cannot be lost: its theme category and the primitive it was
+# built as. Ids and names are the caller's to change (and imported SVG brings its own), so
+# nothing downstream may infer a node's kind from them — a later `apply_theme` reads these.
+_CATEGORY_ATTR = "data-category"
+_PRIM_ATTR = "data-prim"
 
 
 def _node_ref(element: BaseElement) -> NodeRef:
@@ -101,7 +109,7 @@ def _with_default_stroke(style: Style | None) -> Style:
 
 
 @names_node
-def _place(
+def _place_and_style(
     doc: Document,
     element: BaseElement,
     *,
@@ -110,12 +118,28 @@ def _place(
     name: str | None,
     style: Style | None,
     transform: str | None,
+    category: Category | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
-    """Attach a freshly built element: parent, id, name, style, transform → handle."""
+    """Attach a freshly built element: parent, id, name, style refs, inline style, transform.
+
+    ``prefix`` names the primitive twice over — it prefixes the allocated id AND is the type in
+    the ``{theme}-{category}--{prefix}`` hook. A ``category`` of None means the node is not
+    themable at all (groups, layers, ``<use>``), so no hook is even looked up — and nothing is
+    recorded, since there is no category to record.
+    """
     doc.resolve_parent(parent).add(element)
     element.set_id(doc.new_id(prefix))
     if name is not None:
         element.label = name
+    if category is not None:
+        element.set(_CATEGORY_ATTR, category)
+        element.set(_PRIM_ATTR, prefix)
+    apply_auto_styles(
+        doc, element, category=category, prim=prefix, role=role, styles=styles, themed=themed
+    )
     _apply_style(element, _resolve_paint_refs(doc, style))
     if transform is not None:
         element.transform = inkex.Transform(transform)
@@ -135,14 +159,27 @@ def add_rect(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     element = inkex.Rectangle.new(x, y, width, height)
     if rx is not None:
         element.set("rx", rx)
     if ry is not None:
         element.set("ry", ry)
-    return _place(
-        doc, element, prefix="rect", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="rect",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -156,10 +193,23 @@ def add_circle(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     element = inkex.Circle.new((cx, cy), r)
-    return _place(
-        doc, element, prefix="circle", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="circle",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -174,10 +224,23 @@ def add_ellipse(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     element = inkex.Ellipse.new((cx, cy), (rx, ry))
-    return _place(
-        doc, element, prefix="ellipse", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="ellipse",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -192,9 +255,12 @@ def add_line(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     element = inkex.Line.new((x1, y1), (x2, y2))
-    return _place(
+    return _place_and_style(
         doc,
         element,
         prefix="line",
@@ -202,6 +268,10 @@ def add_line(
         name=name,
         style=_with_default_stroke(style),
         transform=transform,
+        category="connector",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -217,9 +287,12 @@ def add_polyline(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     element = inkex.Polyline.new(_points_str(points))
-    return _place(
+    return _place_and_style(
         doc,
         element,
         prefix="polyline",
@@ -227,6 +300,10 @@ def add_polyline(
         name=name,
         style=_with_default_stroke(style),
         transform=transform,
+        category="connector",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -238,10 +315,23 @@ def add_polygon(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     element = inkex.Polygon.new(_points_str(points))
-    return _place(
-        doc, element, prefix="polygon", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="polygon",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -253,10 +343,23 @@ def add_path(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     element = inkex.PathElement.new(d)
-    return _place(
-        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="path",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -273,6 +376,9 @@ def add_variable_width_path(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Expand a polyline centerline with per-vertex widths into a filled variable-width ribbon.
 
@@ -301,8 +407,18 @@ def add_variable_width_path(
         interpolation=interpolation,
         samples=samples,
     )
-    return _place(
-        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="path",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -417,6 +533,9 @@ def add_squircle(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Add a SQUIRCLE — a rounded rectangle with iOS/Figma corner smoothing (Apple's icon shape).
 
@@ -435,8 +554,18 @@ def add_squircle(
     _store_squircle_spec(
         element, x=x, y=y, width=width, height=height, radius=radius, smoothness=smoothness
     )
-    return _place(
-        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="squircle",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -519,6 +648,9 @@ def add_rounded_polygon(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Add a regular N-gon with smoothed corners — the squircle idea generalized to ``sides`` sides.
 
@@ -545,8 +677,18 @@ def add_rounded_polygon(
             "start_angle": start_angle,
         },
     )
-    return _place(
-        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="rounded-polygon",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -628,6 +770,9 @@ def add_superellipse(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Add a Lamé SUPERELLIPSE — one continuous curve, no edges or corners (distinct from squircle).
 
@@ -646,8 +791,18 @@ def add_superellipse(
         _SUPERELLIPSE_ATTR,
         {"cx": cx, "cy": cy, "rx": rx, "ry": ry, "exponent": exponent, "samples": samples},
     )
-    return _place(
-        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="superellipse",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -723,6 +878,9 @@ def add_pill(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Add a PILL / stadium — a rectangle whose short sides are fully rounded into semicircles.
 
@@ -741,8 +899,18 @@ def add_pill(
         _PILL_ATTR,
         {"x": x, "y": y, "width": width, "height": height, "smoothness": smoothness},
     )
-    return _place(
-        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="pill",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -930,8 +1098,15 @@ def offset_path(
     new_element = inkex.PathElement.new(" ".join(fragments))
     if element.transform:
         new_element.transform = inkex.Transform(element.transform)
-    return _place(
-        doc, new_element, prefix="path", parent=parent, name=name, style=style, transform=None
+    return _place_and_style(
+        doc,
+        new_element,
+        prefix="path",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=None,
+        category="shape",
     )
 
 
@@ -945,13 +1120,26 @@ def add_text(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     element = inkex.TextElement()
     element.set("x", x)
     element.set("y", y)
     element.text = content
-    return _place(
-        doc, element, prefix="text", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="text",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="text",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -965,7 +1153,7 @@ def create_group(
 ) -> NodeRef:
     """Create a ``<g>``; optionally move existing nodes (by id/name) into it."""
     element = inkex.Group.new(name or "")
-    ref = _place(
+    ref = _place_and_style(
         doc, element, prefix="g", parent=parent, name=name, style=None, transform=transform
     )
     for child in children or []:
@@ -981,7 +1169,7 @@ def create_layer(
 ) -> NodeRef:
     """Create an Inkscape layer (a ``<g inkscape:groupmode="layer">``)."""
     element = inkex.Layer.new(name)
-    return _place(
+    return _place_and_style(
         doc, element, prefix="layer", parent=parent, name=name, style=None, transform=None
     )
 
@@ -998,6 +1186,9 @@ def add_text_run(
     dy: float | None = None,
     name: str | None = None,
     style: Style | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Append a ``<tspan>`` run to an existing text (or tspan) node for multi-run/line text."""
     parent_element = doc.resolve(parent)
@@ -1010,6 +1201,11 @@ def add_text_run(
     tspan.set_id(doc.new_id("tspan"))
     if name is not None:
         tspan.label = name
+    tspan.set(_CATEGORY_ATTR, "text")
+    tspan.set(_PRIM_ATTR, "tspan")
+    apply_auto_styles(
+        doc, tspan, category="text", prim="tspan", role=role, styles=styles, themed=themed
+    )
     _apply_style(tspan, _resolve_paint_refs(doc, style))
     return NodeRef(id=str(tspan.get_id()), tag=str(tspan.TAG), name=name)
 
@@ -1075,6 +1271,9 @@ def add_text_block(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Add a MULTI-LINE text block: split ``content`` on ``\\n`` into evenly-spaced lines.
 
@@ -1087,8 +1286,18 @@ def add_text_block(
     element.set("x", x)
     element.set("y", y)
     _lay_out_lines(element, content.split("\n"), x, line_height)
-    return _place(
-        doc, element, prefix="text", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="text",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="text",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -1151,6 +1360,9 @@ def add_text_on_path(
     parent: str | None = None,
     name: str | None = None,
     style: Style | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Add text flowing along a path: a ``<text>`` wrapping a ``<textPath>`` that references it."""
     text = inkex.TextElement()
@@ -1166,7 +1378,19 @@ def add_text_on_path(
         text_path.set("side", side)
     text_path.text = content
     text.add(text_path)
-    ref = _place(doc, text, prefix="text", parent=parent, name=name, style=style, transform=None)
+    ref = _place_and_style(
+        doc,
+        text,
+        prefix="text",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=None,
+        category="text",
+        role=role,
+        styles=styles,
+        themed=themed,
+    )
     text_path.set_id(doc.new_id("textPath"))
     return ref
 
@@ -1186,6 +1410,9 @@ def add_image(
     parent: str | None = None,
     name: str | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Add a raster ``<image>``. Provide exactly one source: an external ``href``, a
     ``data_base64`` string, or a local ``path`` (read and embedded as a base64 data URI)."""
@@ -1205,8 +1432,18 @@ def add_image(
     elif href is not None:
         element.set("xlink:href", href)
 
-    return _place(
-        doc, element, prefix="image", parent=parent, name=name, style=None, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="image",
+        parent=parent,
+        name=name,
+        style=None,
+        transform=transform,
+        category="image",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -1235,7 +1472,7 @@ def add_use(
     """Add a ``<use>`` instance referencing an existing node/symbol (by id/name)."""
     referenced = doc.resolve(target)
     element = inkex.Use.new(referenced, x, y)
-    return _place(
+    return _place_and_style(
         doc, element, prefix="use", parent=parent, name=name, style=None, transform=transform
     )
 
@@ -1260,6 +1497,9 @@ def add_flowed_text(
     parent: str | None = None,
     name: str | None = None,
     style: Style | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Add Inkscape flowed text in a rectangular region (note: not universally rendered)."""
     root = inkex.FlowRoot()
@@ -1270,8 +1510,18 @@ def add_flowed_text(
         para = inkex.FlowPara()
         para.text = paragraph
         root.add(para)
-    return _place(
-        doc, root, prefix="flowRoot", parent=parent, name=name, style=style, transform=None
+    return _place_and_style(
+        doc,
+        root,
+        prefix="flowRoot",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=None,
+        category="text",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -1285,7 +1535,9 @@ def wrap_in_link(
 ) -> NodeRef:
     """Wrap existing nodes in an ``<a>`` hyperlink to ``href``."""
     anchor = inkex.Anchor.new(href)
-    ref = _place(doc, anchor, prefix="a", parent=parent, name=name, style=None, transform=None)
+    ref = _place_and_style(
+        doc, anchor, prefix="a", parent=parent, name=name, style=None, transform=None
+    )
     for child in children:
         anchor.add(doc.resolve(child))
     return ref

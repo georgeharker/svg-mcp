@@ -1,0 +1,27 @@
+:root {
+  --accent: #3366ff;
+  --ink: #101820;
+  --box-fill: #ffcc00;
+}
+
+/** Page and section titles. */
+.title { fill: var(--ink); font-size: 18px; font-weight: bold }
+
+/** Every shape the theme paints. */
+.shape { fill: var(--accent); stroke: var(--ink); stroke-width: 2 }
+
+/** A pill-shaped node. */
+.shape--pill { rx: 12 }
+
+/** A boxed diagram node. */
+.diagram-box rect { fill: var(--box-fill) }
+
+.diagram-box text { fill: var(--on-box, #ffffff); font-size: 12px }
+
+.container > .label { fill: var(--ink) }
+
+.card { fill: var(--accent) }
+
+.house-card-strong { stroke: var(--accent) }
+
+text { font-family: sans-serif }

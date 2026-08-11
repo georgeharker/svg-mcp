@@ -1,0 +1,19 @@
+/* Dark variant: token overrides only — every rule in styles.css is written against tokens,
+ * so inverting the ground and the ink is the whole job. Surfaces stay ordered the same way
+ * (raised is lighter than the canvas here, sunken darker), so the greyscale reading survives.
+ */
+
+:root {
+  --canvas: #14171a;
+
+  --surface: #1d2126;
+  --surface-raised: #262b31;
+  --surface-sunken: #171b1f;
+  --surface-warm: #2c2620;
+  --surface-note: #30301f;
+
+  --ink: #eceef1;
+  --ink-muted: #98a1ac;
+  --stroke: #5b6672;
+  --stroke-strong: #8b96a3;
+}

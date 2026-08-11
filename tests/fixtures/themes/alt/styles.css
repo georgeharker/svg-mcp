@@ -1,0 +1,13 @@
+:root {
+  --alt-ink: #0a7d33;
+}
+
+/** Every shape the alt theme paints. */
+.shape { fill: var(--alt-ink) }
+
+.connector { stroke: var(--alt-ink); stroke-width: 3 }
+
+/** A service node. */
+.service { fill: var(--alt-ink); stroke: #ffffff }
+
+.card { fill: #123456 }

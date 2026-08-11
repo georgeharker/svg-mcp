@@ -16,10 +16,14 @@ type Geometry = dict[str, str | float | list[float] | dict[str, str]]
 # A shape's editable settings under the add_*/edit_* parameter names.
 type ParamValue = str | float | int | bool | list[float] | list[list[float]] | None
 type ShapeParams = dict[str, ParamValue]
+# One resident theme: its name, the variant in force, and the route keys it serves.
+type ThemeResidencyInfo = dict[str, str | list[str] | None]
+type DocumentValue = str | int | None | list[ThemeResidencyInfo] | dict[str, str]
+type DocumentInfo = dict[str, DocumentValue]
 
 
-def describe_document(doc: Document) -> dict[str, str | int | None]:
-    """Summarize the document: size, viewBox, unit, and layer/shape counts."""
+def describe_document(doc: Document) -> DocumentInfo:
+    """Summarize the document: size, viewBox, unit, layer/shape counts, and theme residency."""
     svg = doc.svg
     layers = sum(1 for e in svg.descendants() if isinstance(e, inkex.Layer))
     shapes = sum(
@@ -34,11 +38,20 @@ def describe_document(doc: Document) -> dict[str, str | int | None]:
         "unit": str(svg.unit),
         "layers": layers,
         "shapes": shapes,
+        "resident_themes": [
+            {"name": name, "variant": meta.variant, "routes": list(meta.routes)}
+            for name, meta in doc.theme_meta.items()
+        ],
+        "theme_routing": dict(doc.theme_routing),
     }
 
 
 def get_computed_style(doc: Document, target: str) -> dict[str, str]:
-    """Return a node's fully cascaded/inherited presentation style as a flat dict."""
+    """Return a node's inline + inherited presentation style as a flat dict.
+
+    Document ``<style>`` class rules (theme hooks, named styles) are NOT folded in — read the
+    node's ``style_refs`` from ``describe_node`` to see what it is linked to.
+    """
     style = doc.resolve(target).specified_style()
     return {str(key): str(value) for key, value in style.items()}
 
@@ -298,8 +311,12 @@ def convert_units(doc: Document, value: str, to_unit: str) -> float:
 
 def describe_node(
     doc: Document, target: str
-) -> dict[str, str | int | None | list[float] | dict[str, str]]:
-    """Everything about one node in a single call: kind, world bbox, style, transform, parent."""
+) -> dict[str, str | int | None | list[float] | list[str] | dict[str, str]]:
+    """Everything about one node in a single call: kind, world bbox, style, transform, parent.
+
+    Styling has two facets: ``style_refs`` (the ordered class list — theme hooks and named styles
+    the node stays linked to) and ``explicit_style`` (its inline props, which win the cascade).
+    """
     element = doc.resolve(target)
     parent = element.getparent()
     parent_id = str(parent.get_id()) if parent is not None and hasattr(parent, "get_id") else None
@@ -313,6 +330,8 @@ def describe_node(
         "children": sum(1 for child in element if _is_visual(child)),
         "world_bbox": _bbox_xywh(element),
         "computed_style": style,
+        "style_refs": str(element.get("class") or "").split(),
+        "explicit_style": {str(k): str(v) for k, v in element.style.items()},
         "transform": {
             "local": str(element.transform),
             "composed": str(element.composed_transform()),

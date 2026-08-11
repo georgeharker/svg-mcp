@@ -1,0 +1,12 @@
+name = "house"
+
+[serves]
+categories = ["shape", "text", "container"]
+roles = ["title", "label"]
+
+[kinds]
+service = "squircle"
+datastore = "cylinder"
+
+[variants]
+dark = "variants/dark.css"

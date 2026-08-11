@@ -82,11 +82,14 @@ def _set_prop(element: BaseElement, key: str, value: str) -> None:
 
 
 def _sync_stylesheet(doc: Document) -> None:
-    rules = [
+    # Theme blocks first, in the order they were applied; named styles last, so a style the AI
+    # defined by hand wins the equal-specificity tie against a theme hook.
+    blocks = [css for css in doc.theme_css.values() if css]
+    blocks.extend(
         "." + name + " { " + "; ".join(f"{k}:{v}" for k, v in props.items()) + " }"
         for name, props in doc.styles.items()
-    ]
-    doc.stylesheet().set_text("\n".join(rules))
+    )
+    doc.stylesheet().set_text("\n".join(blocks))
 
 
 def define_style(doc: Document, name: str, props: Style) -> str:
@@ -125,10 +128,40 @@ def delete_style(doc: Document, name: str) -> str:
     return name
 
 
-def apply_styles(doc: Document, target: str, names: list[str]) -> NodeRef:
-    """Apply named styles to a node by setting its ``class`` attribute."""
+def _class_list(element: BaseElement) -> list[str]:
+    return str(element.get("class") or "").split()
+
+
+def _set_class_list(element: BaseElement, names: list[str]) -> None:
+    # An empty class attribute is noise the CSS cascade ignores — drop it entirely instead.
+    element.set("class", " ".join(names) if names else None)
+
+
+def apply_styles(doc: Document, target: str, names: list[str], *, replace: bool = False) -> NodeRef:
+    """Apply named styles to a node — APPEND to its class list by default, or REPLACE it.
+
+    The class list is an ordered list of style REFS (theme hooks and named styles), so appending
+    keeps earlier refs and their positions; a name already present is not duplicated or moved.
+    """
     element = doc.resolve(target)
-    element.set("class", " ".join(names))
+    if replace:
+        _set_class_list(element, list(dict.fromkeys(names)))
+        return _ref(element)
+    current = _class_list(element)
+    current.extend(name for name in dict.fromkeys(names) if name not in current)
+    _set_class_list(element, current)
+    return _ref(element)
+
+
+def remove_styles(doc: Document, target: str, names: list[str]) -> NodeRef:
+    """Remove named styles from a node's class list, keeping the remaining refs in order.
+
+    Idempotent: names the node doesn't carry are ignored, and emptying the list drops the
+    ``class`` attribute rather than leaving it blank.
+    """
+    element = doc.resolve(target)
+    drop = set(names)
+    _set_class_list(element, [name for name in _class_list(element) if name not in drop])
     return _ref(element)
 
 
@@ -353,7 +386,16 @@ def _reframe(element: BaseElement, dest_ct: inkex.Transform) -> None:
 
 
 @names_node
-def boolean(doc: Document, *, op: str, targets: list[str], name: str | None = None) -> NodeRef:
+def boolean(
+    doc: Document,
+    *,
+    op: str,
+    targets: list[str],
+    name: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> NodeRef:
     """Combine 2+ shapes with a boolean op, realized via clip/mask/compound path (no new deps).
 
     The FIRST target is the subject; the rest are operands. ``union`` groups them; ``intersection``
@@ -378,6 +420,18 @@ def boolean(doc: Document, *, op: str, targets: list[str], name: str | None = No
         raise InvalidArgument(f"unknown boolean op {op!r}; choices: {list(_BOOLEAN_OPS)}")
     if len(targets) < 2:
         raise InvalidArgument("boolean needs at least 2 targets")
+
+    def finish(element: BaseElement) -> NodeRef:
+        """Style the result as a shape (the ops that build on this module import it, not vice
+        versa, so the hook engine is reached by a local import)."""
+        from .construct import _CATEGORY_ATTR
+        from .themes import apply_auto_styles
+
+        # A boolean result is a shape, but of no primitive kind — there is no `add_boolean`.
+        element.set(_CATEGORY_ATTR, "shape")
+        apply_auto_styles(doc, element, category="shape", role=role, styles=styles, themed=themed)
+        return _ref(element)
+
     elements = [doc.resolve(t) for t in targets]
     for el in elements:
         _ensure_renderable(el, f"boolean {op}")
@@ -390,7 +444,7 @@ def boolean(doc: Document, *, op: str, targets: list[str], name: str | None = No
             group.add(el)
         if name is not None:
             group.label = name
-        return _ref(group)
+        return finish(group)
 
     if op == "intersection":
         result = subject
@@ -417,7 +471,7 @@ def boolean(doc: Document, *, op: str, targets: list[str], name: str | None = No
             apply_clip(doc, str(result.get_id()), clip)
         if name is not None:
             result.label = name
-        return _ref(result)
+        return finish(result)
 
     if op == "difference":
         box = _union_bbox(elements)  # world coords
@@ -444,7 +498,7 @@ def boolean(doc: Document, *, op: str, targets: list[str], name: str | None = No
         apply_mask(doc, str(subject.get_id()), mask)
         if name is not None:
             subject.label = name
-        return _ref(subject)
+        return finish(subject)
 
     # exclusion (XOR): merge every input's outline into one evenodd compound path. Groups are
     # flattened to their shape leaves; each leaf is expressed in the result path's frame (it lands
@@ -463,7 +517,7 @@ def boolean(doc: Document, *, op: str, targets: list[str], name: str | None = No
         result_path.label = name
     for el in elements:
         el.delete()
-    return _ref(result_path)
+    return finish(result_path)
 
 
 # --- filters ---------------------------------------------------------------

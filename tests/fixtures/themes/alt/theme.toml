@@ -1,0 +1,5 @@
+name = "alt"
+
+[serves]
+categories = ["shape", "connector"]
+roles = ["service"]

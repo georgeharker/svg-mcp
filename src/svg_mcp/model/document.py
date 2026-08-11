@@ -8,6 +8,9 @@ changes internally.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from pathlib import Path
+
 import inkex
 from inkex import BaseElement, SvgDocumentElement
 
@@ -23,6 +26,25 @@ _SVG_TEMPLATE = (
 )
 
 
+@dataclass(slots=True)
+class ThemeMeta:
+    """What one materialized theme contributed to a document (its CSS lives in ``theme_css``).
+
+    ``source`` and ``search_paths`` are exactly what the load used, so re-reading the same theme
+    from disk needs no extra argument. ``routes`` is the set of route keys (categories and roles)
+    this theme currently serves; ``class_names`` is every class its materialized CSS defines, which
+    is what decides whether an auto-applied hook has a rule behind it.
+    """
+
+    variant: str | None = None
+    tokens: dict[str, str] = field(default_factory=dict)
+    descriptions: dict[str, str] = field(default_factory=dict)
+    source: Path = Path()
+    search_paths: list[Path] = field(default_factory=list)
+    routes: list[str] = field(default_factory=list)
+    class_names: frozenset[str] = frozenset()
+
+
 class Document:
     """One SVG document, mutated in place across tool calls."""
 
@@ -32,6 +54,13 @@ class Document:
         self.svg = svg
         # Named styles the AI defines, mirrored into a single <style> sheet in <defs>.
         self.styles: dict[str, dict[str, str]] = {}
+        # Materialized theme stylesheets, theme name -> CSS text, in the order they were applied.
+        # They are emitted BEFORE doc.styles so a named style beats a theme hook on a tie.
+        self.theme_css: dict[str, str] = {}
+        self.theme_meta: dict[str, ThemeMeta] = {}
+        # Route key (a category or a role name) -> the resident theme serving it. Themes are a
+        # role-routed SET, so a key is served by exactly one theme at a time.
+        self.theme_routing: dict[str, str] = {}
         # friendly-name -> set of node ids, built lazily from the tree then kept current by the
         # naming ops, so a duplicate-name check is an O(1) dict hit instead of a full-tree scan.
         self._names: dict[str, set[str]] | None = None

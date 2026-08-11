@@ -8,7 +8,7 @@ from inkex import BaseElement
 from ..model.document import Document
 from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef
-from .construct import Style, _place
+from .construct import Style, _place_and_style
 from .geometry import _demote_parametric, _merge_style_and_transform
 
 
@@ -72,11 +72,24 @@ def add_arc(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Add an arc/pie/chord as a path. ``arctype``: ``arc`` | ``slice`` | ``chord``."""
     element = inkex.PathElement.arc((cx, cy), rx, ry, arctype=arctype)
-    return _place(
-        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="arc",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 
@@ -94,13 +107,26 @@ def add_star(
     name: str | None = None,
     style: Style | None = None,
     transform: str | None = None,
+    role: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
 ) -> NodeRef:
     """Add a star/regular-polygon as a path (``flatsided=True`` → polygon, ignores inner_radius)."""
     element = inkex.PathElement.star(
         (cx, cy), (outer_radius, inner_radius), sides=sides, rounded=rounded, flatsided=flatsided
     )
-    return _place(
-        doc, element, prefix="path", parent=parent, name=name, style=style, transform=transform
+    return _place_and_style(
+        doc,
+        element,
+        prefix="star",
+        parent=parent,
+        name=name,
+        style=style,
+        transform=transform,
+        category="shape",
+        role=role,
+        styles=styles,
+        themed=themed,
     )
 
 

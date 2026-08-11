@@ -1,0 +1,180 @@
+/* The bundled reference theme — the look a document gets when nobody has chosen one.
+ *
+ * Read this as the worked example of how a theme is written: tokens in :root, one rule per
+ * hook, a doc comment on every rule (a comment opening with a double star documents the rule
+ * that follows it, and that text is what `list_styles` shows the agent).
+ *
+ * There are deliberately NO bare category rules here (.shape, .text, .connector, .image).
+ * A theme that paints every rect in every document would make `add_rect` mean something the
+ * caller never asked for, so this one styles only what was NAMED: a role. Plain primitives
+ * render exactly as they would with no theme at all.
+ */
+
+:root {
+  /* --- ground --------------------------------------------------------- */
+
+  /* The page behind everything. Diagram facades paint the canvas with it. */
+  --canvas: #ffffff;
+
+  /* --- surfaces: node fills, ordered by how much weight the node carries --- */
+  --surface: #f7f8f9;
+  --surface-raised: #eceef1;
+  --surface-sunken: #e2e5e9;
+  /* Slightly warm, for the one node that asks a question. */
+  --surface-warm: #f6efe4;
+  /* Pale yellow, the sticky note everybody already recognises. */
+  --surface-note: #fdf6d3;
+
+  /* --- ink ------------------------------------------------------------ */
+  --ink: #1a1d21;
+  --ink-muted: #6b7280;
+  --stroke: #9aa3ad;
+  --stroke-strong: #5b6672;
+
+  /* --- line weights --------------------------------------------------- */
+  --stroke-width: 1.5;
+  --stroke-width-hairline: 1;
+
+  /* --- dash patterns: what tells one edge kind from another ----------- */
+  --dash-control: 4 2;
+  --dash-dependency: 1 3;
+  --dash-external: 6 3;
+
+  /* --- type ----------------------------------------------------------- */
+  --font: sans-serif;
+  /* Bare family names only — the renderer matches them against installed fonts. */
+  --font-mono: Meslo LG S DZ, monospace;
+  --size-title: 18px;
+  --size-subtitle: 14px;
+  --size-label: 12px;
+  --size-caption: 10px;
+
+  /* --- geometry: what the diagram facades will lay out with ----------- */
+  --pad-node: 12;
+  --gap-node: 24;
+  --gap-rank: 48;
+  --radius: 6;
+  --radius-pill: 999;
+}
+
+/* --- diagram node kinds ------------------------------------------------
+ *
+ * One class per kind in [kinds]. The manifest says which primitive a facade should draw;
+ * these rules say how it is painted. Differentiation is by value and weight, not hue, so the
+ * set still reads correctly in greyscale and for colour-blind viewers.
+ */
+
+/** A service: something that runs. The default box, raised off the page. */
+.service {
+  fill: var(--surface-raised);
+  stroke: var(--stroke-strong);
+  stroke-width: var(--stroke-width);
+}
+
+/** A datastore: something that remembers. Sunken, heavier than a service. */
+.datastore {
+  fill: var(--surface-sunken);
+  stroke: var(--stroke-strong);
+  stroke-width: var(--stroke-width);
+}
+
+/** A queue: something in transit. Lightest fill, lightest stroke. */
+.queue {
+  fill: var(--surface);
+  stroke: var(--stroke);
+  stroke-width: var(--stroke-width);
+}
+
+/** An external system: outside the boundary, so it is drawn as an outline on the canvas. */
+.external {
+  fill: var(--canvas);
+  stroke: var(--stroke);
+  stroke-width: var(--stroke-width);
+  stroke-dasharray: var(--dash-external);
+}
+
+/** A decision: the one node that asks a question, warmed slightly to stand out. */
+.decision {
+  fill: var(--surface-warm);
+  stroke: var(--stroke-strong);
+  stroke-width: var(--stroke-width);
+}
+
+/** A note: commentary, not mechanism. A pale sticky with a hairline edge. */
+.note {
+  fill: var(--surface-note);
+  stroke: var(--stroke);
+  stroke-width: var(--stroke-width-hairline);
+}
+
+/* --- edge kinds --------------------------------------------------------
+ *
+ * All three set `fill: none` — a connector primitive is a stroked line, and an inherited fill
+ * on an open path is the classic way a diagram grows unexplained blobs.
+ */
+
+/** A data edge: something flows along it. Solid, the baseline weight. */
+.data {
+  fill: none;
+  stroke: var(--stroke-strong);
+  stroke-width: var(--stroke-width);
+}
+
+/** A control edge: something is invoked or triggered. Dashed. */
+.control {
+  fill: none;
+  stroke: var(--stroke-strong);
+  stroke-width: var(--stroke-width);
+  stroke-dasharray: var(--dash-control);
+}
+
+/** A dependency edge: a relationship, not a flow. Finely dotted and lighter. */
+.dependency {
+  fill: none;
+  stroke: var(--stroke);
+  stroke-width: var(--stroke-width-hairline);
+  stroke-dasharray: var(--dash-dependency);
+}
+
+/* --- text roles --------------------------------------------------------
+ *
+ * A four-step size ramp plus one monospace role. Size and weight carry the hierarchy; only
+ * the caption changes colour, because muting is what "secondary" actually means here.
+ */
+
+/** A title: the name of the whole picture, or of a section of it. */
+.title {
+  fill: var(--ink);
+  font-family: var(--font);
+  font-size: var(--size-title);
+  font-weight: bold;
+}
+
+/** A subtitle: a qualifier under a title. Same ink, less shout. */
+.subtitle {
+  fill: var(--ink);
+  font-family: var(--font);
+  font-size: var(--size-subtitle);
+  font-weight: 600;
+}
+
+/** A label: the text on or beside a node. The body size of a diagram. */
+.label {
+  fill: var(--ink);
+  font-family: var(--font);
+  font-size: var(--size-label);
+}
+
+/** A caption: a footnote, a unit, a source. Muted so it recedes. */
+.caption {
+  fill: var(--ink-muted);
+  font-family: var(--font);
+  font-size: var(--size-caption);
+}
+
+/** Code: an identifier, a path, a snippet. Monospace at label size. */
+.code {
+  fill: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--size-label);
+}

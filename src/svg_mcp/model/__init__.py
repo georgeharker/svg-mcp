@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-from .document import Document
-from .errors import DocumentNotFound, InvalidArgument, NodeNotFound, SvgMcpError
+from .document import Document, ThemeMeta
+from .errors import DocumentNotFound, InvalidArgument, NodeNotFound, SvgMcpError, ThemeError
 from .handles import NodeRef
 
 __all__ = [
     "Document",
+    "ThemeMeta",
     "NodeRef",
     "SvgMcpError",
     "DocumentNotFound",
     "NodeNotFound",
     "InvalidArgument",
+    "ThemeError",
 ]

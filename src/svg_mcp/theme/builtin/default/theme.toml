@@ -1,0 +1,38 @@
+# The reference theme. It is roles-only by design: a vocabulary of diagram kinds, edge kinds,
+# and text roles, with NO bare category rule (see styles.css) — a plain rect stays a plain
+# rect, so serving categories would be an empty claim and is deliberately not made.
+name = "default"
+
+[serves]
+roles = [
+  # text roles
+  "title",
+  "subtitle",
+  "label",
+  "caption",
+  "code",
+  # diagram node kinds
+  "service",
+  "datastore",
+  "queue",
+  "external",
+  "decision",
+  "note",
+  # edge kinds
+  "data",
+  "control",
+  "dependency",
+]
+
+# The primitive each diagram kind wants when a facade draws it — the shape half of a role,
+# where styles.css carries the paint half.
+[kinds]
+service = "squircle"
+datastore = "rect"
+queue = "pill"
+external = "rect"
+decision = "polygon"
+note = "rect"
+
+[variants]
+dark = "variants/dark.css"
