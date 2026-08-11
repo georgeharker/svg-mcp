@@ -1,0 +1,10 @@
+# A roles-only fixture that answers for diagram KINDS: it is routed for the `service` role, so
+# its [kinds] and its tokens are what a facade reads instead of the bundled default's.
+name = "atlas"
+
+[serves]
+roles = ["service", "flow"]
+
+[kinds]
+service = "pill"
+gadget = "cylinder"

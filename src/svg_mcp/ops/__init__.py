@@ -37,6 +37,18 @@ from .construct import (
     unlink_use,
     wrap_in_link,
 )
+from .diagram import (
+    EdgeEdit,
+    NodeEdit,
+    PlacedEdge,
+    PlacedNode,
+    Reflow,
+    add_diagram_edge,
+    add_diagram_node,
+    edit_diagram_edge,
+    edit_diagram_node,
+    reflow,
+)
 from .geometry import edit_path, edit_shape
 from .layers import list_layers, move_to_layer, rename_layer, set_layer_state
 from .meta import resize_document, set_description, set_document_metadata, set_title
@@ -118,6 +130,7 @@ from .resources import (
     remove_styles,
 )
 from .themes import (
+    ServingTheme,
     StyleInfo,
     ThemeRemoval,
     ThemeResidency,
@@ -131,6 +144,7 @@ from .themes import (
     load_theme,
     materialize_into,
     replace_theme,
+    serving_theme,
     set_theme_variant,
     sync_theme,
     unload_theme,
@@ -170,6 +184,17 @@ __all__ = [
     "load_svg_document",
     "create_group",
     "create_layer",
+    # diagram facades
+    "EdgeEdit",
+    "NodeEdit",
+    "PlacedEdge",
+    "PlacedNode",
+    "Reflow",
+    "add_diagram_node",
+    "add_diagram_edge",
+    "edit_diagram_node",
+    "edit_diagram_edge",
+    "reflow",
     # paths
     "add_arc",
     "add_star",
@@ -263,6 +288,7 @@ __all__ = [
     "remove_effect",
     "define_mesh_gradient",
     # themes
+    "ServingTheme",
     "StyleInfo",
     "ThemeRemoval",
     "ThemeResidency",
@@ -276,6 +302,7 @@ __all__ = [
     "load_theme",
     "materialize_into",
     "replace_theme",
+    "serving_theme",
     "set_theme_variant",
     "sync_theme",
     "unload_theme",

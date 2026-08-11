@@ -215,9 +215,47 @@ _PARAM_SHAPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("data-pill", "pill", ("x", "y", "width", "height", "smoothness")),
 )
 
+# Facade groups (ops.diagram): (data-* attr, reported kind, keys, whether each key is numeric).
+# Their spec IS the node — read it back to see what an add_diagram_* / edit_diagram_* call means.
+_FACADES: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        "data-diagram-node",
+        "diagram_node",
+        ("kind", "label", "shape"),
+        ("w", "h"),
+    ),
+    (
+        "data-diagram-edge",
+        "diagram_edge",
+        ("source", "target", "kind", "sa", "ta", "route", "label"),
+        (),
+    ),
+)
+
+
+def _read_facade(element: inkex.BaseElement) -> tuple[str, ShapeParams] | None:
+    """A diagram facade's stored spec under the same names its add_/edit_ tools use, or None."""
+    for attr, kind, text_keys, number_keys in _FACADES:
+        raw = element.get(attr)
+        if raw is None:
+            continue
+        try:
+            spec = json.loads(raw)
+            params: ShapeParams = {key: str(spec[key]) for key in text_keys}
+            params.update({key: float(spec[key]) for key in number_keys})
+        except (ValueError, TypeError, KeyError):
+            return None  # corrupt spec → report the group as the plain <g> it is
+        if "auto" in spec:
+            params["auto"] = bool(spec["auto"])
+        return kind, params
+    return None
+
 
 def _read_params(element: inkex.BaseElement) -> tuple[str, bool, ShapeParams]:
     """Dispatch a node to its (kind, parametric, params) — robust to missing/malformed markers."""
+    facade = _read_facade(element)
+    if facade is not None:
+        return facade[0], True, facade[1]
     sodipodi = element.get("sodipodi:type")
     if sodipodi == "star":
         flat = element.get(inkex.addNS("inkscape:flatsided", "inkscape")) == "true"
@@ -290,8 +328,8 @@ def get_params(doc: Document, target: str) -> dict[str, str | bool | ShapeParams
     """A node's current settings under the SAME names the ``add_*``/``edit_*`` tools use, + style.
 
     Lets you read a shape, then edit it with matching params. Recognizes parametric stars/arcs,
-    variable-width paths, and squircles (returns their generator parameters and
-    ``parametric: true``); for basic
+    variable-width paths, squircles, and the diagram facades (a node's kind/label/shape/size, an
+    edge's endpoints/anchors/route) — all reported with ``parametric: true``; for basic
     shapes returns their geometry attributes; for a plain path, its ``d``. ``style`` is the node's
     current presentation properties (fill, stroke, …).
 

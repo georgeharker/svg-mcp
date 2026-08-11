@@ -3172,6 +3172,233 @@ def list_styles(*, document_id: str | None = None) -> list[ops.StyleInfo]:
     return ops.list_styles(_doc(document_id))
 
 
+# --- diagram facades -------------------------------------------------------
+
+
+@mcp.tool
+@emits_change
+def add_diagram_node(
+    *,
+    document_id: str | None = None,
+    kind: str,
+    label: str = "",
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | float | None | list[str]]:
+    """Add a diagram NODE — a kind-shaped box with a centered label, as one group.
+
+    Say what the node IS (`kind`) and the theme decides the rest: which primitive to draw (its
+    manifest's kind→shape map) and how to paint it. The bundled default theme knows service,
+    datastore, queue, external, decision and note, so this works in a document that loaded no
+    theme at all. `list_styles` shows the kinds a loaded theme adds.
+
+    Omit width/height and the box is sized to its label (with the theme's `--pad-node`); omit
+    x/y and it stacks under the last diagram node in the same parent. Connect nodes with
+    `add_diagram_edge`, then `reflow` after moving them.
+
+    Args:
+        kind: What this node is — "service", "datastore", "queue", "external", "decision",
+            "note", or any role a resident theme serves.
+        label: Text centered in the box; "" for an unlabeled node.
+        x: Left edge; omit to auto-place.
+        y: Top edge; omit to stack under the previous diagram node in this parent.
+        width: Box width; omit to size to the label.
+        height: Box height; omit to size to the label.
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label for the group.
+        style: Inline style on the group (wins over the theme).
+        styles: Extra named styles / theme classes to attach.
+        themed: false = skip the theme's automatic hooks (the shape is still kind-derived).
+
+    Returns:
+        The group's {id, tag, name}, plus `auto_styles` and the placed {x, y, w, h}.
+    """
+    doc = _doc(document_id)
+    placed = ops.add_diagram_node(
+        doc,
+        kind=kind,
+        label=label,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        styles=styles,
+        themed=themed,
+    )
+    return {**_placed(doc, placed.ref), "x": placed.x, "y": placed.y, "w": placed.w, "h": placed.h}
+
+
+@mcp.tool
+@emits_change
+def add_diagram_edge(
+    *,
+    document_id: str | None = None,
+    source: str,
+    target: str,
+    kind: str = "data",
+    source_anchor: Literal["auto", "N", "S", "E", "W"] = "auto",
+    target_anchor: Literal["auto", "N", "S", "E", "W"] = "auto",
+    route: Literal["orthogonal", "straight", "spline"] = "orthogonal",
+    label: str | None = None,
+    parent: str | None = None,
+    name: str | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | int | None | list[str]]:
+    """Connect two nodes with a routed, arrow-headed EDGE that stays attached.
+
+    The edge stores what it connects, not where it runs, so `reflow` can re-derive its path after
+    the nodes move. Sides are chosen from the geometry unless you name them, and several edges on
+    one face fan out across it instead of stacking on the same point.
+
+    All edges currently share ONE arrowhead marker (per-kind coloured heads are a later
+    refinement), so the kind shows in the line's weight and dash, not the head.
+
+    Args:
+        source: Node id or name the edge leaves.
+        target: Node id or name the edge arrives at.
+        kind: Edge role — "data" (solid), "control" (dashed), "dependency" (dotted), or any
+            role a resident theme serves.
+        source_anchor: Which face to leave from; "auto" picks the facing one.
+        target_anchor: Which face to arrive at; "auto" picks the facing one.
+        route: "orthogonal" (right angles with rounded corners), "straight", or "spline".
+        label: Text placed on the edge, with a canvas-coloured halo so it reads over the line.
+        parent: Group/layer id; omit for the document root (an edge does NOT live inside a node).
+        name: Friendly label for the group.
+        styles: Extra named styles / theme classes to attach.
+        themed: false = skip the theme's automatic hooks.
+
+    Returns:
+        The group's {id, tag, name}, plus `auto_styles` and `edges_rerouted` — this edge and
+        every other one re-derived alongside it, since adding an edge re-spreads shared ports.
+    """
+    doc = _doc(document_id)
+    placed = ops.add_diagram_edge(
+        doc,
+        source=source,
+        target=target,
+        kind=kind,
+        source_anchor=source_anchor,
+        target_anchor=target_anchor,
+        route=route,
+        label=label,
+        parent=parent,
+        name=name,
+        styles=styles,
+        themed=themed,
+    )
+    return {**_placed(doc, placed.ref), "edges_rerouted": placed.edges_rerouted}
+
+
+@mcp.tool
+@emits_change
+def edit_diagram_node(
+    *,
+    document_id: str | None = None,
+    target: str,
+    label: str | None = None,
+    kind: str | None = None,
+) -> dict[str, str | bool | None]:
+    """Edit a diagram node by its SPEC — re-label it, or move it to another kind.
+
+    A new `label` re-centers the text, and re-sizes the box only if the node was auto-sized (an
+    explicit width/height is a decision, not a guess). A new `kind` swaps the theme role the node
+    wears but leaves its SHAPE alone — redrawing geometry under an existing node would throw away
+    what has been laid out around it; delete and re-add if you want the new kind's shape.
+
+    Args:
+        target: The node group's id or name.
+        label: New label text ("" removes it).
+        kind: New kind (re-paints; reported back as shape_unchanged).
+
+    Returns:
+        {id, tag, name, remeasured, shape_unchanged}.
+    """
+    result = ops.edit_diagram_node(_doc(document_id), target, label=label, kind=kind)
+    return {
+        **result.ref.as_dict(),
+        "remeasured": result.remeasured,
+        "shape_unchanged": result.shape_unchanged,
+    }
+
+
+@mcp.tool
+@emits_change
+def edit_diagram_edge(
+    *,
+    document_id: str | None = None,
+    target: str,
+    kind: str | None = None,
+    route: Literal["orthogonal", "straight", "spline"] | None = None,
+    source_anchor: Literal["auto", "N", "S", "E", "W"] | None = None,
+    target_anchor: Literal["auto", "N", "S", "E", "W"] | None = None,
+    label: str | None = None,
+) -> dict[str, str | int | None]:
+    """Edit a diagram edge by its SPEC — kind, route style, anchors, label — and re-route it.
+
+    Moving an anchor re-spreads the faces it leaves and joins, so the edges sharing them move too.
+
+    Args:
+        target: The edge group's id or name.
+        kind: New edge role (swaps the theme class).
+        route: New route style.
+        source_anchor: New source face, or "auto".
+        target_anchor: New target face, or "auto".
+        label: New label text ("" removes it).
+
+    Returns:
+        {id, tag, name, edges_rerouted}.
+    """
+    result = ops.edit_diagram_edge(
+        _doc(document_id),
+        target,
+        kind=kind,
+        route=route,
+        source_anchor=source_anchor,
+        target_anchor=target_anchor,
+        label=label,
+    )
+    return {**result.ref.as_dict(), "edges_rerouted": result.edges_rerouted}
+
+
+@mcp.tool
+@emits_change
+def reflow(
+    *,
+    document_id: str | None = None,
+    edges: bool = True,
+    containers: bool = True,
+    scope: list[str] | None = None,
+) -> ops.Reflow:
+    """Re-derive the diagram's connections from where its nodes are NOW.
+
+    Call this after moving, resizing, or deleting diagram nodes: every edge re-chooses its sides,
+    re-spreads its ports, and re-draws its path from the current bounding boxes. An edge whose
+    source or target no longer resolves is left untouched and reported in `skipped`.
+
+    Args:
+        edges: false = leave edges alone.
+        containers: accepted, currently a no-op (container facades re-fit themselves once they
+            exist); `containers_refit` is 0 until then.
+        scope: Limit the rewrite to edges touching these node/edge ids or names; omit for all.
+            Port spreading is still computed over every edge, since ports are shared.
+
+    Returns:
+        {edges_rerouted, skipped, containers_refit}.
+    """
+    return ops.reflow(_doc(document_id), edges=edges, containers=containers, scope=scope)
+
+
 @mcp.tool
 @emits_change
 def define_linear_gradient(

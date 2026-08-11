@@ -33,7 +33,9 @@ class ThemeMeta:
     ``source`` and ``search_paths`` are exactly what the load used, so re-reading the same theme
     from disk needs no extra argument. ``routes`` is the set of route keys (categories and roles)
     this theme currently serves; ``class_names`` is every class its materialized CSS defines, which
-    is what decides whether an auto-applied hook has a rule behind it.
+    is what decides whether an auto-applied hook has a rule behind it. ``kinds`` is the manifest's
+    diagram kind → shape primitive mapping, kept here so a facade can ask the document which shape
+    a kind wants without re-reading the theme from disk.
     """
 
     variant: str | None = None
@@ -43,6 +45,7 @@ class ThemeMeta:
     search_paths: list[Path] = field(default_factory=list)
     routes: list[str] = field(default_factory=list)
     class_names: frozenset[str] = frozenset()
+    kinds: dict[str, str] = field(default_factory=dict)
 
 
 class Document:

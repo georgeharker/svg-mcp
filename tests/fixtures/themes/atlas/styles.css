@@ -1,0 +1,14 @@
+:root {
+  --line: #cc0044;
+  /* Deliberately unlike the bundled default's 12/12/8, so a test can tell which theme answered. */
+  --pad-node: 20;
+  --edge-stub: 4;
+  --edge-radius: 0;
+  --canvas: #fff8f0;
+}
+
+/** A service, the atlas way: a pill rather than a box. */
+.service { fill: #ffeeff; stroke: var(--line); stroke-width: 2 }
+
+/** The one edge kind atlas paints. */
+.flow { fill: none; stroke: var(--line); stroke-width: 3 }

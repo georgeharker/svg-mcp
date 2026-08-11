@@ -18,8 +18,10 @@ over one subtree, and deliberately leave the routing table alone.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Literal
 
@@ -109,6 +111,7 @@ def _install(
         search_paths=list(search_paths),
         routes=list(routes),
         class_names=result.class_names,
+        kinds=dict(theme.manifest.kinds),
     )
     _sync_stylesheet(doc)
 
@@ -422,6 +425,42 @@ def _fallback_roles(doc: Document) -> list[str]:
     return []
 
 
+@dataclass(frozen=True, slots=True)
+class ServingTheme:
+    """What a facade needs from the theme that will dress a role, before it has a node to hook.
+
+    ``kinds`` is the manifest's diagram kind → shape primitive map and ``tokens`` its resolved
+    custom properties — the geometry half of a role, where the CSS carries the paint half.
+    """
+
+    name: str | None = None
+    kinds: Mapping[str, str] = dataclass_field(default_factory=dict)
+    tokens: Mapping[str, str] = dataclass_field(default_factory=dict)
+
+
+def serving_theme(doc: Document, role: str) -> ServingTheme:
+    """The theme that will dress ``role``: whoever is routed for it, else the bundled ``default``.
+
+    The same fallback :func:`apply_auto_styles` uses, asked one step earlier — a facade must know
+    which shape a kind wants (and what to pad it by) BEFORE it has an element to hook. A resident
+    theme answers from its recorded meta; otherwise the bundled default is READ but not installed,
+    because installing it is ``_fallback_hook``'s call to make: a role nothing serves must leave no
+    rules behind. A document with no themes at all and no readable default answers with nothing,
+    and the caller falls back on its own defaults.
+    """
+    routed = doc.theme_routing.get(role)
+    name = routed if routed is not None else DEFAULT_THEME
+    meta = doc.theme_meta.get(name)
+    if meta is not None:
+        return ServingTheme(name=name, kinds=meta.kinds, tokens=meta.tokens)
+    with suppress(ThemeError):
+        theme = _read_theme(DEFAULT_THEME, default_search_paths())
+        return ServingTheme(
+            name=theme.name, kinds=theme.manifest.kinds, tokens=materialize(theme).tokens
+        )
+    return ServingTheme()
+
+
 def apply_auto_styles(
     doc: Document,
     element: BaseElement,
@@ -594,9 +633,7 @@ def clear_theme(doc: Document, target: str, theme: str | None = None) -> ThemeSc
     for node in _scope(doc.resolve(target)):
         current = _class_list(node)
         kept = [
-            cls
-            for cls in current
-            if (owner := _owner(doc, cls)) is None or owner[0] not in names
+            cls for cls in current if (owner := _owner(doc, cls)) is None or owner[0] not in names
         ]
         if len(kept) == len(current):
             continue
