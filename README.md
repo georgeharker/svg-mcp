@@ -166,8 +166,9 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
 ## Status
 
-The full inkex catalog is mapped through to **117 MCP tools** (see
-[`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md)), with ruff/mypy clean and the test suite green.
+The full inkex catalog is mapped through to **180 MCP tools** (see
+[`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md)), plus the theme system and the declarative
+facade families (diagrams, charts, annotations), with ruff/mypy clean and the test suite green.
 
 - **Document model** (inkex-backed, multi-document with an active-document default): shapes,
   paths (+ arc/star factories and path-data ops), text + tspan runs + text-on-path + flowed
@@ -207,6 +208,26 @@ The full inkex catalog is mapped through to **117 MCP tools** (see
   gradients, patterns, markers, **clip + mask**, and **filters** (blur, drop-shadow,
   color-matrix/overlay, blend, morphology, component-transfer, turbulence, displacement, plus a
   raw filter-graph builder).
+- **Themes** — a document-wide design language authored as real CSS (`.svg-mcp/themes/`):
+  tokens as custom properties (resolved server-side; emitted CSS is var-free), namespaced
+  classes, per-theme **variants** (dark mode in ten lines), prose guidance returned to the
+  agent on load. Themes are a **role-routed set** (boxes from one theme, text from another);
+  nodes hook in automatically by category/primitive/role, and the precedence rule is one
+  sentence: *if you typed it, it sticks; if the theme supplied it, it stays linked.* See
+  [`docs/themes.md`](./docs/themes.md).
+- **Box-arrow diagrams** — declare, don't draw: `add_diagram_node(kind, label)` (theme picks
+  the shape, label sizes the box), id-parametric edges with side auto-selection, port fan-out
+  and rounded orthogonal routing, containers drawn behind their members, explicit `reflow()`
+  after moves, and `layout_diagram` (layered/tree/grid) for zero-coordinate authoring. See
+  [`docs/diagrams.md`](./docs/diagrams.md).
+- **Charts** — data-parametric bar/line/donut/scatter/sparkline with nice-number ticks and
+  margins measured from the actual tick labels; `edit_chart` re-derives the picture from new
+  data. Deliberately not a plotting library (no log scales/stacking/subplots — `import_svg`
+  matplotlib output for that).
+- **Annotations** — `add_legend()` generated from what the document uses (swatches wear the
+  real theme classes), `add_callout` cards whose leader lines point at node **ids** and
+  survive `reflow`, `add_table` with measured columns, `add_callout_card` with kind-colored
+  accents.
 - **Composable effect stack** — Photoshop-style layer effects that **stack** on one node (each
   `apply_*` appends; `replace=true` starts fresh), each bounded by a `size`/falloff so the
   interior fill stays intact: `apply_drop_shadow`, `apply_inner_shadow`, `apply_outer_glow`,
@@ -244,6 +265,28 @@ per-session document stores), a **document-operations** tier (inkex-facing const
 read-only introspection, and the document model), and a **rendering & output** tier (pure-Python
 typesetting, the render/export backends, and SVG serialization). See [`DESIGN.md`](./DESIGN.md)
 for the full layering rationale.
+
+## Design language & declarative facades
+
+State what things **are** — kinds, roles, connections, data — and geometry and paint are
+derived. Everything below was authored with zero coordinates inside the facades, styled by
+the bundled default theme, and stays editable (`edit_chart` swaps the data and re-derives;
+`translate_node` + `reflow()` re-routes; `set_theme_variant("dark")` reskins in one call).
+
+<p align="center">
+  <img src="./docs/img/facade-diagram.png" alt="declarative diagram" width="760">
+</p>
+<p align="center">
+  <img src="./docs/img/facade-charts.png" alt="chart facades" width="720">
+</p>
+<p align="center">
+  <img src="./docs/img/facade-annotate.png" alt="annotation facades" width="760">
+</p>
+
+Guides: [`docs/themes.md`](./docs/themes.md) (authoring a design language as CSS — tokens,
+variants, residency, precedence) and [`docs/diagrams.md`](./docs/diagrams.md) (diagram,
+chart, and annotation facades). Regenerate the images with
+[`examples/generate.py`](./examples/generate.py).
 
 ## Install as a Claude Code plugin
 

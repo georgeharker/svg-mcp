@@ -136,3 +136,36 @@ g = define_linear_gradient(x1=0, y1=0, x2=0, y2=1,
 add_squircle(x=0, y=0, width=512, height=512, radius=115, style={fill:"url(#"+g+")"})
 export_render(format="png")          # or pdf/jpeg/webp/svg
 ```
+
+## Themes: load, author, restyle
+
+```
+load_theme("blueprint")                      # routes what the manifest declares; returns guidance
+add_diagram_node(kind="service", label="API")     # already dressed — no style args
+add_text(x=20, y=30, content="Q3 review", role="title")   # say what it IS; theme paints it
+set_theme_variant("dark"); reflow()          # reskin everything linked; re-bake edge-label halos
+apply_theme(target="legacy-group", theme="blueprint")     # dress an EXISTING subtree
+sync_theme("blueprint")                      # picked up after you edit the theme's styles.css
+```
+
+A theme is a directory of real CSS (see [themes.md](./themes.md)); `list_styles()` is the
+menu. Inline `style` args stay pinned through all of it — if you typed it, it sticks.
+
+## Diagrams, charts & annotations: zero coordinates
+
+```
+a = add_diagram_node(kind="service",   label="API Gateway")
+b = add_diagram_node(kind="datastore", label="Postgres")
+add_diagram_edge(source=a.id, target=b.id, kind="data", label="reads/writes")
+add_diagram_container(members=[a.id, b.id], kind="zone", label="backend")
+layout_diagram(algorithm="layered", direction="LR")       # places everything, reflows
+
+add_chart(kind="bar", data={categories:["Q1","Q2"], series:[{name:"2026", values:[51,62]}]},
+          title="Revenue")                                 # ticks/margins derived from data
+add_legend()                                               # generated from what the doc uses
+add_callout(target=b.id, text="hot shard — see runbook", kind="warning")
+```
+
+Moved something by hand? `reflow()` — edges re-route, callout leaders re-anchor, fitted
+containers re-fit. Editing data? `edit_chart`/`edit_table`/`edit_diagram_*` patch the spec
+and re-derive; the node keeps its id, classes, and position.
