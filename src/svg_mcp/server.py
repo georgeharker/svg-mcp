@@ -89,6 +89,8 @@ WORKFLOW
    document. You may then omit `document_id` on later calls to target the active one.
 2. Add content: `add_rect`/`add_circle`/`add_path`/`add_text`/… Each returns the new node's
    `{id, tag, name}` — keep the `id` (or give it a `name`) to refer back to the node.
+   Drawing a box-arrow diagram? Use the DIAGRAM facades below, not raw shapes. Want a
+   consistent look? `load_theme` first (THEMES below).
 3. Organize with `create_layer` / `create_group`; nest by passing a parent id.
 4. `outline(document_id)` shows the current tree; `render_document(document_id)` returns the
    rendered PNG so you can visually verify. Iterate.
@@ -111,6 +113,8 @@ ORIENTING (contextualize queries)
   one node (kind, world bbox, computed style, local + composed transform, parent) in one call.
 - `list_resources()` — the gradients/patterns/filters/clips/masks/markers/symbols and named
   styles already defined, so you know what you can reference/reuse before defining new ones.
+- `list_styles()` — every attachable style: each resident theme's classes (with descriptions)
+  plus doc-local ones. `describe_document` also reports resident themes and their routing.
 - `find(name=…)` to locate nodes, `get_subtree(target)` to read a branch, `get_bbox`/
   `get_transform`/`get_computed_style` for focused lookups.
 
@@ -146,6 +150,38 @@ STYLING & PAINT
   still be invisible; give it a stroke.
 - `restyle` MERGES by default — it only changes the properties you pass, keeping the rest. Pass
   `replace=true` to discard the node's current style and set exactly what you provide.
+
+THEMES (design language)
+- A theme is a document-wide design language: named styles, tokens, and house rules, authored
+  as CSS in `.svg-mcp/themes/`. `load_theme(name)` makes it resident — new nodes then pick up
+  its look automatically, and the response includes the theme's GUIDANCE: **read it and follow
+  it; it is the house style speaking.**
+- Say what things ARE, not how they look: pass `role=` ("title", "label", "service") and let
+  the theme decide paint. `list_styles()` is the menu of everything attachable; attach extras
+  via `styles=["@name"]` at creation or `apply_styles` later.
+- A node's inline `style` is EXPLICIT and pinned — it beats every theme rule and deliberately
+  does NOT follow theme/variant switches. If you typed it, it sticks; if the theme supplied it,
+  it stays linked. Prefer roles/classes; reach for inline `style` only for one-off intent.
+- `set_theme_variant("dark")` reskins every resident theme in one call (themes without that
+  variant keep base). After a variant switch, `reflow()` re-bakes diagram edge-label halos.
+- `themed=false` on any constructor opts a node out of automatic hooks. `apply_theme(target,
+  theme)` restyles ONE subtree without changing residency; `clear_theme` undoes it.
+
+DIAGRAMS (box-arrow)
+- For ANY box-and-arrow diagram — architecture, flowchart, pipeline — use the diagram facades,
+  NOT hand-placed rects and lines: `add_diagram_node(kind, label)`, `add_diagram_edge(source,
+  target, kind)`, `add_diagram_container(members)`. Nodes size themselves to their labels;
+  edges pick sides, fan out across a face, route at right angles, and carry haloed labels;
+  containers draw behind their members and re-fit as they move. The bundled default theme
+  styles all of it with no setup.
+- Edges store WHAT they connect, not where they run. **After moving, resizing, or deleting
+  diagram nodes, call `reflow()`** — that one call re-routes every edge and re-fits containers
+  from current positions.
+- Skip coordinates entirely: add nodes and edges, then `layout_diagram(algorithm="layered",
+  direction="LR")` (or "tree"/"grid"). Fine-tune with `translate_node` + `reflow` afterwards —
+  layout is opt-in and won't run again behind your back.
+- Edit in place: `edit_diagram_node`/`edit_diagram_edge`/`edit_diagram_container` patch
+  label/kind/route/members; `get_params` reads any facade's spec back.
 
 EDITING GEOMETRY IN PLACE
 - To change an existing node, edit it IN PLACE — do NOT delete + re-add (that drops its clip,
@@ -3373,6 +3409,180 @@ def edit_diagram_edge(
 
 @mcp.tool
 @emits_change
+def add_diagram_container(
+    *,
+    document_id: str | None = None,
+    members: list[str],
+    kind: str = "cluster",
+    label: str = "",
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | float | bool | None | list[str]]:
+    """Draw a box BEHIND a set of nodes to group them — a cluster, a zone, or a swimlane.
+
+    The container is a SIBLING of its members, not their parent: nothing is reparented, so every
+    member keeps the position, edges and styling it already had, and deleting the container
+    deletes only the box.
+
+    Omit any of x/y/width/height and the box is fitted to the members (padded by the theme's
+    `--pad-container`, plus headroom for the label) and re-fitted by every later `reflow` or
+    `layout_diagram`. Give all four and the box is used verbatim and never re-fitted — which is
+    also the only way to draw a container with no members.
+
+    Args:
+        members: Node ids or names to enclose. A member that CONTAINS the container is rejected.
+        kind: What the grouping is — "cluster" (dashed, barely there), "zone" (a solid faint
+            tint), "swimlane" (tinted and outlined), or any role a resident theme serves.
+        label: Text in the box's top-left corner; "" for an unlabeled container.
+        x: Left edge; give all four of x/y/width/height to fix the box.
+        y: Top edge.
+        width: Box width.
+        height: Box height.
+        parent: Group/layer id — must be the parent the members live in; omit for the root.
+        name: Friendly label for the group.
+        style: Inline style on the group (wins over the theme).
+        styles: Extra named styles / theme classes to attach.
+        themed: false = skip the theme's automatic hooks.
+
+    Returns:
+        The group's {id, tag, name}, plus `auto_styles`, the box {x, y, w, h}, and `auto` —
+        false when the box is yours and re-fitting will leave it alone.
+    """
+    doc = _doc(document_id)
+    placed = ops.add_diagram_container(
+        doc,
+        members=members,
+        kind=kind,
+        label=label,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        styles=styles,
+        themed=themed,
+    )
+    return {
+        **_placed(doc, placed.ref),
+        "x": placed.x,
+        "y": placed.y,
+        "w": placed.w,
+        "h": placed.h,
+        "auto": placed.auto,
+    }
+
+
+@mcp.tool
+@emits_change
+def edit_diagram_container(
+    *,
+    document_id: str | None = None,
+    target: str,
+    label: str | None = None,
+    kind: str | None = None,
+    members: list[str] | None = None,
+    add_members: list[str] | None = None,
+    remove_members: list[str] | None = None,
+) -> dict[str, str | bool | None | list[str]]:
+    """Edit a container by its SPEC — its label, its kind, or what it encloses.
+
+    `members` REPLACES the membership; `add_members`/`remove_members` adjust it. Passing both in
+    one call is rejected. Any change that moves a fitted container's box re-fits it immediately;
+    a container with an explicit box keeps it.
+
+    Args:
+        target: The container group's id or name.
+        label: New label text ("" removes it).
+        kind: New container kind (swaps the theme class).
+        members: The complete new membership.
+        add_members: Node ids or names to add to the membership.
+        remove_members: Node ids or names to drop from it (they need not still exist).
+
+    Returns:
+        {id, tag, name, members, refit}.
+    """
+    result = ops.edit_diagram_container(
+        _doc(document_id),
+        target,
+        label=label,
+        kind=kind,
+        members=members,
+        add_members=add_members,
+        remove_members=remove_members,
+    )
+    return {**result.ref.as_dict(), "members": result.members, "refit": result.refit}
+
+
+@mcp.tool
+@emits_change
+def layout_diagram(
+    *,
+    document_id: str | None = None,
+    algorithm: Literal["layered", "tree", "grid"] = "layered",
+    direction: Literal["LR", "TB"] = "LR",
+    scope: str | None = None,
+    spacing_main: float | None = None,
+    spacing_cross: float | None = None,
+    origin_x: float = 20.0,
+    origin_y: float = 20.0,
+    columns: int | None = None,
+) -> ops.DiagramLayout:
+    """Place every diagram node in one scope automatically, then re-route and re-fit around them.
+
+    Stop hand-placing boxes: add the nodes and edges, then call this once. It ranks the nodes,
+    moves them, and finishes with a `reflow`, so edges re-route and fitted containers re-fit in
+    the same call.
+
+    This moves EVERY diagram node in the scope, explicit positions included — a layout is a
+    decision about the whole picture. Hand placement is preserved by NOT calling this.
+
+    - "layered": Sugiyama-lite. Cycles are cut, nodes ranked by their longest path from a source,
+      and each rank ordered to minimise crossings. The one for a flow or an architecture.
+    - "tree": a forest by depth, leaves in slots and each parent centered over its children.
+      Cleaner than layered when the graph really is a hierarchy.
+    - "grid": document order into a uniform grid; ignores the edges entirely.
+
+    Nodes sharing a container are kept adjacent within their rank, so the box drawn around them
+    stays a box.
+
+    Args:
+        algorithm: "layered" (default), "tree", or "grid".
+        direction: "LR" = ranks advance left to right; "TB" = top to bottom.
+        scope: Group/layer id or name whose DIRECT diagram-node children to lay out; omit for
+            the document root. Edges count when both ends are in the set.
+        spacing_main: Gap between ranks; omit for the theme's `--gap-layer`.
+        spacing_cross: Gap between nodes within a rank; omit for the theme's `--gap-node`.
+        origin_x: Left edge of the drawing.
+        origin_y: Top edge of the drawing.
+        columns: Grid only — column count; omit for ceil(sqrt(n)).
+
+    Returns:
+        {nodes_placed, ranks, cycles_broken, edges_rerouted, containers_refit}.
+    """
+    return ops.layout_diagram(
+        _doc(document_id),
+        algorithm=algorithm,
+        direction=direction,
+        scope=scope,
+        spacing_main=spacing_main,
+        spacing_cross=spacing_cross,
+        origin_x=origin_x,
+        origin_y=origin_y,
+        columns=columns,
+    )
+
+
+@mcp.tool
+@emits_change
 def reflow(
     *,
     document_id: str | None = None,
@@ -3380,21 +3590,24 @@ def reflow(
     containers: bool = True,
     scope: list[str] | None = None,
 ) -> ops.Reflow:
-    """Re-derive the diagram's connections from where its nodes are NOW.
+    """Re-derive the diagram's connections and container boxes from where its nodes are NOW.
 
     Call this after moving, resizing, or deleting diagram nodes: every edge re-chooses its sides,
-    re-spreads its ports, and re-draws its path from the current bounding boxes. An edge whose
-    source or target no longer resolves is left untouched and reported in `skipped`.
+    re-spreads its ports, and re-draws its path from the current bounding boxes, and every fitted
+    container is re-drawn around its members. An edge whose source or target no longer resolves
+    is left untouched and reported in `skipped`; a container with nothing left to fit to is left
+    untouched and reported in `skipped_containers`.
 
     Args:
         edges: false = leave edges alone.
-        containers: accepted, currently a no-op (container facades re-fit themselves once they
-            exist); `containers_refit` is 0 until then.
-        scope: Limit the rewrite to edges touching these node/edge ids or names; omit for all.
-            Port spreading is still computed over every edge, since ports are shared.
+        containers: false = leave container boxes alone. Containers created with an explicit
+            x/y/width/height are never re-fitted either way.
+        scope: Limit the rewrite to edges touching these node/edge ids or names, and to
+            containers named here or holding one of them; omit for all. Port spreading is still
+            computed over every edge, since ports are shared.
 
     Returns:
-        {edges_rerouted, skipped, containers_refit}.
+        {edges_rerouted, skipped, containers_refit, skipped_containers}.
     """
     return ops.reflow(_doc(document_id), edges=edges, containers=containers, scope=scope)
 

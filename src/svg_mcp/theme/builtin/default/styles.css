@@ -51,8 +51,12 @@
 
   /* --- geometry: what the diagram facades will lay out with ----------- */
   --pad-node: 12;
+  --pad-container: 16;
   --gap-node: 24;
   --gap-rank: 48;
+  /* The main-axis gap `layout_diagram` leaves between one rank and the next. Wider than
+   * --gap-rank because a laid-out rank has to host the routed edges crossing between them. */
+  --gap-layer: 90;
   --radius: 6;
   --radius-pill: 999;
 
@@ -140,6 +144,38 @@
   stroke-dasharray: var(--dash-dependency);
 }
 
+/* --- container kinds ---------------------------------------------------
+ *
+ * A container is scenery: it is drawn BEHIND its members, so it has to read as ground rather
+ * than as another box. All three tint with `--ink` at a low `fill-opacity` instead of a fixed
+ * grey, which is what lets the dark variant invert them for free — ink over canvas is a wash
+ * either way round, where a hard-coded near-white would go opaque on a dark ground.
+ */
+
+/** A cluster: "these belong together". The lightest possible wash, dashed to read as annotation. */
+.cluster {
+  fill: var(--ink);
+  fill-opacity: 0.03;
+  stroke: var(--stroke);
+  stroke-width: var(--stroke-width-hairline);
+  stroke-dasharray: var(--dash-external);
+}
+
+/** A zone: a region of the picture (a network, an environment). Solid tint, no border at all. */
+.zone {
+  fill: var(--ink);
+  fill-opacity: 0.05;
+  stroke: none;
+}
+
+/** A swimlane: who owns this band of the diagram. Tinted and outlined, the firmest of the three. */
+.swimlane {
+  fill: var(--ink);
+  fill-opacity: 0.04;
+  stroke: var(--stroke-strong);
+  stroke-width: var(--stroke-width-hairline);
+}
+
 /* --- facade labels -----------------------------------------------------
  *
  * A diagram facade is a <g> that carries the kind class, so the node's own fill and stroke
@@ -163,6 +199,17 @@
   stroke: none;
   font-family: var(--font);
   font-size: 10px;
+}
+
+/** A container's corner label: it names the grouping, so it stays quieter than the nodes in it.
+ * `fill-opacity` is restored to 1 here — the container tints its BOX by making the ink nearly
+ * transparent, and that inherits into the text unless the part rule takes it back. */
+.cluster text, .zone text, .swimlane text {
+  fill: var(--ink-muted);
+  fill-opacity: 1;
+  stroke: none;
+  font-family: var(--font);
+  font-size: 11px;
 }
 
 /* --- text roles --------------------------------------------------------

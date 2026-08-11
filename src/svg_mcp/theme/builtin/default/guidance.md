@@ -25,6 +25,17 @@ and weight rather than hue, so the picture still reads in greyscale.
 Use the dash pattern to carry meaning: a solid line moves something, a dashed one triggers
 something, a dotted one merely relates two things. Do not add a fourth pattern — add a marker.
 
+## Container kinds
+
+`cluster` · `zone` · `swimlane`
+
+A container is a box drawn *behind* a set of nodes — scenery, not another node, so all three
+tint with the ink rather than taking a fill of their own and none of them competes with what it
+encloses. `cluster` (dashed, barely there) says "these belong together"; `zone` (a solid faint
+tint, no border) marks a region; `swimlane` (tinted and outlined) says who owns a band of the
+picture. `add_diagram_container` fits the box to its members and `reflow` re-fits it after they
+move, so the grouping survives a layout pass.
+
 ## Text roles
 
 `title` · `subtitle` · `label` · `caption` · `code`

@@ -14,7 +14,7 @@ type TransformEntry = dict[str, str | None | list[float]]
 # A node's geometry in a chosen coordinate frame.
 type Geometry = dict[str, str | float | list[float] | dict[str, str]]
 # A shape's editable settings under the add_*/edit_* parameter names.
-type ParamValue = str | float | int | bool | list[float] | list[list[float]] | None
+type ParamValue = str | float | int | bool | list[str] | list[float] | list[list[float]] | None
 type ShapeParams = dict[str, ParamValue]
 # One resident theme: its name, the variant in force, and the route keys it serves.
 type ThemeResidencyInfo = dict[str, str | list[str] | None]
@@ -215,27 +215,36 @@ _PARAM_SHAPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("data-pill", "pill", ("x", "y", "width", "height", "smoothness")),
 )
 
-# Facade groups (ops.diagram): (data-* attr, reported kind, keys, whether each key is numeric).
+# Facade groups (ops.diagram): (data-* attr, reported kind, text keys, numeric keys, list keys).
 # Their spec IS the node — read it back to see what an add_diagram_* / edit_diagram_* call means.
-_FACADES: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
+_FACADES: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...]], ...] = (
     (
         "data-diagram-node",
         "diagram_node",
         ("kind", "label", "shape"),
         ("w", "h"),
+        (),
     ),
     (
         "data-diagram-edge",
         "diagram_edge",
         ("source", "target", "kind", "sa", "ta", "route", "label"),
         (),
+        (),
+    ),
+    (
+        "data-diagram-container",
+        "diagram_container",
+        ("kind", "label"),
+        (),
+        ("members",),
     ),
 )
 
 
 def _read_facade(element: inkex.BaseElement) -> tuple[str, ShapeParams] | None:
     """A diagram facade's stored spec under the same names its add_/edit_ tools use, or None."""
-    for attr, kind, text_keys, number_keys in _FACADES:
+    for attr, kind, text_keys, number_keys, list_keys in _FACADES:
         raw = element.get(attr)
         if raw is None:
             continue
@@ -243,6 +252,7 @@ def _read_facade(element: inkex.BaseElement) -> tuple[str, ShapeParams] | None:
             spec = json.loads(raw)
             params: ShapeParams = {key: str(spec[key]) for key in text_keys}
             params.update({key: float(spec[key]) for key in number_keys})
+            params.update({key: [str(item) for item in spec[key]] for key in list_keys})
         except (ValueError, TypeError, KeyError):
             return None  # corrupt spec → report the group as the plain <g> it is
         if "auto" in spec:

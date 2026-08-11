@@ -22,6 +22,10 @@ roles = [
   "data",
   "control",
   "dependency",
+  # container kinds
+  "cluster",
+  "zone",
+  "swimlane",
 ]
 
 # The primitive each diagram kind wants when a facade draws it — the shape half of a role,

@@ -1,9 +1,10 @@
-"""Diagram facades: kind-shaped nodes, routed edges, and the reflow that keeps them attached.
+"""Diagram facades: kind-shaped nodes, routed edges, containers, and the reflow that binds them.
 
 A facade is a ``<g>`` that draws itself from a spec stored on it — a node is a shape plus a
-centered label, an edge is a routed path plus an optional label. The spec lives in a compact
-``data-*`` JSON attribute and is the single source of truth: ids and names belong to the caller,
-so nothing here is ever derived from them.
+centered label, an edge is a routed path plus an optional label, a container is a box drawn
+around the members it names. The spec lives in a compact ``data-*`` JSON attribute and is the
+single source of truth: ids and names belong to the caller, so nothing here is ever derived
+from them.
 
 Where the theme engine says what a node is PAINTED like, the manifest's ``[kinds]`` says what it
 is SHAPED like, and its tokens say how much room to leave around it. Both are read through
@@ -27,7 +28,7 @@ from inkex import BaseElement
 from pydantic import BaseModel, Field
 
 from ..model.document import Document
-from ..model.errors import InvalidArgument
+from ..model.errors import InvalidArgument, SvgMcpError
 from ..model.handles import NodeRef, names_node
 from ..query.outline import _bbox_xywh
 from ..typeset import FontNotFound, measure_text
@@ -45,6 +46,7 @@ from .construct import (
     edit_squircle,
 )
 from .geometry import edit_shape
+from .modify import to_back
 from .paint import resolve_paint_refs as _resolve_paint_refs
 from .resources import _class_list, _set_class_list
 from .themes import ServingTheme, apply_auto_styles, serving_theme
@@ -67,11 +69,13 @@ SHAPES: tuple[str, ...] = ("rect", "squircle", "pill", "polygon", "circle", "ell
 # The facade specs, stored where they cannot be lost or guessed at (never on the id or name).
 _NODE_ATTR = "data-diagram-node"
 _EDGE_ATTR = "data-diagram-edge"
+_CONTAINER_ATTR = "data-diagram-container"
 # The one arrowhead every edge shares, marked so it is found again without trusting its id.
 _ARROW_ATTR = "data-diagram-arrow"
 _ARROW_ID = "diagram-arrow"
 
 _DEFAULT_PAD = 12.0
+_DEFAULT_PAD_CONTAINER = 16.0
 _DEFAULT_GAP = 24.0
 _DEFAULT_STUB = 12.0
 _DEFAULT_RADIUS = 8.0
@@ -79,6 +83,8 @@ _DEFAULT_CORNER = 6.0
 _DEFAULT_CANVAS = "#ffffff"
 _DEFAULT_FONT = "sans-serif"
 _LABEL_SIZE = 12.0
+# The clear air a container leaves above its members for its own label to sit in.
+_LABEL_GAP = 8.0
 
 _MIN_W, _MIN_H = 60.0, 36.0
 _DIAMOND_MIN_W, _DIAMOND_MIN_H = 80.0, 48.0
@@ -102,11 +108,12 @@ _GENERIC_FONTS: dict[str, tuple[str, ...]] = {
 
 
 class Reflow(BaseModel):
-    """What a reflow moved: edges re-routed, edges it could not, containers re-fitted."""
+    """What a reflow moved: edges re-routed, edges it could not, containers re-fitted or not."""
 
     edges_rerouted: int = 0
     skipped: list[str] = Field(default_factory=list)
     containers_refit: int = 0
+    skipped_containers: list[str] = Field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +133,27 @@ class PlacedEdge:
 
     ref: NodeRef
     edges_rerouted: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlacedContainer:
+    """A new diagram container: its handle, the box it took, and whether that box is derived."""
+
+    ref: NodeRef
+    x: float
+    y: float
+    w: float
+    h: float
+    auto: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ContainerEdit:
+    """A patched diagram container: its membership after the edit, and whether it re-fitted."""
+
+    ref: NodeRef
+    members: list[str]
+    refit: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,7 +412,19 @@ class EdgeSpec:
     label: str
 
 
-def _store(element: BaseElement, attr: str, spec: Mapping[str, str | float | bool]) -> None:
+@dataclass(frozen=True, slots=True)
+class ContainerSpec:
+    """What a diagram container encloses, and whether its box is derived from that membership."""
+
+    kind: str
+    label: str
+    members: tuple[str, ...]
+    auto: bool
+
+
+def _store(
+    element: BaseElement, attr: str, spec: Mapping[str, str | float | bool | list[str]]
+) -> None:
     element.set(attr, json.dumps(dict(spec), separators=(",", ":")))
 
 
@@ -436,6 +476,39 @@ def read_edge_spec(element: BaseElement) -> EdgeSpec | None:
         )
     except (ValueError, TypeError, KeyError):
         return None
+
+
+def read_container_spec(element: BaseElement) -> ContainerSpec | None:
+    """The container spec on ``element``, or None if it is not a container (or is corrupt)."""
+    raw = element.get(_CONTAINER_ATTR)
+    if raw is None:
+        return None
+    try:
+        spec = json.loads(raw)
+        members = spec["members"]
+        if not isinstance(members, list):
+            return None
+        return ContainerSpec(
+            kind=str(spec["kind"]),
+            label=str(spec["label"]),
+            members=tuple(str(member) for member in members),
+            auto=bool(spec.get("auto", False)),
+        )
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _write_container_spec(element: BaseElement, spec: ContainerSpec) -> None:
+    _store(
+        element,
+        _CONTAINER_ATTR,
+        {
+            "kind": spec.kind,
+            "label": spec.label,
+            "members": list(spec.members),
+            "auto": spec.auto,
+        },
+    )
 
 
 def _write_node_spec(element: BaseElement, spec: NodeSpec) -> None:
@@ -517,7 +590,7 @@ def _place_facade(
     element: BaseElement,
     *,
     prefix: str,
-    category: Literal["shape", "connector"],
+    category: Literal["shape", "connector", "container"],
     prim: str,
     role: str,
     parent: str | None,
@@ -525,18 +598,23 @@ def _place_facade(
     style: Style | None,
     styles: list[str] | None,
     themed: bool,
+    stamp_prim: bool = True,
 ) -> NodeRef:
     """Attach a facade group: parent, id, name, the what-it-is stamp, its hooks, its own style.
 
     The same sequence ``_place_and_style`` runs for a primitive — the group is the themed node
     here, so the hooks land on it and its children are built plain and inherit.
+
+    ``stamp_prim`` is False for a facade whose category has only one shape to be: a container is
+    always a box, so ``data-prim`` would restate ``data-category`` and buy nothing.
     """
     doc.resolve_parent(parent).add(element)
     element.set_id(doc.new_id(prefix))
     if name is not None:
         element.label = name
     element.set(_CATEGORY_ATTR, category)
-    element.set(_PRIM_ATTR, prim)
+    if stamp_prim:
+        element.set(_PRIM_ATTR, prim)
     apply_auto_styles(
         doc, element, category=category, prim=prim, role=role, styles=styles, themed=themed
     )
@@ -636,9 +714,9 @@ def _local_origin(element: BaseElement) -> Point:
     return (float(box.left), float(box.top))
 
 
-def _label_style(halo: str | None) -> Style:
-    """A facade label's structural style: centered, and haloed when it sits on top of a line."""
-    style: Style = {"text-anchor": "middle", "dominant-baseline": "central"}
+def _label_style(halo: str | None, anchor: str = "middle") -> Style:
+    """A facade label's structural style: anchored, and haloed when it sits on top of a line."""
+    style: Style = {"text-anchor": anchor, "dominant-baseline": "central"}
     if halo is not None:
         style |= {"paint-order": "stroke", "stroke": halo, "stroke-width": "3"}
     return style
@@ -652,6 +730,7 @@ def _set_label(
     *,
     halo: str | None,
     dy: float | None,
+    anchor: str = "middle",
 ) -> None:
     """Create, move, or remove a facade's label so the group matches its spec."""
     existing = _first_text(group)
@@ -666,7 +745,7 @@ def _set_label(
             y=at[1],
             content=text,
             parent=str(group.get_id()),
-            style=_label_style(halo),
+            style=_label_style(halo, anchor),
             themed=False,
         )
         existing = doc.resolve(ref.id)
@@ -677,7 +756,7 @@ def _set_label(
         # Re-bake the structural style: the halo is an inline (pinned) prop, so a variant
         # switch only reaches it through the next reflow — this is that re-bake.
         style = existing.style
-        for key, value in _label_style(halo).items():
+        for key, value in _label_style(halo, anchor).items():
             style[key] = value
         if halo is None:
             for key in ("paint-order", "stroke", "stroke-width"):
@@ -1062,6 +1141,289 @@ def edit_diagram_edge(
     )
 
 
+# --- containers --------------------------------------------------------------
+
+
+def _container_groups(doc: Document) -> Iterator[tuple[BaseElement, ContainerSpec]]:
+    for node in doc.svg.iter():
+        if isinstance(node.tag, str) and node.get(_CONTAINER_ATTR) is not None:
+            spec = read_container_spec(node)
+            if spec is not None:
+                yield node, spec
+
+
+def _encloses(ancestor: BaseElement, node: BaseElement) -> bool:
+    """True when ``node`` IS ``ancestor`` or sits underneath it."""
+    current: BaseElement | None = node
+    while current is not None:
+        if current is ancestor:
+            return True
+        current = current.getparent()
+    return False
+
+
+def _member_ids(doc: Document, members: Sequence[str], *, anchor: BaseElement) -> list[str]:
+    """Resolve member handles to ids, rejecting anything that would enclose the container.
+
+    A container draws itself around its members' boxes, so a member that CONTAINS the container
+    (the parent it is being added to, or one of that parent's ancestors) would make the fit feed
+    on its own output. Duplicates collapse; order is the caller's.
+    """
+    out: list[str] = []
+    for entry in members:
+        try:
+            element = doc.resolve(entry)
+        except SvgMcpError as exc:
+            raise InvalidArgument(f"container member {entry!r} does not resolve: {exc}") from exc
+        if _encloses(element, anchor):
+            raise InvalidArgument(
+                f"container member {entry!r} encloses the container itself; a container is a "
+                "SIBLING of its members, so it cannot be fitted around its own ancestor"
+            )
+        node_id = str(element.get_id())
+        if node_id not in out:
+            out.append(node_id)
+    return out
+
+
+def _container_pad(doc: Document, kind: str) -> float:
+    return _token(serving_theme(doc, kind), "--pad-container", _DEFAULT_PAD_CONTAINER)
+
+
+def _fit_bounds(
+    doc: Document, members: Sequence[str], *, pad: float, label: str
+) -> tuple[float, float, float, float] | None:
+    """The box that holds every resolvable member, padded, with headroom for a label.
+
+    None when nothing in ``members`` resolves any more — there is no honest box to draw then,
+    so the caller leaves the old one alone and reports it.
+    """
+    boxes = [box for box in (_box_of(doc, member) for member in members) if box is not None]
+    if not boxes:
+        return None
+    left = min(box.x for box in boxes) - pad
+    top = min(box.y for box in boxes) - pad
+    right = max(box.x + box.w for box in boxes) + pad
+    bottom = max(box.y + box.h for box in boxes) + pad
+    if label:
+        top -= _LABEL_SIZE + _LABEL_GAP
+    return (left, top, right - left, bottom - top)
+
+
+def _set_container_label(
+    doc: Document,
+    group: BaseElement,
+    label: str,
+    box: tuple[float, float, float, float],
+    pad: float,
+) -> None:
+    """Put the container's label inside its top-left corner, one pad in from each edge."""
+    _set_label(doc, group, label, (box[0] + pad, box[1] + pad), halo=None, dy=None, anchor="start")
+
+
+def _container_box(group: BaseElement) -> tuple[float, float, float, float] | None:
+    """The box a container is currently drawn at, read off the rect it owns."""
+    rect = _body(group)
+    if rect is None:
+        return None
+    try:
+        bbox = rect.bounding_box()
+    except Exception:
+        return None
+    if bbox is None:
+        return None
+    return (float(bbox.left), float(bbox.top), float(bbox.width), float(bbox.height))
+
+
+def _refit_container(doc: Document, group: BaseElement, spec: ContainerSpec) -> bool:
+    """Re-derive an auto container's box from its members' CURRENT boxes; False if it cannot."""
+    pad = _container_pad(doc, spec.kind)
+    box = _fit_bounds(doc, spec.members, pad=pad, label=spec.label)
+    rect = _body(group)
+    if box is None or rect is None:
+        return False
+    edit_shape(
+        doc,
+        str(rect.get_id()),
+        expect_tag="rect",
+        attrs={"x": box[0], "y": box[1], "width": box[2], "height": box[3]},
+    )
+    _set_container_label(doc, group, spec.label, box, pad)
+    return True
+
+
+def _refit_containers(doc: Document, *, scope: set[str] | None = None) -> tuple[int, list[str]]:
+    """Re-fit every auto container in ``scope``; returns (how many, the ones that could not).
+
+    A container is in a narrowed scope when its own handle is named OR any of its members is —
+    moving a node is the usual reason to re-fit, and the caller names the node, not the box.
+    """
+    refit, skipped = 0, []
+    for group, spec in _container_groups(doc):
+        if not spec.auto:
+            continue
+        if scope is not None and not ({str(group.get_id()), *spec.members} & scope):
+            continue
+        if _refit_container(doc, group, spec):
+            refit += 1
+        else:
+            skipped.append(str(group.get_id()))
+    return refit, skipped
+
+
+def add_diagram_container(
+    doc: Document,
+    *,
+    members: list[str],
+    kind: str = "cluster",
+    label: str = "",
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    parent: str | None = None,
+    name: str | None = None,
+    style: Style | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> PlacedContainer:
+    """Group nodes visually: a themed box drawn BEHIND the members it names, with a corner label.
+
+    The container is a sibling of its members, not their parent — grouping is a statement about
+    the picture, not a change to the tree, so nothing is reparented and every member keeps the
+    position, edges and styling it already had.
+
+    Omit any of x/y/width/height and the box is derived from the members' current boxes (padded
+    by the theme's ``--pad-container``, plus headroom for the label) and re-derived by every
+    later ``reflow``. Give all four and the box is yours: it is used verbatim and never re-fitted,
+    which is also the only way to draw a container with no members at all.
+    """
+    parent_element = doc.resolve_parent(parent)
+    member_ids = _member_ids(doc, members, anchor=parent_element)
+    pad = _container_pad(doc, kind)
+
+    if x is not None and y is not None and width is not None and height is not None:
+        box, auto = (x, y, width, height), False
+    else:
+        auto = True
+        if not member_ids:
+            raise InvalidArgument(
+                "a container with no members needs an explicit x, y, width and height — "
+                "there is nothing to fit a box around"
+            )
+        fitted = _fit_bounds(doc, member_ids, pad=pad, label=label)
+        if fitted is None:
+            raise InvalidArgument("none of this container's members has a bounding box to fit to")
+        box = fitted
+
+    group = inkex.Group()
+    ref = _place_facade(
+        doc,
+        group,
+        prefix="diagram-container",
+        category="container",
+        prim="container",
+        role=kind,
+        parent=parent,
+        name=name,
+        style=style,
+        styles=styles,
+        themed=themed,
+        stamp_prim=False,
+    )
+    add_rect(doc, x=box[0], y=box[1], width=box[2], height=box[3], parent=ref.id, themed=False)
+    _set_container_label(doc, group, label, box, pad)
+    _write_container_spec(
+        group, ContainerSpec(kind=kind, label=label, members=tuple(member_ids), auto=auto)
+    )
+    to_back(doc, ref.id)  # a container is scenery: it draws behind everything it encloses
+    return PlacedContainer(ref=ref, x=box[0], y=box[1], w=box[2], h=box[3], auto=auto)
+
+
+def _drop_id(doc: Document, entry: str) -> str:
+    """The id a removal names — falling back to the text, since a member may already be gone."""
+    try:
+        return str(doc.resolve(entry).get_id())
+    except SvgMcpError:
+        return entry
+
+
+def edit_diagram_container(
+    doc: Document,
+    target: str,
+    *,
+    label: str | None = None,
+    kind: str | None = None,
+    members: list[str] | None = None,
+    add_members: list[str] | None = None,
+    remove_members: list[str] | None = None,
+) -> ContainerEdit:
+    """Edit a container by its SPEC: re-label it, re-kind it, or change what it encloses.
+
+    ``members`` REPLACES the membership; ``add_members``/``remove_members`` adjust it. Combining
+    the two in one call is rejected — which of the two was meant is not something to guess at.
+    Any change that moves an auto container's box re-fits it on the spot.
+    """
+    group = doc.resolve(target)
+    spec = read_container_spec(group)
+    if spec is None:
+        raise InvalidArgument(f"{target!r} is not a diagram container (no {_CONTAINER_ATTR} spec)")
+    if members is not None and (add_members is not None or remove_members is not None):
+        raise InvalidArgument(
+            "pass `members` to replace the membership OR `add_members`/`remove_members` to "
+            "adjust it — not both in one call"
+        )
+
+    current = list(spec.members)
+    changed = False
+    if members is not None:
+        current = _member_ids(doc, members, anchor=group)
+        changed = True
+    else:
+        if remove_members:
+            dropped = {_drop_id(doc, entry) for entry in remove_members}
+            current = [member for member in current if member not in dropped]
+            changed = True
+        if add_members:
+            for node_id in _member_ids(doc, add_members, anchor=group):
+                if node_id not in current:
+                    current.append(node_id)
+            changed = True
+    if changed and spec.auto and not current:
+        raise InvalidArgument(
+            "an auto-fitted container cannot be emptied — it would have no box to derive; "
+            "delete it, or give it an explicit x/y/width/height first"
+        )
+
+    if kind is not None and kind != spec.kind:
+        _swap_role(doc, group, spec.kind, kind)
+    updated = ContainerSpec(
+        kind=kind if kind is not None else spec.kind,
+        label=label if label is not None else spec.label,
+        members=tuple(current),
+        auto=spec.auto,
+    )
+    _write_container_spec(group, updated)
+
+    refit = False
+    if updated.auto and (changed or label is not None or kind is not None):
+        refit = _refit_container(doc, group, updated)
+    elif label is not None:
+        box = _container_box(group)
+        if box is not None:
+            _set_container_label(
+                doc, group, updated.label, box, _container_pad(doc, updated.kind)
+            )
+    return ContainerEdit(
+        ref=NodeRef(id=str(group.get_id()), tag=str(group.TAG), name=getattr(group, "label", None)),
+        members=list(current),
+        refit=refit,
+    )
+
+
+# --- reflow ------------------------------------------------------------------
+
+
 def reflow(
     doc: Document,
     *,
@@ -1072,13 +1434,17 @@ def reflow(
     """Re-derive the diagram's derived geometry from what its nodes are doing NOW.
 
     Call it after moving, resizing, or deleting nodes: every edge is re-routed from the current
-    boxes, re-choosing sides and re-spreading ports. An edge whose source or target no longer
-    resolves is left exactly as it was and reported in ``skipped``.
+    boxes, re-choosing sides and re-spreading ports, and every auto-fitted container is re-drawn
+    around its members. An edge whose source or target no longer resolves is left exactly as it
+    was and reported in ``skipped``; a container none of whose members resolves any more is
+    likewise left alone and reported in ``skipped_containers``.
 
-    ``containers`` is accepted and currently does nothing — container facades re-fit themselves
-    once they exist, and ``containers_refit`` is 0 until then.
+    Containers with an explicit box are never touched — that geometry was a decision.
     """
-    if not edges:
-        return Reflow()
     ids = {str(doc.resolve(entry).get_id()) for entry in scope} if scope else None
-    return _reroute(doc, scope=ids)
+    result = _reroute(doc, scope=ids) if edges else Reflow()
+    if containers:
+        refit, skipped = _refit_containers(doc, scope=ids)
+        result.containers_refit = refit
+        result.skipped_containers = skipped
+    return result
