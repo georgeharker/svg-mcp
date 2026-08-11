@@ -31,9 +31,11 @@ roles = [
   "cluster",
   "zone",
   "swimlane",
-  # annotation: the legend's box, and the five things a callout can be. `note` is deliberately
-  # NOT repeated here — a callout that is commentary wears the same pale sticky a note node does.
+  # annotation: the legend's box, the table's panel, and the five things a callout (or a callout
+  # card) can be. `note` is deliberately NOT repeated here — a callout that is commentary wears
+  # the same pale sticky a note node does.
   "legend",
+  "table",
   "info",
   "warning",
   "success",

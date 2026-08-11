@@ -16,6 +16,23 @@ where the card and its target are NOW, by the same ``auto_side``/``anchor_point`
 edge routes with, so ``reflow`` re-anchors it after a layout pass moves the target out from under
 it. It ends in a dot rather than an arrowhead: an annotation points at something, it does not
 flow into it.
+
+A TABLE is MEASURED. Every column is as wide as the widest thing in it (clamped, and then the
+cell wraps), every row as tall as the tallest cell in it, and a column of numbers right-aligns
+itself because a column of numbers is only readable that way. Nothing about the layout is a
+parameter the caller has to get right, which is the entire reason to have the facade: hand-laid
+table columns are the single most common way a generated picture ends up with text on top of
+text.
+
+A CALLOUT CARD is the callout's card WITHOUT the leader — a standalone panel with an accent bar,
+a title and a body, for the note that is about the picture rather than about one node in it. The
+two are deliberately separate calls: ``add_callout`` needs a target and would be lying without
+one, and a card that pointed at nothing in particular is a different thing to reach for.
+
+Tables and cards are placed with a ``translate`` and authored in their own local frame, the way
+:mod:`~svg_mcp.ops.chart` does it — both re-derive ALL of their children from their spec on every
+edit, and a group that carries its position in a transform keeps that position for free. The
+legend and the callout predate that and read their origin back off the card they drew.
 """
 
 from __future__ import annotations
@@ -36,6 +53,7 @@ from ..model.handles import NodeRef
 from ..query.outline import _bbox_xywh
 from .chart import (
     _SERIES_COUNT,
+    _TITLE_SIZE,
     BarData,
     ChartSpec,
     DonutData,
@@ -46,12 +64,14 @@ from .chart import (
 )
 from .diagram import (
     _CALLOUT_ATTR,
+    _CARD_ATTR,
     _CHART_ATTR,
     _CONTAINER_ATTR,
     _DEFAULT_PAD,
     _EDGE_ATTR,
     _LEGEND_ATTR,
     _NODE_ATTR,
+    _TABLE_ATTR,
     AnchorPref,
     Box,
     Point,
@@ -397,9 +417,19 @@ def _legend_layout(doc: Document, spec: LegendSpec) -> LegendLayout:
 
 
 def _text_part(
-    doc: Document, parent: str, content: str, at: Point, classes: Sequence[str]
+    doc: Document,
+    parent: str,
+    content: str,
+    at: Point,
+    classes: Sequence[str],
+    *,
+    anchor: str = "start",
 ) -> BaseElement:
-    """One line of annotation type: anchored at its left, centered on the row it sits in."""
+    """One line of annotation type: anchored as asked, centered on the row it sits in.
+
+    ``anchor`` is left at ``start`` by everything but a table, which is the only annotation with
+    a column to right-align a number in.
+    """
     element = inkex.TextElement()
     element.set("x", _num(at[0]))
     element.set("y", _num(at[1]))
@@ -410,7 +440,7 @@ def _text_part(
         prefix="text",
         category="text",
         parent=parent,
-        style={"text-anchor": "start", "dominant-baseline": "central"},
+        style={"text-anchor": anchor, "dominant-baseline": "central"},
         classes=classes,
     )
 
@@ -1011,3 +1041,789 @@ def reanchor_callouts(doc: Document, *, scope: set[str] | None = None) -> tuple[
         else:
             skipped.append(str(group.get_id()))
     return reanchored, skipped
+
+
+# --- tables ------------------------------------------------------------------
+
+Align = Literal["left", "right", "center"]
+"""How one table column is set. Derived from what is IN the column unless the caller says."""
+
+_ALIGNS: frozenset[str] = frozenset({"left", "right", "center"})
+
+# The clear air a cell leaves above and below its text. Not a token: a row's vertical rhythm is
+# type-set (it is a function of the line height), where the horizontal padding is a look and so
+# comes from `--pad-cell`.
+_CELL_PAD_Y = 5.0
+_DEFAULT_CELL_PAD = 8.0
+_DEFAULT_MAX_COL = 220.0
+_MIN_COL_WIDTH = 20.0
+
+
+def _is_number(cell: str) -> bool:
+    """Whether a cell READS as a number — the test that decides a column right-aligns itself.
+
+    Thousands separators, a currency mark and a percent sign are stripped BEFORE the test and
+    nowhere else: the cell is drawn exactly as it was handed over, because "$1,200" is what the
+    author wrote and re-formatting somebody's data is not a layout decision.
+    """
+    text = cell.strip().replace(",", "").replace("$", "").replace("%", "").replace("−", "-")
+    if not text:
+        return False
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _align(value: str) -> Align:
+    if value == "right":
+        return "right"
+    if value == "center":
+        return "center"
+    return "left"
+
+
+@dataclass(frozen=True, slots=True)
+class TableSpec:
+    """What a table is, as stored on its group. Position lives in the group's transform."""
+
+    rows: tuple[tuple[str, ...], ...]
+    header: tuple[str, ...] | None
+    title: str
+    col_align: tuple[Align, ...]
+    zebra: bool
+    max_col_width: float
+    x_pad: float | None
+    auto: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PlacedTable:
+    """A new table: its handle, the box it took, and the columns it measured itself into."""
+
+    ref: NodeRef
+    x: float
+    y: float
+    w: float
+    h: float
+    columns: list[float]
+    col_align: list[Align]
+    auto: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TableEdit:
+    """A patched table: its handle, how many children the rebuild produced, and its alignments."""
+
+    ref: NodeRef
+    children: int
+    col_align: list[Align]
+
+
+def read_table_spec(element: BaseElement) -> TableSpec | None:
+    """The table spec stored on ``element``, or None if it is not a table (or is corrupt)."""
+    raw = element.get(_TABLE_ATTR)
+    if raw is None:
+        return None
+    try:
+        spec = json.loads(raw)
+        rows = spec["rows"]
+        header = spec.get("header") or None
+        if not isinstance(rows, list) or (header is not None and not isinstance(header, list)):
+            return None
+        pad = spec.get("x_pad")
+        return TableSpec(
+            rows=tuple(tuple(str(cell) for cell in row) for row in rows),
+            header=None if header is None else tuple(str(cell) for cell in header),
+            title=str(spec.get("title", "")),
+            col_align=tuple(_align(str(value)) for value in spec.get("col_align", ())),
+            zebra=bool(spec.get("zebra", True)),
+            max_col_width=float(spec.get("max_col_width", _DEFAULT_MAX_COL)),
+            x_pad=None if pad is None else float(pad),
+            auto=bool(spec.get("auto", False)),
+        )
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _write_table_spec(element: BaseElement, spec: TableSpec) -> None:
+    element.set(
+        _TABLE_ATTR,
+        json.dumps(
+            {
+                "rows": [list(row) for row in spec.rows],
+                # A header of no columns cannot exist, so [] is how "no header row" is written —
+                # a null here would make the whole spec unreadable to `get_params`.
+                "header": list(spec.header) if spec.header is not None else [],
+                "title": spec.title,
+                "col_align": list(spec.col_align),
+                "zebra": spec.zebra,
+                "max_col_width": spec.max_col_width,
+                "x_pad": spec.x_pad,
+                "auto": spec.auto,
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+
+def table_columns(rows: Sequence[Sequence[str]], header: Sequence[str] | None) -> int:
+    """How many columns a table has — and the one place a ragged table is refused.
+
+    A short row is never padded silently: the missing cell might be the one that mattered, and a
+    table quietly one column narrower than its header is a lie about what the numbers mean.
+    """
+    widths = {len(row) for row in rows}
+    if len(widths) > 1:
+        raise InvalidArgument(
+            f"a table's rows must all have the same number of cells; got rows of "
+            f"{sorted(widths)} cells. Pad the short ones with '' rather than leaving them ragged"
+        )
+    columns = widths.pop() if widths else (len(header) if header is not None else 0)
+    if header is not None and len(header) != columns:
+        raise InvalidArgument(
+            f"the header has {len(header)} cells but the rows have {columns}; a header names the "
+            "columns, so there has to be exactly one entry per column"
+        )
+    if columns < 1:
+        raise InvalidArgument("a table needs at least one column of cells to draw")
+    return columns
+
+
+def _numeric_align(rows: Sequence[Sequence[str]], index: int) -> Align:
+    """A column right-aligns itself only if EVERY body cell in it is a number."""
+    return "right" if rows and all(_is_number(row[index]) for row in rows) else "left"
+
+
+def resolve_col_align(
+    rows: Sequence[Sequence[str]], columns: int, given: Sequence[str] | None
+) -> tuple[Align, ...]:
+    """The alignment of each column: the caller's, or measured from what the column holds.
+
+    The header is deliberately NOT consulted — a column of numbers under the word "Latency" is
+    still a column of numbers, and letting its title decide would flip the digits back to the
+    left just because somebody named the column.
+    """
+    if given is None:
+        return tuple(_numeric_align(rows, index) for index in range(columns))
+    if len(given) != columns:
+        raise InvalidArgument(
+            f"col_align has {len(given)} entries but the table has {columns} columns; "
+            "give one alignment per column or none at all"
+        )
+    for value in given:
+        if value not in _ALIGNS:
+            raise InvalidArgument(
+                f"{value!r} is not a column alignment; use 'left', 'right' or 'center'"
+            )
+    return tuple(_align(value) for value in given)
+
+
+@dataclass(frozen=True, slots=True)
+class TableLayout:
+    """A table measured: the column widths, the row heights, and every cell already wrapped."""
+
+    columns: tuple[float, ...]
+    header_cells: tuple[tuple[str, ...], ...]
+    body_cells: tuple[tuple[tuple[str, ...], ...], ...]
+    header_h: float
+    row_h: tuple[float, ...]
+    title_h: float
+    line_h: float
+    pad: float
+    w: float
+    h: float
+
+
+def _block_h(lines: Sequence[str], line_h: float) -> float:
+    """How tall one wrapped cell's text is — an empty cell still occupies its line."""
+    count = max(1, len(lines))
+    return count * line_h + (count - 1) * _LINE_LEAD
+
+
+def _table_layout(doc: Document, spec: TableSpec) -> TableLayout:
+    """Measure a table: every column as wide as its widest cell, every row as tall as its tallest.
+
+    The clamp to ``max_col_width`` is what makes a paragraph in a cell survivable — the column
+    stops growing and the cell wraps into it instead, taking its row with it.
+    """
+    theme = serving_theme(doc, "table")
+    font = _label_font(theme)
+    pad = spec.x_pad if spec.x_pad is not None else _token(theme, "--pad-cell", _DEFAULT_CELL_PAD)
+    limit = spec.max_col_width
+    columns = len(spec.col_align)
+
+    def wrapped(cell: str) -> tuple[str, ...]:
+        return tuple(wrap_words(cell, max_width=limit, font=font, size=_TEXT_SIZE))
+
+    sources: list[Sequence[str]] = list(spec.rows)
+    if spec.header is not None:
+        sources.insert(0, spec.header)
+    measured = [measure_label(cell, font, _TEXT_SIZE) for row in sources for cell in row]
+    line_h = max((size[1] for size in measured), default=_TEXT_SIZE)
+    widths = tuple(
+        min(
+            limit,
+            max(
+                (measure_label(row[index], font, _TEXT_SIZE)[0] for row in sources),
+                default=0.0,
+            ),
+        )
+        + 2 * pad
+        for index in range(columns)
+    )
+
+    header_cells = tuple(wrapped(cell) for cell in (spec.header or ()))
+    body_cells = tuple(tuple(wrapped(cell) for cell in row) for row in spec.rows)
+    row_h = tuple(
+        max((_block_h(cell, line_h) for cell in cells), default=line_h) + 2 * _CELL_PAD_Y
+        for cells in body_cells
+    )
+    header_h = (
+        0.0
+        if spec.header is None
+        else max((_block_h(cell, line_h) for cell in header_cells), default=line_h)
+        + 2 * _CELL_PAD_Y
+    )
+    title_h = measure_label(spec.title, font, _TITLE_SIZE)[1] + _ROW_LEAD if spec.title else 0.0
+    return TableLayout(
+        columns=widths,
+        header_cells=header_cells,
+        body_cells=body_cells,
+        header_h=header_h,
+        row_h=row_h,
+        title_h=title_h,
+        line_h=line_h,
+        pad=pad,
+        w=sum(widths),
+        h=title_h + header_h + sum(row_h),
+    )
+
+
+def _cell_anchor(x: float, width: float, pad: float, align: Align) -> tuple[float, str]:
+    """Where one cell's text starts and what it is anchored by, for the alignment it was given."""
+    if align == "right":
+        return (x + width - pad, "end")
+    if align == "center":
+        return (x + width / 2.0, "middle")
+    return (x + pad, "start")
+
+
+def _draw_row(
+    doc: Document,
+    parent: str,
+    layout: TableLayout,
+    aligns: Sequence[Align],
+    cells: Sequence[Sequence[str]],
+    top: float,
+    height: float,
+    classes: Sequence[str],
+) -> None:
+    """One row of cell text: each cell aligned in its column and centered in the row's height."""
+    x = 0.0
+    for index, lines in enumerate(cells):
+        width = layout.columns[index]
+        start = top + (height - _block_h(lines, layout.line_h)) / 2.0
+        at_x, anchor = _cell_anchor(x, width, layout.pad, aligns[index])
+        for line_index, line in enumerate(lines):
+            middle = start + line_index * (layout.line_h + _LINE_LEAD) + layout.line_h / 2.0
+            _text_part(doc, parent, line, (at_x, middle), classes, anchor=anchor)
+        x += width
+
+
+def _rect_part(
+    doc: Document, parent: str, box: tuple[float, float, float, float], classes: Sequence[str]
+) -> BaseElement:
+    return _part(
+        doc,
+        inkex.Rectangle.new(box[0], box[1], box[2], box[3]),
+        prefix="rect",
+        category="shape",
+        parent=parent,
+        style=None,
+        classes=classes,
+    )
+
+
+def _build_table(
+    doc: Document, group: BaseElement, spec: TableSpec, *, themed: bool
+) -> TableLayout:
+    """Draw (or re-draw) every child of a table from its spec. Idempotent by construction.
+
+    Everything is authored in the group's own frame, so the group's ``translate`` is the ONLY
+    statement of where the table is and a rebuild cannot move it.
+    """
+    for child in list(group):
+        if isinstance(child.tag, str):
+            child.delete()
+    layout = _table_layout(doc, spec)
+    group_id = str(group.get_id())
+
+    def part(suffix: str) -> list[str]:
+        return _part_class(doc, suffix) if themed else []
+
+    top = layout.title_h
+    # The border is drawn bare: the GROUP wears `.table`, so its canvas fill and hairline edge
+    # inherit into this rect exactly the way a legend's panel is painted.
+    _rect_part(doc, group_id, (0.0, top, layout.w, layout.h - top), ())
+    if spec.title:
+        # A table's title is a chart's title: same size, same weight, same job above a block of
+        # data. Reusing the class is what keeps a table and a chart beside it agreeing.
+        _text_part(doc, group_id, spec.title, (0.0, layout.title_h / 2.0), part("chart-title"))
+    if spec.header is not None:
+        _rect_part(doc, group_id, (0.0, top, layout.w, layout.header_h), part("table-header"))
+    body_top = top + layout.header_h
+    if spec.zebra:
+        at = body_top
+        for index, height in enumerate(layout.row_h):
+            if index % 2 == 0:
+                _rect_part(doc, group_id, (0.0, at, layout.w, height), part("table-stripe"))
+            at += height
+    if spec.header is not None:
+        _part(
+            doc,
+            inkex.Line.new((0.0, body_top), (layout.w, body_top)),
+            prefix="line",
+            category="connector",
+            parent=group_id,
+            style=None,
+            classes=part("table-rule"),
+        )
+        _draw_row(
+            doc,
+            group_id,
+            layout,
+            spec.col_align,
+            layout.header_cells,
+            top,
+            layout.header_h,
+            part("table-header-text"),
+        )
+    at = body_top
+    cell_class = part("table-cell")
+    for index, cells in enumerate(layout.body_cells):
+        _draw_row(doc, group_id, layout, spec.col_align, cells, at, layout.row_h[index], cell_class)
+        at += layout.row_h[index]
+    return layout
+
+
+def add_table(
+    doc: Document,
+    *,
+    rows: list[list[str]],
+    header: list[str] | None = None,
+    title: str = "",
+    x: float | None = None,
+    y: float | None = None,
+    col_align: list[str] | None = None,
+    max_col_width: float = _DEFAULT_MAX_COL,
+    zebra: bool = True,
+    x_pad: float | None = None,
+    parent: str | None = None,
+    name: str | None = None,
+    style: Style | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> PlacedTable:
+    """Add a table — columns measured from the cells, rows sized to what wrapped into them.
+
+    Nothing about the geometry is a parameter: each column is as wide as the widest thing in it
+    (up to ``max_col_width``, past which the cell WRAPS and its row grows), and a column whose
+    every body cell reads as a number right-aligns itself, because that is the only way a column
+    of numbers can be compared down the page. Say ``col_align`` to overrule that.
+
+    Omit ``x``/``y`` to stack the table under the last facade in the same parent.
+    """
+    if max_col_width < _MIN_COL_WIDTH:
+        raise InvalidArgument(f"a table column needs at least {_MIN_COL_WIDTH:g} to wrap text into")
+    if x_pad is not None and x_pad < 0:
+        raise InvalidArgument("a table's cell padding cannot be negative")
+    columns = table_columns(rows, header)
+    aligns = resolve_col_align(rows, columns, col_align)
+    spec = TableSpec(
+        rows=tuple(tuple(str(cell) for cell in row) for row in rows),
+        header=None if header is None else tuple(str(cell) for cell in header),
+        title=title,
+        col_align=aligns,
+        zebra=zebra,
+        max_col_width=max_col_width,
+        x_pad=x_pad,
+        auto=x is None and y is None,
+    )
+
+    gap = _token(serving_theme(doc, "table"), "--gap-node", 24.0)
+    stacked = _stack_below(doc.resolve_parent(parent), gap)
+    at_x = x if x is not None else _ORIGIN
+    at_y = y if y is not None else (_ORIGIN if stacked is None else stacked)
+
+    group = inkex.Group()
+    ref = _place_facade(
+        doc,
+        group,
+        prefix="table",
+        category="container",
+        prim="table",
+        role="table",
+        parent=parent,
+        name=name,
+        style=style,
+        styles=styles,
+        themed=themed,
+    )
+    group.set("transform", f"translate({_num(at_x)},{_num(at_y)})")
+    _write_table_spec(group, spec)
+    layout = _build_table(doc, group, spec, themed=themed)
+    return PlacedTable(
+        ref=ref,
+        x=at_x,
+        y=at_y,
+        w=layout.w,
+        h=layout.h,
+        columns=list(layout.columns),
+        col_align=list(spec.col_align),
+        auto=spec.auto,
+    )
+
+
+def edit_table(
+    doc: Document,
+    target: str,
+    *,
+    rows: list[list[str]] | None = None,
+    header: list[str] | None = None,
+    title: str | None = None,
+    col_align: list[str] | None = None,
+    zebra: bool | None = None,
+) -> TableEdit:
+    """Edit a table by its SPEC — new cells, a new header, a new title — and re-measure it.
+
+    The children are thrown away and re-derived rather than patched, for the same reason a chart's
+    are: the layout is a pure function of the cells, and nothing outside the table may reference
+    its internals. The GROUP survives untouched, so its id, its classes and its position all mean
+    what they meant before.
+
+    New rows do NOT silently re-align the columns — an alignment, once resolved, is part of the
+    spec and may have been the caller's. Pass ``col_align`` to change it. An empty ``header``
+    list removes the header row.
+    """
+    group = doc.resolve(target)
+    spec = read_table_spec(group)
+    if spec is None:
+        raise InvalidArgument(f"{target!r} is not a table (no {_TABLE_ATTR} spec)")
+    new_rows = (
+        spec.rows if rows is None else tuple(tuple(str(cell) for cell in row) for row in rows)
+    )
+    # An empty header list is how a header is REMOVED; a missing one leaves it alone.
+    new_header = spec.header if header is None else (tuple(str(cell) for cell in header) or None)
+    columns = table_columns(new_rows, new_header)
+    if col_align is not None or columns != len(spec.col_align):
+        aligns = resolve_col_align(new_rows, columns, col_align)
+    else:
+        aligns = spec.col_align
+    updated = TableSpec(
+        rows=new_rows,
+        header=new_header,
+        title=title if title is not None else spec.title,
+        col_align=aligns,
+        zebra=zebra if zebra is not None else spec.zebra,
+        max_col_width=spec.max_col_width,
+        x_pad=spec.x_pad,
+        auto=spec.auto,
+    )
+    _write_table_spec(group, updated)
+    # A table not wearing its role hook was built with themed=False; a rebuild that dressed it
+    # anyway would quietly overturn that decision, so the absence is honoured (as in edit_chart).
+    dressing = serving_theme_name(doc, "table")
+    themed = dressing is not None and f"{dressing}-table" in _class_list(group)
+    _build_table(doc, group, updated, themed=themed)
+    return TableEdit(
+        ref=NodeRef(id=str(group.get_id()), tag=str(group.TAG), name=getattr(group, "label", None)),
+        children=sum(1 for child in group if isinstance(child.tag, str)),
+        col_align=list(aligns),
+    )
+
+
+# --- callout cards -----------------------------------------------------------
+
+# The accent bar down a card's left edge, in user units. Fixed rather than themed: it is a
+# thickness the eye reads as "edge", and a card whose accent scaled with the type would stop
+# reading as the same component across two themes.
+_ACCENT_W = 4.0
+_CARD_TITLE_SIZE = 12.0
+_CARD_BODY_SIZE = 11.0
+# The clear air between a card's title and its body — larger than the lead between two lines of
+# the same paragraph, which is what makes them read as two things rather than one.
+_CARD_TITLE_GAP = 5.0
+_DEFAULT_CARD_W = 240.0
+_MIN_CARD_W = 60.0
+
+
+@dataclass(frozen=True, slots=True)
+class CardSpec:
+    """What a callout card says and how wide it says it. Position lives in the transform."""
+
+    title: str
+    body: str
+    kind: str
+    width: float
+    auto: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PlacedCard:
+    """A new card: its handle, the box it took, and how many lines its body wrapped to."""
+
+    ref: NodeRef
+    x: float
+    y: float
+    w: float
+    h: float
+    lines: int
+    auto: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CardEdit:
+    """A patched card: its handle, its body's line count, and the height it re-derived."""
+
+    ref: NodeRef
+    lines: int
+    h: float
+
+
+def read_card_spec(element: BaseElement) -> CardSpec | None:
+    """The card spec stored on ``element``, or None if it is not a card (or is corrupt)."""
+    raw = element.get(_CARD_ATTR)
+    if raw is None:
+        return None
+    try:
+        spec = json.loads(raw)
+        return CardSpec(
+            title=str(spec["title"]),
+            body=str(spec.get("body", "")),
+            kind=str(spec["kind"]),
+            width=float(spec["width"]),
+            auto=bool(spec.get("auto", False)),
+        )
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _write_card_spec(element: BaseElement, spec: CardSpec) -> None:
+    element.set(
+        _CARD_ATTR,
+        json.dumps(
+            {
+                "title": spec.title,
+                "body": spec.body,
+                "kind": spec.kind,
+                "width": spec.width,
+                "auto": spec.auto,
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CardLayout:
+    """A card measured: both blocks of text already wrapped, and the height they add up to."""
+
+    title_lines: tuple[str, ...]
+    body_lines: tuple[str, ...]
+    title_h: float
+    body_h: float
+    text_x: float
+    text_w: float
+    pad: float
+    w: float
+    h: float
+
+
+def _card_layout(doc: Document, spec: CardSpec) -> CardLayout:
+    """Measure a card: the text wraps into what the accent and the padding leave of its width.
+
+    The HEIGHT is derived, never given — a card is exactly as tall as the words in it, so nobody
+    has to guess a height and nobody ends up with a paragraph hanging out of a box.
+    """
+    theme = serving_theme(doc, spec.kind)
+    font = _label_font(theme)
+    pad = _token(theme, "--pad-node", _DEFAULT_PAD)
+    text_w = max(_MIN_MAX_WIDTH, spec.width - _ACCENT_W - 2 * pad)
+    title_lines = tuple(wrap_words(spec.title, max_width=text_w, font=font, size=_CARD_TITLE_SIZE))
+    body_lines = tuple(wrap_words(spec.body, max_width=text_w, font=font, size=_CARD_BODY_SIZE))
+    title_h = max(
+        (measure_label(line, font, _CARD_TITLE_SIZE)[1] for line in title_lines),
+        default=_CARD_TITLE_SIZE,
+    )
+    body_h = max(
+        (measure_label(line, font, _CARD_BODY_SIZE)[1] for line in body_lines),
+        default=_CARD_BODY_SIZE,
+    )
+    title_block = _stack_h(len(title_lines), title_h)
+    body_block = _stack_h(len(body_lines), body_h)
+    gap = _CARD_TITLE_GAP if title_lines and body_lines else 0.0
+    return CardLayout(
+        title_lines=title_lines,
+        body_lines=body_lines,
+        title_h=title_h,
+        body_h=body_h,
+        text_x=_ACCENT_W + pad,
+        text_w=text_w,
+        pad=pad,
+        w=spec.width,
+        h=2 * pad + title_block + gap + body_block,
+    )
+
+
+def _stack_h(count: int, line_h: float) -> float:
+    """How tall ``count`` lines of ``line_h`` are, leading included; nothing is nothing."""
+    return 0.0 if count == 0 else count * line_h + (count - 1) * _LINE_LEAD
+
+
+def _build_callout_card(
+    doc: Document, group: BaseElement, spec: CardSpec, *, themed: bool
+) -> CardLayout:
+    """Draw (or re-draw) a card: its body, its accent, its title and its words. Idempotent.
+
+    The card rect is bare, so the KIND class on the group paints it — the same way a callout's
+    card is painted, and the reason a card and a callout of the same kind cannot drift apart. The
+    accent is drawn after it, so it covers the border it sits on rather than being halved by it.
+    """
+    for child in list(group):
+        if isinstance(child.tag, str):
+            child.delete()
+    layout = _card_layout(doc, spec)
+    group_id = str(group.get_id())
+
+    def part(suffix: str) -> list[str]:
+        return _part_class(doc, suffix) if themed else []
+
+    _rect_part(doc, group_id, (0.0, 0.0, layout.w, layout.h), ())
+    _rect_part(doc, group_id, (0.0, 0.0, _ACCENT_W, layout.h), part("card-accent"))
+    cursor = layout.pad
+    title_class = part("card-title")
+    for line in layout.title_lines:
+        _text_part(doc, group_id, line, (layout.text_x, cursor + layout.title_h / 2.0), title_class)
+        cursor += layout.title_h + _LINE_LEAD
+    if layout.title_lines and layout.body_lines:
+        cursor += _CARD_TITLE_GAP - _LINE_LEAD
+    body_class = part("card-body")
+    for line in layout.body_lines:
+        _text_part(doc, group_id, line, (layout.text_x, cursor + layout.body_h / 2.0), body_class)
+        cursor += layout.body_h + _LINE_LEAD
+    return layout
+
+
+def _card_words(title: str, body: str) -> None:
+    """A card with neither a title nor a body is an empty box; refuse it rather than draw it."""
+    if not title.strip() and not body.strip():
+        raise InvalidArgument(
+            "a callout card needs a title (or at least a body) — a card with no words in it is "
+            "an empty rectangle, which `add_rect` already draws"
+        )
+
+
+def add_callout_card(
+    doc: Document,
+    *,
+    title: str,
+    body: str = "",
+    kind: str = "info",
+    x: float | None = None,
+    y: float | None = None,
+    width: float = _DEFAULT_CARD_W,
+    parent: str | None = None,
+    name: str | None = None,
+    style: Style | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> PlacedCard:
+    """Add a standalone card: an accent bar, a title, and a wrapped body — and NO leader.
+
+    This is the note that is about the picture rather than about one node in it; use
+    ``add_callout`` when there is something to point AT, since a leader that re-anchors itself is
+    the whole reason that call exists.
+
+    The card is as tall as the words it wrapped to, and its ``kind`` (``note``, ``info``,
+    ``warning``, ``success``, ``danger``, or any role a resident theme serves) paints both the
+    card and the accent down its left edge. Omit ``x``/``y`` to stack it under the last facade in
+    the same parent.
+    """
+    if width < _MIN_CARD_W:
+        raise InvalidArgument(
+            f"a callout card needs at least {_MIN_CARD_W:g} of width to fit an accent, its "
+            "padding and a word between them"
+        )
+    _card_words(title, body)
+    spec = CardSpec(title=title, body=body, kind=kind, width=width, auto=x is None and y is None)
+
+    gap = _token(serving_theme(doc, kind), "--gap-node", 24.0)
+    stacked = _stack_below(doc.resolve_parent(parent), gap)
+    at_x = x if x is not None else _ORIGIN
+    at_y = y if y is not None else (_ORIGIN if stacked is None else stacked)
+
+    group = inkex.Group()
+    ref = _place_facade(
+        doc,
+        group,
+        prefix="callout-card",
+        category="container",
+        prim="callout-card",
+        role=kind,
+        parent=parent,
+        name=name,
+        style=style,
+        styles=styles,
+        themed=themed,
+    )
+    group.set("transform", f"translate({_num(at_x)},{_num(at_y)})")
+    _write_card_spec(group, spec)
+    layout = _build_callout_card(doc, group, spec, themed=themed)
+    return PlacedCard(
+        ref=ref,
+        x=at_x,
+        y=at_y,
+        w=layout.w,
+        h=layout.h,
+        lines=len(layout.body_lines),
+        auto=spec.auto,
+    )
+
+
+def edit_callout_card(
+    doc: Document,
+    target: str,
+    *,
+    title: str | None = None,
+    body: str | None = None,
+    kind: str | None = None,
+) -> CardEdit:
+    """Edit a card by its SPEC — new words or a new kind — and re-wrap and re-size it around them.
+
+    A new ``kind`` swaps the role class the group wears, which repaints the card AND its accent
+    together; the card keeps its corner either way, because where a card sits is a composition
+    decision and re-deriving its height is not entitled to move it.
+    """
+    group = doc.resolve(target)
+    spec = read_card_spec(group)
+    if spec is None:
+        raise InvalidArgument(f"{target!r} is not a callout card (no {_CARD_ATTR} spec)")
+    updated = CardSpec(
+        title=title if title is not None else spec.title,
+        body=body if body is not None else spec.body,
+        kind=kind if kind is not None else spec.kind,
+        width=spec.width,
+        auto=spec.auto,
+    )
+    _card_words(updated.title, updated.body)
+    if kind is not None and kind != spec.kind:
+        _swap_role(doc, group, spec.kind, kind)
+    _write_card_spec(group, updated)
+    layout = _build_callout_card(doc, group, updated, themed=_themed_callout(doc, group))
+    return CardEdit(
+        ref=NodeRef(id=str(group.get_id()), tag=str(group.TAG), name=getattr(group, "label", None)),
+        lines=len(layout.body_lines),
+        h=layout.h,
+    )

@@ -44,7 +44,12 @@ that kind's real class, so a variant switch recolours the key along with the pic
 later and the key does not know: call `edit_legend(regenerate=true)`. `add_callout` points a card
 at a node by **id**, not by position — `note` (neutral) · `info` · `warning` · `success` ·
 `danger` — and its leader is re-derived by every `reflow` and `layout_diagram`, so the note stays
-attached to the thing it is about however far that thing moves.
+attached to the thing it is about however far that thing moves. `add_callout_card` is that same
+card standing on its own: it has no leader, so reach for it when the note is about the picture
+rather than about one node in it, and for `add_callout` when there is something to point at.
+`add_table` **measures its own columns** — each is as wide as the widest cell in it, a cell past
+`max_col_width` wraps and takes its row's height with it, and a column whose every body cell is a
+number right-aligns itself without being asked.
 
 ## Text roles
 

@@ -229,12 +229,22 @@ _PARAM_SHAPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("data-pill", "pill", ("x", "y", "width", "height", "smoothness")),
 )
 
-# Facade groups (ops.diagram, ops.chart): (data-* attr, reported kind, text keys, numeric keys,
-# list-of-string keys, verbatim-JSON keys). Their spec IS the node — read it back to see what an
-# add_diagram_* / add_chart call means. A chart's `data` is the one thing too structured to
-# flatten, so it comes back as the object it went in as.
+# Facade groups (ops.diagram, ops.chart, ops.annotate): (data-* attr, reported kind, text keys,
+# numeric keys, list-of-string keys, verbatim-JSON keys, boolean keys). Their spec IS the node —
+# read it back to see what an add_diagram_* / add_chart / add_table call means. A chart's `data`
+# and a table's `rows` are the things too structured to flatten, so they come back as the objects
+# they went in as.
 _FACADES: tuple[
-    tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]], ...
+    tuple[
+        str,
+        str,
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+        tuple[str, ...],
+    ],
+    ...,
 ] = (
     (
         "data-diagram-node",
@@ -243,11 +253,13 @@ _FACADES: tuple[
         ("w", "h"),
         (),
         (),
+        (),
     ),
     (
         "data-diagram-edge",
         "diagram_edge",
         ("source", "target", "kind", "sa", "ta", "route", "label"),
+        (),
         (),
         (),
         (),
@@ -259,6 +271,7 @@ _FACADES: tuple[
         (),
         ("members",),
         (),
+        (),
     ),
     (
         "data-chart",
@@ -267,6 +280,7 @@ _FACADES: tuple[
         ("w", "h"),
         (),
         ("data",),
+        (),
     ),
     (
         "data-legend",
@@ -275,6 +289,7 @@ _FACADES: tuple[
         ("columns",),
         (),
         ("entries",),
+        (),
     ),
     (
         "data-callout",
@@ -283,20 +298,51 @@ _FACADES: tuple[
         ("distance", "max_width"),
         (),
         (),
+        (),
+    ),
+    (
+        "data-callout-card",
+        "callout_card",
+        ("title", "body", "kind"),
+        ("width",),
+        (),
+        (),
+        (),
+    ),
+    (
+        "data-table",
+        "table",
+        ("title",),
+        ("max_col_width", "x_pad"),
+        ("col_align",),
+        ("rows", "header"),
+        ("zebra",),
     ),
 )
 
 
+def _of(value: JsonValue) -> float | None:
+    """A spec's numeric field as a float, or None where the spec deliberately left it out."""
+    if value is None:
+        return None
+    if not isinstance(value, int | float | str):
+        raise TypeError(f"{value!r} is not a number")
+    return float(value)
+
+
 def _read_facade(element: inkex.BaseElement) -> tuple[str, ShapeParams] | None:
     """A facade's stored spec under the same names its add_/edit_ tools use, or None."""
-    for attr, kind, text_keys, number_keys, list_keys, json_keys in _FACADES:
+    for attr, kind, text_keys, number_keys, list_keys, json_keys, bool_keys in _FACADES:
         raw = element.get(attr)
         if raw is None:
             continue
         try:
             spec = json.loads(raw)
             params: ShapeParams = {key: str(spec[key]) for key in text_keys}
-            params.update({key: float(spec[key]) for key in number_keys})
+            # A numeric field may be genuinely absent (a table's `x_pad` means "use the theme's"
+            # when null), and reporting that as null beats reporting the whole spec as corrupt.
+            params.update({key: _of(spec[key]) for key in number_keys})
+            params.update({key: bool(spec[key]) for key in bool_keys})
             params.update({key: [str(item) for item in spec[key]] for key in list_keys})
             for key in json_keys:
                 value = spec[key]

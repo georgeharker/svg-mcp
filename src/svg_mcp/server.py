@@ -204,6 +204,15 @@ LEGENDS & CALLOUTS
   "danger". It wraps the text, places the card off the roomiest side, and draws a LEADER that
   `reflow`/`layout_diagram` re-anchor, so the note stays attached however far the node moves.
   Do NOT hand-place a text box beside a node: that annotation dies at the next layout pass.
+- For a note about the PICTURE rather than about one node — a takeaway, a caveat, a status —
+  `add_callout_card(title, body, kind)`: the same card, no leader, height derived from the words.
+
+TABLES
+- For ANY grid of values use `add_table(rows, header)`, NOT hand-placed text. It measures every
+  column to the widest cell in it, wraps a cell past `max_col_width` and grows its row, and
+  right-aligns a column whose every body cell is a number. Guessed x positions are how a
+  generated table ends up with one column written over the next.
+- `edit_table(target, rows=…)` re-derives it in place, keeping the group's id and position.
 
 EDITING GEOMETRY IN PLACE
 - To change an existing node, edit it IN PLACE — do NOT delete + re-add (that drops its clip,
@@ -3979,6 +3988,226 @@ def edit_callout(
     """
     result = ops.edit_callout(_doc(document_id), target, text=text, kind=kind, side=side)
     return {**result.ref.as_dict(), "lines": result.lines, "replaced": result.replaced}
+
+
+@mcp.tool
+@emits_change
+def add_callout_card(
+    *,
+    document_id: str | None = None,
+    title: str,
+    body: str = "",
+    kind: Literal["note", "info", "warning", "success", "danger"] = "info",
+    x: float | None = None,
+    y: float | None = None,
+    width: float = 240.0,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | float | int | bool | None | list[str]]:
+    """Add a standalone card — accent bar, title, wrapped body — with NO leader.
+
+    This is the note that is about the PICTURE rather than about one node in it: a takeaway, a
+    caveat, a status. When there IS something to point at, use `add_callout` instead — its leader
+    re-anchors itself through every layout pass, which is the whole reason that call exists.
+
+    The height is derived from what the body wrapped to, so never guess one.
+
+    Args:
+        title: The line at the top of the card.
+        body: The sentence under it; wrapped to the width the accent and padding leave. Omit for
+            a title-only card.
+        kind: "note" (neutral), "info", "warning", "success", "danger" — or any role a resident
+            theme serves. It paints the card AND the accent bar down its left edge.
+        x: Left edge; omit to auto-place.
+        y: Top edge; omit to stack under the previous facade in this parent.
+        width: How wide the card is. The only dimension you give it.
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label for the group.
+        style: Inline style on the group (wins over the theme).
+        styles: Extra named styles / theme classes to attach.
+        themed: false = skip the theme's hooks, leaving the card unpainted.
+
+    Returns:
+        The group's {id, tag, name}, plus `auto_styles`, its box {x, y, w, h}, `lines` (what the
+        body wrapped to), and `auto` (false when you placed it).
+    """
+    doc = _doc(document_id)
+    placed = ops.add_callout_card(
+        doc,
+        title=title,
+        body=body,
+        kind=kind,
+        x=x,
+        y=y,
+        width=width,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        styles=styles,
+        themed=themed,
+    )
+    return {
+        **_placed(doc, placed.ref),
+        "x": placed.x,
+        "y": placed.y,
+        "w": placed.w,
+        "h": placed.h,
+        "lines": placed.lines,
+        "auto": placed.auto,
+    }
+
+
+@mcp.tool
+@emits_change
+def edit_callout_card(
+    *,
+    document_id: str | None = None,
+    target: str,
+    title: str | None = None,
+    body: str | None = None,
+    kind: Literal["note", "info", "warning", "success", "danger"] | None = None,
+) -> dict[str, str | float | int | None]:
+    """Edit a callout card — new words or a new kind — re-wrapping and re-sizing it around them.
+
+    The card keeps its corner: where it sits is a composition decision, and re-deriving its height
+    is not entitled to move it. A new `kind` repaints the card and its accent together.
+
+    Args:
+        target: The card group's id or name.
+        title: Replacement title.
+        body: Replacement body ("" leaves a title-only card).
+        kind: New kind (swaps the theme class).
+
+    Returns:
+        {id, tag, name, lines, h} — `h` is the height the words came out to.
+    """
+    result = ops.edit_callout_card(_doc(document_id), target, title=title, body=body, kind=kind)
+    return {**result.ref.as_dict(), "lines": result.lines, "h": result.h}
+
+
+@mcp.tool
+@emits_change
+def add_table(
+    *,
+    document_id: str | None = None,
+    rows: list[list[str]],
+    header: list[str] | None = None,
+    title: str = "",
+    x: float | None = None,
+    y: float | None = None,
+    col_align: list[Literal["left", "right", "center"]] | None = None,
+    max_col_width: float = 220.0,
+    zebra: bool = True,
+    x_pad: float | None = None,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | float | bool | None | list[str] | list[float]]:
+    """Add a table of text — columns MEASURED from the cells, rows sized to what wrapped in them.
+
+    Use this for any grid of values; do NOT hand-place text at guessed x positions, which is how
+    a generated picture ends up with one column written over the next. Every column comes out as
+    wide as the widest thing in it, a cell past `max_col_width` wraps and takes its row's height
+    with it, and a column whose every body cell reads as a number right-aligns itself.
+
+    Args:
+        rows: The body, one list of cells per row. Every row needs the same number of cells —
+            a ragged table is refused, not padded.
+        header: Column names, one per column. Drawn on a washed band with a rule under it.
+        title: A line above the table; "" for none.
+        x: Left edge; omit to auto-place.
+        y: Top edge; omit to stack under the previous facade in this parent.
+        col_align: Per-column "left"/"right"/"center", overruling what the column holds.
+        max_col_width: How wide a column may grow before its cells wrap instead.
+        zebra: Wash every other body row. false for a plain grid.
+        x_pad: Padding each side of a cell's text; omit for the theme's `--pad-cell`.
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label for the group.
+        style: Inline style on the group (wins over the theme).
+        styles: Extra named styles / theme classes to attach.
+        themed: false = skip the theme's hooks, leaving the table unpainted.
+
+    Returns:
+        The group's {id, tag, name}, plus `auto_styles`, the box {x, y, w, h}, `columns` (the
+        width each column came out to) and `col_align` (the alignment each column resolved to).
+    """
+    doc = _doc(document_id)
+    placed = ops.add_table(
+        doc,
+        rows=rows,
+        header=header,
+        title=title,
+        x=x,
+        y=y,
+        col_align=list(col_align) if col_align is not None else None,
+        max_col_width=max_col_width,
+        zebra=zebra,
+        x_pad=x_pad,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        styles=styles,
+        themed=themed,
+    )
+    return {
+        **_placed(doc, placed.ref),
+        "x": placed.x,
+        "y": placed.y,
+        "w": placed.w,
+        "h": placed.h,
+        "columns": placed.columns,
+        "col_align": [str(align) for align in placed.col_align],
+        "auto": placed.auto,
+    }
+
+
+@mcp.tool
+@emits_change
+def edit_table(
+    *,
+    document_id: str | None = None,
+    target: str,
+    rows: list[list[str]] | None = None,
+    header: list[str] | None = None,
+    title: str | None = None,
+    col_align: list[Literal["left", "right", "center"]] | None = None,
+    zebra: bool | None = None,
+) -> dict[str, str | int | None | list[str]]:
+    """Edit a table — new cells, a new header, a new title — and re-measure the whole thing.
+
+    The table is re-derived in place, keeping the group's id, classes and position. New rows do
+    NOT silently re-align a column somebody set by hand: pass `col_align` to change it.
+
+    Args:
+        target: The table group's id or name.
+        rows: Replacement body cells (same shape `add_table` takes).
+        header: Replacement column names; [] removes the header row entirely.
+        title: New title ("" removes it).
+        col_align: New per-column alignments.
+        zebra: Turn the row wash on or off.
+
+    Returns:
+        {id, tag, name, children, col_align} — `children` is how many pieces the rebuild produced.
+    """
+    result = ops.edit_table(
+        _doc(document_id),
+        target,
+        rows=rows,
+        header=header,
+        title=title,
+        col_align=list(col_align) if col_align is not None else None,
+        zebra=zebra,
+    )
+    return {
+        **result.ref.as_dict(),
+        "children": result.children,
+        "col_align": [str(align) for align in result.col_align],
+    }
 
 
 @mcp.tool

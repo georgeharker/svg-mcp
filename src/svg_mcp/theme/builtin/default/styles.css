@@ -79,6 +79,10 @@
   --gap-layer: 90;
   --radius: 6;
   --radius-pill: 999;
+  /* The air a table cell leaves on each side of its text. Its own token rather than --pad-node
+   * because a table's rhythm is horizontal and repeated: padding cells by a node's 12 would make
+   * a five-column table half again as wide as the numbers actually in it. */
+  --pad-cell: 8;
 
   /* --- routing: how far an edge leaves a node before it turns --------- */
   --edge-stub: 12;
@@ -337,6 +341,116 @@
   stroke-width: var(--stroke-width-hairline);
   fill: var(--ink);
   fill-opacity: 0.55;
+}
+
+/* --- callout cards -----------------------------------------------------
+ *
+ * A card is a callout without a leader, so it takes the same five kind classes on its GROUP and
+ * its box is painted by them exactly as a callout's card is. What it adds is an accent bar down
+ * its left edge and a title above its body — three part classes, because all three have to say
+ * something the kind rule cannot: the accent turns the kind's STROKE colour into a fill, and the
+ * two text rules undo the box's fill and stroke the way every other part rule here does.
+ */
+
+/** The accent bar down a card's left edge — the 4px that makes a card read as a card before a
+ * word of it is read. On its own it takes the neutral stroke, which is what a kind no theme gives
+ * an accent to falls back to: a custom kind gets a bar rather than a hole in its edge. */
+.card-accent {
+  fill: var(--stroke);
+  stroke: none;
+}
+
+/** A note card's accent: neutral by design, the same as no accent at all — a note is the kind
+ * that carries no status, and giving it a colour would invent one. */
+.note .card-accent { fill: var(--stroke); }
+/** An info card's accent — the card's own border colour, as a fill. */
+.info .card-accent { fill: var(--stroke-info); }
+/** A warning card's accent. */
+.warning .card-accent { fill: var(--stroke-warning); }
+/** A success card's accent. */
+.success .card-accent { fill: var(--stroke-success); }
+/** A danger card's accent. */
+.danger .card-accent { fill: var(--stroke-danger); }
+
+/** A card's title: what the card is about. Set apart from the body by weight rather than by
+ * colour or size, because the card's wash has already set the whole thing apart from the page. */
+.card-title {
+  fill: var(--ink);
+  fill-opacity: 1;
+  stroke: none;
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/** A card's body — the same size as the text in a leader-callout, because it is the same
+ * sentence with a title over it. */
+.card-body {
+  fill: var(--ink);
+  fill-opacity: 1;
+  stroke: none;
+  font-family: var(--font);
+  font-size: 11px;
+}
+
+/* --- tables ------------------------------------------------------------
+ *
+ * A table is a panel of data laid over the drawing, so it is grounded like a legend rather than
+ * filled like a node. Everything that separates one row from another is a WASH of `--ink` at a
+ * low opacity instead of a grey: the wash inverts for free in the dark variant, where a fixed
+ * near-white row stripe would go opaque and hide the table it is meant to organise.
+ */
+
+/** A table: the group every row is drawn inside, and the panel behind them. Canvas ground with a
+ * hairline edge — the border rect inside inherits both, exactly as a legend's card does. */
+.table {
+  fill: var(--canvas);
+  stroke: var(--stroke);
+  stroke-width: var(--stroke-width-hairline);
+}
+
+/** The band behind the header row. Twice the stripe's wash, so the header outranks the zebra it
+ * sits above without needing a border of its own. */
+.table-header {
+  fill: var(--ink);
+  fill-opacity: 0.06;
+  stroke: none;
+}
+
+/** Every other body row. 3% is about the lightest tint that survives an 8-bit render — enough to
+ * carry the eye across a wide row, not enough to read as data. */
+.table-stripe {
+  fill: var(--ink);
+  fill-opacity: 0.03;
+  stroke: none;
+}
+
+/** The rule under the header: the one line that says "above here is what the columns ARE". */
+.table-rule {
+  stroke: var(--ink);
+  stroke-width: var(--stroke-width-hairline);
+  fill: none;
+}
+
+/** A header cell's text. Told apart from the body by WEIGHT, not size, so both sit on one
+ * rhythm; a part class rather than a `.table text` descendant rule precisely because the header
+ * and the body have to differ (the same reason `.callout-text` is a part class). */
+.table-header-text {
+  fill: var(--ink);
+  fill-opacity: 1;
+  stroke: none;
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/** A body cell's text. */
+.table-cell {
+  fill: var(--ink);
+  fill-opacity: 1;
+  stroke: none;
+  font-family: var(--font);
+  font-size: 11px;
 }
 
 /* --- text roles --------------------------------------------------------

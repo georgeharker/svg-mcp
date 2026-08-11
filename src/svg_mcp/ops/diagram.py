@@ -76,9 +76,18 @@ _CONTAINER_ATTR = "data-diagram-container"
 _CHART_ATTR = "data-chart"
 _LEGEND_ATTR = "data-legend"
 _CALLOUT_ATTR = "data-callout"
+_TABLE_ATTR = "data-table"
+_CARD_ATTR = "data-callout-card"
 # What a new auto-placed facade stacks below: another node, a chart, or an annotation. An edge is
 # routed and a container is fitted, so neither takes part in the flow.
-_STACKABLE_ATTRS: tuple[str, ...] = (_NODE_ATTR, _CHART_ATTR, _LEGEND_ATTR, _CALLOUT_ATTR)
+_STACKABLE_ATTRS: tuple[str, ...] = (
+    _NODE_ATTR,
+    _CHART_ATTR,
+    _LEGEND_ATTR,
+    _CALLOUT_ATTR,
+    _TABLE_ATTR,
+    _CARD_ATTR,
+)
 # The one arrowhead every edge shares, marked so it is found again without trusting its id.
 _ARROW_ATTR = "data-diagram-arrow"
 _ARROW_ID = "diagram-arrow"
