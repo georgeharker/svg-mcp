@@ -593,3 +593,22 @@ def test_a_themeless_diagram_renders_its_nodes_and_its_edge() -> None:
     assert isinstance(on_edge, tuple)
     for channel, expected in zip(on_edge[:3], (91, 102, 114), strict=True):
         assert abs(channel - expected) <= 2  # --stroke-strong, via .default-data (antialiased)
+
+
+def test_reflow_rebakes_the_label_halo_after_a_variant_switch() -> None:
+    doc = _doc()
+    a = ops.add_diagram_node(doc, kind="service", label="A", x=40, y=40)
+    b = ops.add_diagram_node(doc, kind="service", label="B", x=300, y=40)
+    edge = ops.add_diagram_edge(doc, source=a.ref.id, target=b.ref.id, kind="data", label="hop")
+
+    label = next(t for t in doc.resolve(edge.ref.id) if t.TAG == "text")
+    light = doc.theme_meta["default"].tokens["--canvas"]
+    assert label.style["stroke"] == light
+
+    ops.set_theme_variant(doc, "dark")
+    assert label.style["stroke"] == light  # pinned: the switch alone must not touch it
+
+    ops.reflow(doc)
+    dark = doc.theme_meta["default"].tokens["--canvas"]
+    assert dark != light
+    assert label.style["stroke"] == dark  # the reflow is the re-bake

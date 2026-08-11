@@ -674,6 +674,15 @@ def _set_label(
         existing.text = text
         existing.set("x", _num(at[0]))
         existing.set("y", _num(at[1]))
+        # Re-bake the structural style: the halo is an inline (pinned) prop, so a variant
+        # switch only reaches it through the next reflow — this is that re-bake.
+        style = existing.style
+        for key, value in _label_style(halo).items():
+            style[key] = value
+        if halo is None:
+            for key in ("paint-order", "stroke", "stroke-width"):
+                style.pop(key, None)
+        existing.style = style
     if dy is not None:
         existing.set("dy", _num(dy))
 
