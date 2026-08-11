@@ -49,3 +49,23 @@ Everything tunable is a `:root` token — palette, stroke weights, dash patterns
 the layout spacings (`--pad-node`, `--gap-node`, `--gap-rank`, `--radius`). Copy this theme's
 directory and edit the tokens to make a house style of your own; the `dark` variant shows how
 far a token overlay alone can take you.
+
+## Charts
+
+`bar` (plain or grouped) · `line` (multi-series, optional points and area) · `donut` · `scatter`
+· `sparkline`
+
+`add_chart` takes the data and derives everything else: ticks on a 1/2/5 ladder, margins measured
+from the tick labels those produce, and the marks themselves. **Series order is the house
+palette** — series 1 is `--series-1`, series 2 is `--series-2`, and so on to eight before it
+repeats — so two charts of the same series in the same document agree on colour without anyone
+saying so. Order the series meaningfully and that agreement is free; shuffle them between charts
+and you have quietly told the reader they are looking at different things.
+
+Scales are linear and the x axis is either categorical (`bar`) or numeric (`line`, `scatter`).
+There is no log scale, no stacking, no error bar: those are different promises about what the
+picture means, and a facade that faked them would be worse than not having them.
+
+A `sparkline` is deliberately bare — no axes, no ticks, no title, just the shape of the trend,
+height-normalized. It is meant to sit inline next to the number it qualifies, and it will pair
+with a stat panel once there is one.

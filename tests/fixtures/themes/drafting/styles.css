@@ -1,0 +1,28 @@
+:root {
+  --paper: #0b2e52;
+  --line: #7fd4ff;
+}
+
+/** A chart, drafting-style. */
+.chart { font-family: monospace }
+
+/** Axes, drawn in the one line colour this theme has. */
+.axis { stroke: var(--line); stroke-width: 1; fill: none }
+
+/** Gridlines. */
+.gridline { stroke: #1b4a7a; stroke-width: 1; fill: none }
+
+/** Tick labels. */
+.tick-label { fill: var(--line); stroke: none; font-size: 10px }
+
+/** Axis titles. */
+.axis-label { fill: var(--line); stroke: none; font-size: 11px }
+
+/** A chart title. */
+.chart-title { fill: #ffffff; stroke: none; font-size: 13px }
+
+/** Series one. */
+.series-1 { fill: #7fd4ff; stroke: #7fd4ff }
+
+/** Series two. */
+.series-2 { fill: #ffd47f; stroke: #ffd47f }

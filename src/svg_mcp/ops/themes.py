@@ -393,26 +393,59 @@ def resolve_style_ref(doc: Document, ref: str) -> str:
     raise InvalidArgument(f"no style named {name!r}; available: {_available_styles(doc)}")
 
 
-def _fallback_hook(doc: Document, role: str) -> str | None:
-    """Serve a role no resident theme was asked to cover, from the bundled ``default`` theme.
+_FALLBACK_CATEGORIES: frozenset[str] = frozenset({"chart"})
+"""Categories the bundled default may be summoned for, not just roles.
 
-    Materialized on FIRST NEED and with no routes at all: it dresses the roles a document
+A category fallback is only defensible where the category has no unthemed tradition to protect.
+``shape``/``text``/``connector``/``container``/``image`` all have one — a plain ``add_rect`` must
+keep rendering as a plain rect — and the bundled default deliberately defines no rule for them.
+A chart is the other case: there is no such thing as an unstyled chart, so a themeless document
+gets the default's ``.chart`` rather than an unreadable pile of black-on-black marks. Naming the
+categories here (rather than asking the theme) keeps every unthemed primitive off the disk-read
+path this fallback would otherwise take on every single construction.
+"""
+
+
+def _fallback_theme(doc: Document, suffix: str) -> str | None:
+    """The bundled ``default`` theme, materialized on FIRST NEED, if it defines ``-{suffix}``.
+
+    Installed with no routes at all: it dresses the roles (and the chart category) a document
     actually names and nothing else, so a document that never names one stays exactly as it
     would be with no theme engine in play. A project or user theme called ``default`` shadows
-    the bundled one, the same way it does for an explicit ``load_theme``.
+    the bundled one, the same way it does for an explicit ``load_theme``. Returns the NAME of
+    the theme that answered, so a caller can go on to ask it for its other hooks too.
     """
     if DEFAULT_THEME in doc.theme_meta:
-        return _hook(doc, DEFAULT_THEME, role)
+        return DEFAULT_THEME if _hook(doc, DEFAULT_THEME, suffix) is not None else None
     paths = default_search_paths()
     theme = _read_theme(DEFAULT_THEME, paths)
     if theme.name in doc.theme_meta:
-        return _hook(doc, theme.name, role)
+        return theme.name if _hook(doc, theme.name, suffix) is not None else None
     result = materialize(theme)
-    hook = f"{theme.name}-{role}"
-    if hook not in result.class_names:
+    if f"{theme.name}-{suffix}" not in result.class_names:
         return None  # nothing to serve, so nothing is installed either
     _install(doc, theme, result, search_paths=paths, routes=())
-    return hook
+    return theme.name
+
+
+def _fallback_hook(doc: Document, role: str) -> str | None:
+    """Serve a role no resident theme was asked to cover, from the bundled ``default`` theme."""
+    name = _fallback_theme(doc, role)
+    return None if name is None else _hook(doc, name, role)
+
+
+def serving_theme_name(doc: Document, key: str) -> str | None:
+    """Which RESIDENT theme's classes a facade's parts should wear for ``key``.
+
+    Whoever is routed for the key; failing that, whichever resident theme actually defines a
+    class for it — which is how the bundled default, installed route-free by the fallback above,
+    is found again when a chart facade goes on to dress its axes and series. Nothing is loaded
+    here: a key nothing resident answers for gets None, and the parts stay bare.
+    """
+    routed = doc.theme_routing.get(key)
+    if routed is not None:
+        return routed
+    return next((name for name in doc.theme_meta if _hook(doc, name, key) is not None), None)
 
 
 def _fallback_roles(doc: Document) -> list[str]:
@@ -479,11 +512,14 @@ def apply_auto_styles(
 
     A role no theme was routed for at all falls back to the bundled ``default`` theme; a role the
     theme serving this category simply doesn't define is still an error, since that routing was
-    a deliberate choice.
+    a deliberate choice. An UNROUTED category falls back the same way, but only for the handful
+    of categories in ``_FALLBACK_CATEGORIES`` — see there for why that is not all of them.
     """
     classes: list[str] = []
     category_theme = doc.theme_routing.get(category) if category is not None else None
     if themed and category is not None:
+        if category_theme is None and category in _FALLBACK_CATEGORIES:
+            category_theme = _fallback_theme(doc, category)
         suffixes = [category, f"{category}--{prim}"] if prim else [category]
         classes.extend(
             hook for hook in (_hook(doc, category_theme, s) for s in suffixes) if hook is not None

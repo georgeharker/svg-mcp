@@ -89,8 +89,9 @@ WORKFLOW
    document. You may then omit `document_id` on later calls to target the active one.
 2. Add content: `add_rect`/`add_circle`/`add_path`/`add_text`/… Each returns the new node's
    `{id, tag, name}` — keep the `id` (or give it a `name`) to refer back to the node.
-   Drawing a box-arrow diagram? Use the DIAGRAM facades below, not raw shapes. Want a
-   consistent look? `load_theme` first (THEMES below).
+   Drawing a box-arrow diagram? Use the DIAGRAM facades below, not raw shapes. Plotting
+   numbers? `add_chart` (CHARTS below). Want a consistent look? `load_theme` first
+   (THEMES below).
 3. Organize with `create_layer` / `create_group`; nest by passing a parent id.
 4. `outline(document_id)` shows the current tree; `render_document(document_id)` returns the
    rendered PNG so you can visually verify. Iterate.
@@ -182,6 +183,17 @@ DIAGRAMS (box-arrow)
   layout is opt-in and won't run again behind your back.
 - Edit in place: `edit_diagram_node`/`edit_diagram_edge`/`edit_diagram_container` patch
   label/kind/route/members; `get_params` reads any facade's spec back.
+
+CHARTS
+- For ANY plot of numbers — bar, line, donut, scatter, sparkline — use `add_chart(kind, data)`,
+  NOT hand-placed rects and polylines. It picks round tick values, MEASURES the margins from
+  the tick labels so nothing is clipped, and paints each series from the theme's palette in
+  series order. It works with no theme loaded: charts are the one category the bundled default
+  styles outright.
+- Scales are linear; x is categorical (`bar`) or numeric (`line`/`scatter`). No log scales, no
+  stacking, no error bars — if you need one, the answer is a different picture, not a hack.
+- `edit_chart(target, data=…)` re-derives the whole plot in place, keeping the group's id,
+  classes and position. `get_params` hands the data back exactly as it went in.
 
 EDITING GEOMETRY IN PLACE
 - To change an existing node, edit it IN PLACE — do NOT delete + re-add (that drops its clip,
@@ -3610,6 +3622,134 @@ def reflow(
         {edges_rerouted, skipped, containers_refit, skipped_containers}.
     """
     return ops.reflow(_doc(document_id), edges=edges, containers=containers, scope=scope)
+
+
+# --- chart facades ---------------------------------------------------------
+
+
+@mcp.tool
+@emits_change
+def add_chart(
+    *,
+    document_id: str | None = None,
+    kind: Literal["bar", "line", "donut", "scatter", "sparkline"],
+    data: ops.ChartData,
+    x: float | None = None,
+    y: float | None = None,
+    width: float | None = None,
+    height: float | None = None,
+    title: str | None = None,
+    x_label: str | None = None,
+    y_label: str | None = None,
+    parent: str | None = None,
+    name: str | None = None,
+    style: ShapeStyle | None = None,
+    styles: list[str] | None = None,
+    themed: bool = True,
+) -> dict[str, str | float | None | list[str]]:
+    """Add a CHART — axes, scales, marks and labels all derived from the data you pass.
+
+    Give it the numbers and it does the rest: round tick values off the 1/2/5 ladder, margins
+    MEASURED from the tick labels those produce (so a six-digit axis is not clipped), and one
+    themed colour per series in series order. It works in a document that loaded no theme —
+    charts are the one category the bundled default styles outright.
+
+    The shape of `data` depends on `kind`:
+      - bar: {categories: [str], series: [{name, values: [float]}]} — one value per category
+        per series; more than one series draws them side by side within each category.
+      - line: {series: [{name, points: [[x, y]]}], points: bool, area: bool}
+      - scatter: {series: [{name, points: [[x, y]]}]}
+      - donut: {slices: [{label, value}]} — values must be positive.
+      - sparkline: {values: [float]} — a bare trend line, no axes/ticks/title, 120x32 by default.
+
+    Scales are linear and x is categorical (bar) or numeric (line/scatter). No log scales, no
+    stacking, no error bars. Edit it later with `edit_chart`, which re-derives the whole picture.
+
+    Args:
+        kind: Which plot to draw.
+        data: The numbers, shaped as above.
+        x: Left edge; omit to auto-place.
+        y: Top edge; omit to stack under the previous chart or diagram node in this parent.
+        width: Chart width including its margins (default 320; 120 for a sparkline).
+        height: Chart height including its margins (default 200; 32 for a sparkline).
+        title: Centered above the plot. Ignored by `sparkline`.
+        x_label: What the x axis measures. Ignored by `donut` and `sparkline`.
+        y_label: What the y axis measures; drawn rotated. Ignored by `donut` and `sparkline`.
+        parent: Group/layer id (or name); omit for the document root.
+        name: Friendly label for the group.
+        style: Inline style on the group (wins over the theme).
+        styles: Extra named styles / theme classes to attach.
+        themed: false = skip the theme's automatic hooks, leaving the chart unpainted.
+
+    Returns:
+        The group's {id, tag, name}, plus `auto_styles` and the placed {x, y, w, h}.
+    """
+    doc = _doc(document_id)
+    placed = ops.add_chart(
+        doc,
+        kind=kind,
+        data=data,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+        title=title,
+        x_label=x_label,
+        y_label=y_label,
+        parent=parent,
+        name=name,
+        style=_style(style),
+        styles=styles,
+        themed=themed,
+    )
+    return {**_placed(doc, placed.ref), "x": placed.x, "y": placed.y, "w": placed.w, "h": placed.h}
+
+
+@mcp.tool
+@emits_change
+def edit_chart(
+    *,
+    document_id: str | None = None,
+    target: str,
+    data: ops.ChartData | None = None,
+    title: str | None = None,
+    x_label: str | None = None,
+    y_label: str | None = None,
+    width: float | None = None,
+    height: float | None = None,
+) -> dict[str, str | int | None]:
+    """Edit a chart by its SPEC — new data, new labels, a new box — and re-derive the picture.
+
+    The chart's contents are rebuilt from scratch, not patched: ticks, margins and marks are a
+    pure function of the data and the box, so re-deriving them is both cheap and the only way to
+    stay honest about the numbers. The GROUP keeps its id, its classes and its position, so
+    anything referring to the chart still refers to it.
+
+    `data` must fit the chart's existing `kind` — an edit cannot turn a bar into a donut.
+
+    Args:
+        target: The chart group's id or name.
+        data: Replacement data, in the same shape `add_chart` took for this kind.
+        title: New title ("" removes it).
+        x_label: New x axis title ("" removes it).
+        y_label: New y axis title ("" removes it).
+        width: New width.
+        height: New height.
+
+    Returns:
+        {id, tag, name, children} — `children` is how many top-level pieces the rebuild produced.
+    """
+    result = ops.edit_chart(
+        _doc(document_id),
+        target,
+        data=data,
+        title=title,
+        x_label=x_label,
+        y_label=y_label,
+        width=width,
+        height=height,
+    )
+    return {**result.ref.as_dict(), "children": result.children}
 
 
 @mcp.tool

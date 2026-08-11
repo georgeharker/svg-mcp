@@ -4,10 +4,15 @@
  * hook, a doc comment on every rule (a comment opening with a double star documents the rule
  * that follows it, and that text is what `list_styles` shows the agent).
  *
- * There are deliberately NO bare category rules here (.shape, .text, .connector, .image).
+ * There are deliberately NO bare category rules here for .shape, .text, .connector or .image.
  * A theme that paints every rect in every document would make `add_rect` mean something the
  * caller never asked for, so this one styles only what was NAMED: a role. Plain primitives
  * render exactly as they would with no theme at all.
+ *
+ * `.chart` is the single exception, and it earns it: a chart facade is never a primitive
+ * somebody drew by hand, and an unstyled one is an unreadable pile of black marks. Serving
+ * that category is the difference between a themeless document getting a chart and getting a
+ * mess, so the category is served and says so in theme.toml.
  */
 
 :root {
@@ -63,6 +68,28 @@
   /* --- routing: how far an edge leaves a node before it turns --------- */
   --edge-stub: 12;
   --edge-radius: 8;
+
+  /* --- charts --------------------------------------------------------- */
+
+  /* The categorical series palette, in the order a chart hands it out. Adapted from Paul
+   * Tol's qualitative "bright" set (personal.sron.nl/~pault) — eight hues chosen to stay
+   * distinguishable for the common colour-vision deficiencies AND to separate in lightness,
+   * so a printed or greyscaled chart does not collapse into one grey. Muted enough to sit
+   * next to the diagram surfaces without shouting over them. Do not reorder: series 1 is what
+   * a single-series chart and every sparkline gets, so it has to be the safest of the eight. */
+  --series-1: #4477aa;
+  --series-2: #ee6677;
+  --series-3: #228833;
+  --series-4: #ccbb44;
+  --series-5: #66ccee;
+  --series-6: #aa3377;
+  --series-7: #bbbbbb;
+  --series-8: #44aa99;
+
+  /* Gridlines: lighter than --stroke, because a grid is a ruler and not a mark. */
+  --chart-grid: #dde1e6;
+  /* The donut's hole, as a fraction of its outer radius. A ratio, so it carries no unit. */
+  --donut-hole: 0.6;
 }
 
 /* --- diagram node kinds ------------------------------------------------
@@ -254,3 +281,88 @@
   font-family: var(--font-mono);
   font-size: var(--size-label);
 }
+
+/* --- charts ------------------------------------------------------------
+ *
+ * The one category this theme serves outright (see the header). `.chart` is worn by the facade
+ * GROUP, so everything inside it inherits the type; the part rules below then say what each
+ * piece of the plot is. Every `.series-N` sets BOTH fill and stroke to the same token — a bar
+ * and a donut wedge are fills, a line is a stroke, and one class has to serve both without the
+ * facade having to know which kind it is drawing.
+ */
+
+/** A chart facade: the group every plot is built inside. Sets the type the whole plot reads in. */
+.chart {
+  font-family: var(--font);
+}
+
+/** Bars: axis-aligned rectangles and a rectangular grid, so nothing here wants antialiasing —
+ * snapping the edges to the pixel grid is what stops a 1px gridline rendering as two grey ones
+ * and a bar's edge as a soft smear. It is a per-kind call: the round marks of the other plots
+ * would look ragged under the same rule. */
+.chart--bar {
+  shape-rendering: crispEdges;
+}
+
+/** A sparkline: a bare trend line with no frame, drawn a little heavier so it survives at 32px. */
+.chart--sparkline {
+  stroke-width: var(--stroke-width);
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/** The two axis lines. Ink, hairline — the frame of the plot, not part of the data. */
+.axis {
+  stroke: var(--ink);
+  stroke-width: var(--stroke-width-hairline);
+  fill: none;
+}
+
+/** A horizontal gridline at a tick. Light enough to read behind the data, never in front. */
+.gridline {
+  stroke: var(--chart-grid);
+  stroke-width: var(--stroke-width-hairline);
+  fill: none;
+}
+
+/** A tick label: the number on the y axis, the category on the x. Small and muted. */
+.tick-label {
+  fill: var(--ink-muted);
+  stroke: none;
+  font-family: var(--font);
+  font-size: 10px;
+}
+
+/** An axis title: what the axis MEASURES. One step up from the ticks it names. */
+.axis-label {
+  fill: var(--ink-muted);
+  stroke: none;
+  font-family: var(--font);
+  font-size: 11px;
+}
+
+/** A chart's title, centered above its plot. The one piece of a chart set in full ink. */
+.chart-title {
+  fill: var(--ink);
+  stroke: none;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/** Series 1 — the house first colour: single-series bars, lines, and every sparkline. */
+.series-1 { fill: var(--series-1); stroke: var(--series-1); }
+/** Series 2. */
+.series-2 { fill: var(--series-2); stroke: var(--series-2); }
+/** Series 3. */
+.series-3 { fill: var(--series-3); stroke: var(--series-3); }
+/** Series 4. */
+.series-4 { fill: var(--series-4); stroke: var(--series-4); }
+/** Series 5. */
+.series-5 { fill: var(--series-5); stroke: var(--series-5); }
+/** Series 6. */
+.series-6 { fill: var(--series-6); stroke: var(--series-6); }
+/** Series 7. */
+.series-7 { fill: var(--series-7); stroke: var(--series-7); }
+/** Series 8 — the last before the palette repeats. Past eight, re-think the chart. */
+.series-8 { fill: var(--series-8); stroke: var(--series-8); }

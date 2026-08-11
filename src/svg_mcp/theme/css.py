@@ -19,8 +19,8 @@ from tinycss2.ast import Node as CssNode
 
 from ..model.errors import ThemeError
 
-CATEGORIES: Final[tuple[str, ...]] = ("shape", "text", "connector", "container", "image")
-"""The five node categories a theme may hook. Fixed — routing depends on the closed set."""
+CATEGORIES: Final[tuple[str, ...]] = ("shape", "text", "connector", "container", "image", "chart")
+"""The six node categories a theme may hook. Fixed — routing depends on the closed set."""
 
 # tinycss2 token type -> what an author would call it, for the rejection message.
 _REJECTED_TOKENS: Final[dict[str, str]] = {

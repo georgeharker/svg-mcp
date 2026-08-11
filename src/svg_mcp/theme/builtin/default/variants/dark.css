@@ -17,3 +17,19 @@
   --stroke: #5b6672;
   --stroke-strong: #8b96a3;
 }
+
+/* Charts: the series palette lifted for a dark ground. Same eight hues, same ORDER, raised in
+ * lightness so each still reads against #14171a — a categorical set only works if the reader
+ * can tell two of them apart, and the light-ground values go muddy here. */
+:root {
+  --series-1: #77aadd;
+  --series-2: #ff8899;
+  --series-3: #44bb66;
+  --series-4: #ddcc55;
+  --series-5: #88ddff;
+  --series-6: #dd77aa;
+  --series-7: #cccccc;
+  --series-8: #66ccbb;
+
+  --chart-grid: #2b3138;
+}

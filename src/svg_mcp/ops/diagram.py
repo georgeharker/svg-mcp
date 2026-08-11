@@ -70,6 +70,13 @@ SHAPES: tuple[str, ...] = ("rect", "squircle", "pill", "polygon", "circle", "ell
 _NODE_ATTR = "data-diagram-node"
 _EDGE_ATTR = "data-diagram-edge"
 _CONTAINER_ATTR = "data-diagram-container"
+# The chart facade's spec lives here. It is declared alongside its siblings (and not in
+# ``ops.chart``, which imports this module) so the ONE list of what auto-placement stacks under
+# can name it without a cycle.
+_CHART_ATTR = "data-chart"
+# What a new auto-placed facade stacks below: another node, or a chart. An edge is routed and a
+# container is fitted, so neither takes part in the flow.
+_STACKABLE_ATTRS: tuple[str, ...] = (_NODE_ATTR, _CHART_ATTR)
 # The one arrowhead every edge shares, marked so it is found again without trusting its id.
 _ARROW_ATTR = "data-diagram-arrow"
 _ARROW_ID = "diagram-arrow"
@@ -769,15 +776,19 @@ def _set_label(
 # --- nodes -------------------------------------------------------------------
 
 
-def _diagram_nodes(parent: BaseElement) -> Iterator[BaseElement]:
-    return (child for child in parent if child.get(_NODE_ATTR) is not None)
+def _stackable(parent: BaseElement) -> Iterator[BaseElement]:
+    return (
+        child
+        for child in parent
+        if any(child.get(attr) is not None for attr in _STACKABLE_ATTRS)
+    )
 
 
 def _stack_below(parent: BaseElement, gap: float) -> float | None:
-    """The y a new node stacks at: under the lowest diagram node already in this parent."""
+    """The y a new facade stacks at: under the lowest stackable facade already in this parent."""
     bottoms = [
         box[1] + box[3]
-        for box in (_bbox_xywh(node) for node in _diagram_nodes(parent))
+        for box in (_bbox_xywh(node) for node in _stackable(parent))
         if box is not None
     ]
     return max(bottoms) + gap if bottoms else None

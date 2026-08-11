@@ -2,6 +2,22 @@
 
 from __future__ import annotations
 
+from .chart import (
+    BarData,
+    ChartData,
+    ChartEdit,
+    ChartKind,
+    DonutData,
+    LineData,
+    PlacedChart,
+    PointSeries,
+    ScatterData,
+    Series,
+    Slice,
+    SparklineData,
+    add_chart,
+    edit_chart,
+)
 from .construct import (
     add_circle,
     add_ellipse,
@@ -206,6 +222,21 @@ __all__ = [
     "edit_diagram_container",
     "layout_diagram",
     "reflow",
+    # chart facades
+    "BarData",
+    "ChartData",
+    "ChartEdit",
+    "ChartKind",
+    "DonutData",
+    "LineData",
+    "PlacedChart",
+    "PointSeries",
+    "ScatterData",
+    "Series",
+    "Slice",
+    "SparklineData",
+    "add_chart",
+    "edit_chart",
     # paths
     "add_arc",
     "add_star",

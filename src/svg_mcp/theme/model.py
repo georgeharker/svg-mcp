@@ -11,8 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .css import Rule
 
-Category = Literal["shape", "text", "connector", "container", "image"]
-"""The five node categories a theme may serve. Closed set — routing depends on it."""
+Category = Literal["shape", "text", "connector", "container", "image", "chart"]
+"""The six node categories a theme may serve. Closed set — routing depends on it."""
 
 
 class Serves(BaseModel):

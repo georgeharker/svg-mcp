@@ -13,8 +13,21 @@ from .outline import _bbox_xywh, _is_visual, _kind
 type TransformEntry = dict[str, str | None | list[float]]
 # A node's geometry in a chosen coordinate frame.
 type Geometry = dict[str, str | float | list[float] | dict[str, str]]
+# Anything a facade spec may carry verbatim — a chart's series and points are structured data,
+# not a flat scalar, and flattening them would be a worse answer than reporting the JSON.
+type JsonValue = str | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 # A shape's editable settings under the add_*/edit_* parameter names.
-type ParamValue = str | float | int | bool | list[str] | list[float] | list[list[float]] | None
+type ParamValue = (
+    str
+    | float
+    | int
+    | bool
+    | list[str]
+    | list[float]
+    | list[list[float]]
+    | dict[str, JsonValue]
+    | None
+)
 type ShapeParams = dict[str, ParamValue]
 # One resident theme: its name, the variant in force, and the route keys it serves.
 type ThemeResidencyInfo = dict[str, str | list[str] | None]
@@ -215,20 +228,26 @@ _PARAM_SHAPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("data-pill", "pill", ("x", "y", "width", "height", "smoothness")),
 )
 
-# Facade groups (ops.diagram): (data-* attr, reported kind, text keys, numeric keys, list keys).
-# Their spec IS the node — read it back to see what an add_diagram_* / edit_diagram_* call means.
-_FACADES: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...]], ...] = (
+# Facade groups (ops.diagram, ops.chart): (data-* attr, reported kind, text keys, numeric keys,
+# list-of-string keys, verbatim-JSON keys). Their spec IS the node — read it back to see what an
+# add_diagram_* / add_chart call means. A chart's `data` is the one thing too structured to
+# flatten, so it comes back as the object it went in as.
+_FACADES: tuple[
+    tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]], ...
+] = (
     (
         "data-diagram-node",
         "diagram_node",
         ("kind", "label", "shape"),
         ("w", "h"),
         (),
+        (),
     ),
     (
         "data-diagram-edge",
         "diagram_edge",
         ("source", "target", "kind", "sa", "ta", "route", "label"),
+        (),
         (),
         (),
     ),
@@ -238,13 +257,22 @@ _FACADES: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...
         ("kind", "label"),
         (),
         ("members",),
+        (),
+    ),
+    (
+        "data-chart",
+        "chart",
+        ("kind", "title", "x_label", "y_label"),
+        ("w", "h"),
+        (),
+        ("data",),
     ),
 )
 
 
 def _read_facade(element: inkex.BaseElement) -> tuple[str, ShapeParams] | None:
-    """A diagram facade's stored spec under the same names its add_/edit_ tools use, or None."""
-    for attr, kind, text_keys, number_keys, list_keys in _FACADES:
+    """A facade's stored spec under the same names its add_/edit_ tools use, or None."""
+    for attr, kind, text_keys, number_keys, list_keys, json_keys in _FACADES:
         raw = element.get(attr)
         if raw is None:
             continue
@@ -253,6 +281,11 @@ def _read_facade(element: inkex.BaseElement) -> tuple[str, ShapeParams] | None:
             params: ShapeParams = {key: str(spec[key]) for key in text_keys}
             params.update({key: float(spec[key]) for key in number_keys})
             params.update({key: [str(item) for item in spec[key]] for key in list_keys})
+            for key in json_keys:
+                value = spec[key]
+                if not isinstance(value, dict):
+                    return None
+                params[key] = value
         except (ValueError, TypeError, KeyError):
             return None  # corrupt spec → report the group as the plain <g> it is
         if "auto" in spec:
@@ -338,8 +371,9 @@ def get_params(doc: Document, target: str) -> dict[str, str | bool | ShapeParams
     """A node's current settings under the SAME names the ``add_*``/``edit_*`` tools use, + style.
 
     Lets you read a shape, then edit it with matching params. Recognizes parametric stars/arcs,
-    variable-width paths, squircles, and the diagram facades (a node's kind/label/shape/size, an
-    edge's endpoints/anchors/route) — all reported with ``parametric: true``; for basic
+    variable-width paths, squircles, the diagram facades (a node's kind/label/shape/size, an
+    edge's endpoints/anchors/route) and charts (kind, labels, box, and the ``data`` they were
+    drawn from, verbatim) — all reported with ``parametric: true``; for basic
     shapes returns their geometry attributes; for a plain path, its ``d``. ``style`` is the node's
     current presentation properties (fill, stroke, …).
 

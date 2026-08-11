@@ -1,0 +1,17 @@
+# Blueprint: subtle blue boxes with a confident border, for architecture diagrams.
+name = "blueprint"
+
+[serves]
+roles = ["service", "datastore", "queue", "external", "decision", "note"]
+
+# Same shape vocabulary as the bundled default — blueprint restyles, it doesn't reshape.
+[kinds]
+service = "squircle"
+datastore = "rect"
+queue = "pill"
+external = "rect"
+decision = "polygon"
+note = "rect"
+
+[variants]
+dark = "variants/dark.css"

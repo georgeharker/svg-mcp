@@ -1,0 +1,6 @@
+# A second theme that serves the chart category, so a test can paste it over a chart the bundled
+# default already dressed and check the suffix translation carries every part across.
+name = "drafting"
+
+[serves]
+categories = ["chart"]

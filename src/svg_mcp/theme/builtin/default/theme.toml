@@ -1,9 +1,14 @@
-# The reference theme. It is roles-only by design: a vocabulary of diagram kinds, edge kinds,
-# and text roles, with NO bare category rule (see styles.css) — a plain rect stays a plain
-# rect, so serving categories would be an empty claim and is deliberately not made.
+# The reference theme. It is almost entirely roles: a vocabulary of diagram kinds, edge kinds,
+# and text roles, with no bare .shape/.text/.connector/.container/.image rule (see styles.css)
+# — a plain rect stays a plain rect, so serving those categories would be an empty claim and is
+# deliberately not made. `chart` is the one exception, and an honest one: there is no such thing
+# as an unstyled chart, so the category IS served and a themeless document still gets axes it
+# can read.
 name = "default"
 
 [serves]
+categories = ["chart"]
+
 roles = [
   # text roles
   "title",
