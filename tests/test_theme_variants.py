@@ -346,12 +346,15 @@ def test_a_role_the_fallback_cannot_serve_names_what_it_offers(
     assert doc.theme_meta == {}  # a role it cannot serve installs nothing
 
 
-def test_a_routed_category_still_refuses_a_role_it_does_not_define() -> None:
+def test_a_routed_category_does_not_block_the_fallback_for_roles_it_never_claimed() -> None:
+    # house holds `shape` but never claimed `service`; claiming a CATEGORY is not a claim on
+    # every role inside it, so the bundled default serves the kind (the recorded contract).
     doc = _doc()
-    _load(doc, "house")  # house holds `shape`, so this is a routing decision, not a gap
-    with pytest.raises(InvalidArgument, match="role 'service'"):
-        ops.add_rect(doc, x=0, y=0, width=10, height=10, role="service")
-    assert "default" not in doc.theme_meta
+    _load(doc, "house")
+    ref = ops.add_rect(doc, x=0, y=0, width=10, height=10, role="service")
+    classes = doc.resolve(ref.id).get("class", "")
+    assert "default-service" in classes.split()
+    assert "house-shape" in classes.split()  # the category hook still comes from house
 
 
 def test_the_code_role_resolves_to_the_monospace_family(

@@ -540,21 +540,21 @@ def resolve_auto_styles(
             hook for hook in (_hook(doc, category_theme, s) for s in suffixes) if hook is not None
         )
     if themed and role is not None:
-        role_theme = doc.theme_routing.get(role) or category_theme
-        hook = _hook(doc, role_theme, role)
-        if hook is None and role_theme is None:
+        # Routed theme first, then the category's theme, then the bundled default — the
+        # recorded contract is that the default serves any role NO resident theme was routed
+        # for, and a theme claiming a CATEGORY is not a claim on every role inside it.
+        role_theme = doc.theme_routing.get(role)
+        hook = _hook(doc, role_theme, role) if role_theme is not None else None
+        if hook is None:
+            hook = _hook(doc, category_theme, role)
+        if hook is None:
             hook = _fallback_hook(doc, role)
-            if hook is None:
-                offered = _fallback_roles(doc)
-                raise InvalidArgument(
-                    f"no theme is routed for role {role!r} and the fallback theme does not "
-                    f"define it; the fallback offers: {offered or '(none)'}"
-                )
         if hook is None:
             served = sorted(key for key in doc.theme_routing if key not in CATEGORIES)
+            offered = _fallback_roles(doc)
             raise InvalidArgument(
-                f"no resident theme defines a style for role {role!r}; "
-                f"roles currently served: {served or '(none)'}"
+                f"no theme defines a style for role {role!r}; residents serve: "
+                f"{served or '(none)'}; the fallback theme offers: {offered or '(none)'}"
             )
         classes.append(hook)
     classes.extend(resolve_style_ref(doc, ref) for ref in styles or ())
@@ -577,10 +577,11 @@ def apply_auto_styles(
     routed theme defines that class; the explicit ``styles`` go last so they win equal-specificity
     ties. ``themed=False`` skips the hooks but still attaches what the caller named explicitly.
 
-    A role no theme was routed for at all falls back to the bundled ``default`` theme; a role the
-    theme serving this category simply doesn't define is still an error, since that routing was
-    a deliberate choice. An UNROUTED category falls back the same way, but only for the handful
-    of categories in ``_FALLBACK_CATEGORIES`` — see there for why that is not all of them.
+    A role resolves through the theme ROUTED for it, then the category's theme, then the bundled
+    ``default`` — a theme claiming a category is not a claim on every role inside it, so mixed
+    documents (one theme for text, the default covering diagram kinds) keep working. A role
+    nothing anywhere defines is an error. An UNROUTED category falls back the same way, but only
+    for the handful of categories in ``_FALLBACK_CATEGORIES`` — see there for why not all.
     """
     classes = resolve_auto_styles(
         doc, category=category, prim=prim, role=role, styles=styles, themed=themed

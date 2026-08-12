@@ -499,3 +499,35 @@ def test_a_node_that_does_not_exist_is_still_the_first_complaint() -> None:
     doc = _doc()
     with pytest.raises(SvgMcpError):
         ops.apply_styles(doc, "nothing-here", ["accent"])
+
+
+# --- F4 follow-up: a routed category must not block the role fallback ------------------
+
+
+def test_kind_swap_works_when_a_resident_theme_claims_the_category_but_not_the_kind() -> None:
+    # Regression (re-review of the F4 fix): passing the REAL category to _swap_role exposed
+    # the strict role error for themes routed for `shape` but not the kind. The role now
+    # resolves routed theme -> category theme -> bundled default, so the swap dresses from
+    # the default instead of raising.
+    doc = DocumentStore().create(200, 120)[1]
+    node = ops.add_diagram_node(doc, kind="service", label="A")
+    ops.load_theme(doc, "house", search_paths=[Path(__file__).parent / "fixtures" / "themes"])
+    ops.edit_diagram_node(doc, node.ref.id, kind="datastore")
+    classes = set(doc.resolve(node.ref.id).get("class", "").split())
+    assert "default-datastore" in classes
+    assert "default-service" not in classes
+
+
+def test_label_edit_echoing_the_kind_does_not_raise_with_two_themes_resident() -> None:
+    doc = DocumentStore().create(200, 120)[1]
+    node = ops.add_diagram_node(doc, kind="service", label="B")  # dressed default-service
+    ops.load_theme(doc, "house", search_paths=[Path(__file__).parent / "fixtures" / "themes"])
+    ops.edit_diagram_node(doc, node.ref.id, label="B2", kind="service")
+    classes = set(doc.resolve(node.ref.id).get("class", "").split())
+    assert "default-service" in classes
+
+
+def test_a_genuinely_unknown_role_still_fails_loudly() -> None:
+    doc = DocumentStore().create(200, 120)[1]
+    with pytest.raises(InvalidArgument, match="role 'nonesuch'"):
+        ops.add_rect(doc, x=0, y=0, width=10, height=10, role="nonesuch")
