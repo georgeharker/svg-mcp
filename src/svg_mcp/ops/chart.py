@@ -37,9 +37,18 @@ from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef, names_node
 from ..theme.model import Category
 from .construct import _CATEGORY_ATTR, _PRIM_ATTR, _place_and_style, _points_str
-from .diagram import _CHART_ATTR, _label_font, _num, _stack_below, _token, measure_label
+from .diagram import (
+    _CHART_ATTR,
+    _facade_body,
+    _label_font,
+    _num,
+    _stack_below,
+    _token,
+    auto_origin,
+    measure_label,
+)
 from .paint import resolve_paint_refs as _resolve_paint_refs
-from .themes import ServingTheme, apply_auto_styles, serving_theme, worn_theme
+from .themes import ServingTheme, attach_dressing, resolve_dressing, serving_theme, worn_theme
 
 Style = dict[str, str]
 Point = tuple[float, float]
@@ -930,7 +939,10 @@ def _build(doc: Document, group: BaseElement, spec: ChartSpec) -> None:
             child.delete()
     theme = serving_theme(doc, "chart")
     font = _label_font(theme)
-    dressing = worn_theme(doc, group, "chart")
+    # Both hooks a chart can be wearing, most specific first: a theme is free to define only
+    # `.chart--bar` (a look for one plot and nothing for the rest), and reading just the bare
+    # `.chart` would call such a chart undressed and rebuild every axis and series unstyled.
+    dressing = worn_theme(doc, group, f"chart--{spec.kind}", "chart")
     group_id = str(group.get_id())
     if spec.kind == "sparkline":
         # A sparkline is the line and nothing else, by definition — no frame, no title.
@@ -966,16 +978,22 @@ def _place_chart(
 
     The group is placed with a ``translate``, so every child is authored in a local frame and a
     rebuild never has to know where the chart sits.
+
+    As in ``_place_facade``, everything that can fail is resolved BEFORE the group joins the tree
+    — a style name nothing defines used to leave an empty chart group behind.
     """
-    doc.resolve_parent(parent).add(group)
+    parent_element = doc.resolve_parent(parent)
+    dressing = resolve_dressing(doc, category="chart", prim=kind, styles=styles, themed=themed)
+    resolved = _resolve_paint_refs(doc, style)
+
+    parent_element.add(group)
     group.set_id(doc.new_id("chart"))
     if name is not None:
         group.label = name
     group.set(_CATEGORY_ATTR, "chart")
     group.set(_PRIM_ATTR, kind)
     group.set("transform", f"translate({_num(x)},{_num(y)})")
-    apply_auto_styles(doc, group, category="chart", prim=kind, styles=styles, themed=themed)
-    resolved = _resolve_paint_refs(doc, style)
+    attach_dressing(doc, group, dressing)
     if resolved:
         group.style = inkex.Style(resolved)
     return NodeRef(id=str(group.get_id()), tag=str(group.TAG), name=name)
@@ -1019,9 +1037,13 @@ def add_chart(
         raise InvalidArgument("a chart needs a positive width and height")
 
     gap = _token(serving_theme(doc, "chart"), "--gap-node", _DEFAULT_GAP)
-    stacked = _stack_below(doc.resolve_parent(parent), gap)
-    at_x = x if x is not None else 20.0
-    at_y = y if y is not None else (20.0 if stacked is None else stacked)
+    parent_element = doc.resolve_parent(parent)
+    stacked = _stack_below(parent_element, gap)
+    # The group's translate is read in the PARENT's frame; the stack was measured in world, so
+    # it crosses over. An x/y the caller gave is parent-local already (the ``add_rect`` rule).
+    auto_x, auto_y = auto_origin(parent_element, stacked)
+    at_x = x if x is not None else auto_x
+    at_y = y if y is not None else auto_y
 
     group = inkex.Group()
     ref = _place_chart(
@@ -1046,8 +1068,9 @@ def add_chart(
         h=h,
         auto=auto,
     )
-    _write_chart_spec(group, spec)
-    _build(doc, group, spec)
+    with _facade_body(doc, ref):
+        _write_chart_spec(group, spec)
+        _build(doc, group, spec)
     return PlacedChart(ref=ref, x=at_x, y=at_y, w=w, h=h)
 
 

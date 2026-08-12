@@ -14,8 +14,10 @@ from dataclasses import dataclass, field
 from urllib.parse import quote
 
 import inkex
+import tinycss2
 from inkex import BaseElement
 from lxml import etree
+from tinycss2.ast import Node as CssNode
 
 from ..model.document import Document
 from ..model.errors import InvalidArgument
@@ -81,9 +83,97 @@ def _set_prop(element: BaseElement, key: str, value: str) -> None:
 # --- named styles (CSS classes) -------------------------------------------
 
 
+def _rule_classes(rule: CssNode) -> list[str]:
+    """Every class token a qualified rule's selector list names, in order of appearance."""
+    prelude = list(rule.prelude)
+    out: list[str] = []
+    for index, token in enumerate(prelude):
+        if str(token.type) != "literal" or str(token.value) != ".":
+            continue
+        following = prelude[index + 1] if index + 1 < len(prelude) else None
+        if following is not None and str(following.type) == "ident":
+            out.append(str(following.value))
+    return out
+
+
+def _normalized(rule: CssNode) -> str:
+    return " ".join(str(tinycss2.serialize([rule])).split())
+
+
+def _strip_imported(css: str, superseded: Callable[[CssNode], bool]) -> str:
+    """Drop the top-level rules ``superseded`` claims, keeping everything else verbatim.
+
+    CSS that does not parse cleanly is returned untouched: a sheet we cannot read is a sheet we
+    have no business rewriting, and preserving it is the whole job of ``imported_css``.
+    """
+    if not css.strip():
+        return css
+    nodes = tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True)
+    if any(str(node.type) == "error" for node in nodes):
+        return css
+    kept = [node for node in nodes if not (_is_rule(node) and superseded(node))]
+    if len(kept) == len(nodes):
+        return css
+    return "\n".join(str(tinycss2.serialize([node])).strip() for node in kept)
+
+
+def _is_rule(node: CssNode) -> bool:
+    return str(node.type) == "qualified-rule"
+
+
+def supersede_imported_theme(doc: Document, theme: str, block: str) -> None:
+    """Forget the imported rules a theme's freshly materialized ``block`` now speaks for.
+
+    ``imported_css`` is a PRESERVATION SHIM, not a second stylesheet: it exists so a round-tripped
+    document keeps looking like itself until the registries can speak for its rules again. A rule
+    is superseded once this theme's own block covers it — either because every class it names is
+    in this theme's namespace, or because the block reproduces it verbatim (a theme's bare type
+    rules, which carry no namespace to recognise them by). Without this, unloading the theme would
+    leave the imported copy still styling everything, and every export/import cycle would stack
+    another copy of the block on top of the last.
+
+    Anything else stays forever: a rule naming a class nothing here manages is somebody's own CSS.
+    """
+    replaced = {
+        _normalized(rule)
+        for rule in tinycss2.parse_stylesheet(block, skip_comments=True, skip_whitespace=True)
+        if _is_rule(rule)
+    }
+    prefix = f"{theme}-"
+
+    def superseded(rule: CssNode) -> bool:
+        classes = _rule_classes(rule)
+        if classes and all(name.startswith(prefix) for name in classes):
+            return True
+        return _normalized(rule) in replaced
+
+    doc.imported_css = _strip_imported(doc.imported_css, superseded)
+
+
+def supersede_imported_style(doc: Document, name: str) -> None:
+    """Forget an imported ``.name { … }`` rule that a named style now speaks for.
+
+    Only the bare single-class rule ``define_style`` itself emits — a descendant rule that merely
+    mentions the class was written by hand and is nobody's to throw away.
+    """
+
+    def superseded(rule: CssNode) -> bool:
+        significant = [token for token in rule.prelude if str(token.type) != "whitespace"]
+        return (
+            len(significant) == 2
+            and str(significant[0].type) == "literal"
+            and str(significant[0].value) == "."
+            and str(significant[1].type) == "ident"
+            and str(significant[1].value) == name
+        )
+
+    doc.imported_css = _strip_imported(doc.imported_css, superseded)
+
+
 def _sync_stylesheet(doc: Document) -> None:
-    # Imported CSS first — it is whatever the document already carried, and the registries know
-    # nothing of it; re-loading the same theme materializes after it and so wins the tie.
+    # Imported CSS first — it is whatever the document already carried that no registry speaks
+    # for yet, so it sits under everything the registries do emit (and a rule one of them has
+    # since taken over is not here at all: see `supersede_imported_theme`/`_style`).
     # Then the theme blocks, in the order they were applied; named styles last, so a style the AI
     # defined by hand wins the equal-specificity tie against a theme hook.
     blocks = [doc.imported_css] if doc.imported_css else []
@@ -100,8 +190,12 @@ def define_style(doc: Document, name: str, props: Style) -> str:
 
     ``@name`` paint shorthands on fill/stroke are resolved to ``url(#id)`` so a class may
     reference a defined gradient/pattern.
+
+    An imported ``.name`` rule the registry now speaks for is dropped from ``imported_css`` —
+    see :func:`supersede_imported_style` for why that is not the same as throwing CSS away.
     """
     doc.styles[name] = resolve_paint_refs(doc, props) or {}
+    supersede_imported_style(doc, name)
     _sync_stylesheet(doc)
     return name
 
@@ -433,16 +527,10 @@ def boolean(
     if len(targets) < 2:
         raise InvalidArgument("boolean needs at least 2 targets")
 
-    def finish(element: BaseElement) -> NodeRef:
-        """Style the result as a shape (the ops that build on this module import it, not vice
-        versa, so the hook engine is reached by a local import)."""
-        from .construct import _CATEGORY_ATTR
-        from .themes import apply_auto_styles
-
-        # A boolean result is a shape, but of no primitive kind — there is no `add_boolean`.
-        element.set(_CATEGORY_ATTR, "shape")
-        apply_auto_styles(doc, element, category="shape", role=role, styles=styles, themed=themed)
-        return _ref(element)
+    # The ops that build on this module import it, not vice versa, so the hook engine is
+    # reached by a local import.
+    from .construct import _CATEGORY_ATTR
+    from .themes import attach_dressing, resolve_dressing
 
     elements = [doc.resolve(t) for t in targets]
     for el in elements:
@@ -452,10 +540,17 @@ def boolean(
     # The dressing is settled BEFORE a single input is consumed. Every branch below moves or
     # deletes the operands, so a role nothing serves (or a style name that does not exist)
     # discovered at `finish` time would have already destroyed the shapes it was refusing to
-    # style — and there is nothing left to try again with.
-    from .themes import resolve_auto_styles
+    # style — and there is nothing left to try again with. Resolving is pure, so this settles
+    # the question without installing anything; the ONE answer is then carried to `finish`,
+    # which attaches it (and installs whatever it turned out to need) on the result.
+    dressing = resolve_dressing(doc, category="shape", role=role, styles=styles, themed=themed)
 
-    resolve_auto_styles(doc, category="shape", role=role, styles=styles, themed=themed)
+    def finish(element: BaseElement) -> NodeRef:
+        """Style the result as a shape, from the dressing settled before anything was consumed."""
+        # A boolean result is a shape, but of no primitive kind — there is no `add_boolean`.
+        element.set(_CATEGORY_ATTR, "shape")
+        attach_dressing(doc, element, dressing)
+        return _ref(element)
 
     if op == "union":
         group = inkex.Group.new(name or "")

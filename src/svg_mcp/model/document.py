@@ -62,7 +62,14 @@ class Document:
         # would rewrite the sheet from nothing and silently unstyle every classed node.
         # It is emitted FIRST, before the theme blocks and named styles, so re-loading the same
         # theme (or redefining a style) materializes AFTER it and wins the equal-specificity tie.
-        # A second export/import folds everything back into this field — that is expected.
+        #
+        # It is a PRESERVATION SHIM, not a second stylesheet: it holds rules only until a
+        # registry can speak for them again, and is INVALIDATED as that happens. Loading a theme
+        # drops the rules its own block now covers (`supersede_imported_theme`) and defining a
+        # named style drops the imported `.name` rule it replaces — so unloading a theme really
+        # unstyles, a variant switch really switches, and repeated export/import cycles cannot
+        # stack copy after copy of the same block. Rules naming classes nothing here manages are
+        # never touched: genuinely foreign CSS is preserved for the life of the document.
         self.imported_css: str = ""
         # Materialized theme stylesheets, theme name -> CSS text, in the order they were applied.
         # They are emitted BEFORE doc.styles so a named style beats a theme hook on a tie.

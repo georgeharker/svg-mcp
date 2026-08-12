@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from ..model.document import Document
 from ..model.errors import InvalidArgument, SvgMcpError
 from ..model.handles import NodeRef, names_node
-from ..query.outline import _bbox_xywh, _to_local_box
+from ..query.outline import _bbox_xywh, _to_local_box, _to_local_point
 from ..typeset import FontNotFound, measure_text
 from .construct import (
     _CATEGORY_ATTR,
@@ -49,8 +49,14 @@ from .construct import (
 from .geometry import edit_shape
 from .modify import to_back
 from .paint import resolve_paint_refs as _resolve_paint_refs
-from .resources import _class_list, _set_class_list, apply_styles
-from .themes import ServingTheme, resolve_auto_styles, serving_theme
+from .resources import _class_list, _set_class_list
+from .themes import (
+    ServingTheme,
+    attach_dressing,
+    resolve_auto_styles,
+    resolve_dressing,
+    serving_theme,
+)
 
 Style = dict[str, str]
 Point = tuple[float, float]
@@ -104,6 +110,11 @@ _DEFAULT_FONT = "sans-serif"
 _LABEL_SIZE = 12.0
 # The clear air a container leaves above its members for its own label to sit in.
 _LABEL_GAP = 8.0
+
+# The corner an auto-placed facade takes when there is nothing above it to stack under. Read in
+# the PARENT's frame, because it stands in for the x/y the caller did not pass — see
+# ``auto_origin``, which is where the difference between a default and a measurement is drawn.
+_AUTO_ORIGIN = 20.0
 
 _MIN_W, _MIN_H = 60.0, 36.0
 _DIAMOND_MIN_W, _DIAMOND_MIN_H = 80.0, 48.0
@@ -409,7 +420,13 @@ def route_edge(
 
 @dataclass(frozen=True, slots=True)
 class NodeSpec:
-    """What a diagram node is, as stored on its group."""
+    """What a diagram node is, as stored on its group.
+
+    ``themed`` records the DRESSING INTENT the facade was built with, which is not the same
+    question as whether it currently wears a class: a facade built ``themed=False`` is meant to
+    stay bare, so an edit that merely echoes its kind back must not dress it. Absent from a spec
+    written before this was recorded, where it reads as True — every such facade was dressed.
+    """
 
     kind: str
     label: str
@@ -417,11 +434,15 @@ class NodeSpec:
     w: float
     h: float
     auto: bool
+    themed: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class EdgeSpec:
-    """What a diagram edge connects, and how, as stored on its group."""
+    """What a diagram edge connects, and how, as stored on its group.
+
+    ``themed`` is the dressing intent — see :class:`NodeSpec`.
+    """
 
     source: str
     target: str
@@ -430,16 +451,21 @@ class EdgeSpec:
     ta: AnchorPref
     route: RouteStyle
     label: str
+    themed: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class ContainerSpec:
-    """What a diagram container encloses, and whether its box is derived from that membership."""
+    """What a diagram container encloses, and whether its box is derived from that membership.
+
+    ``themed`` is the dressing intent — see :class:`NodeSpec`.
+    """
 
     kind: str
     label: str
     members: tuple[str, ...]
     auto: bool
+    themed: bool = True
 
 
 def _store(
@@ -473,6 +499,7 @@ def read_node_spec(element: BaseElement) -> NodeSpec | None:
             w=float(spec["w"]),
             h=float(spec["h"]),
             auto=bool(spec.get("auto", False)),
+            themed=bool(spec.get("themed", True)),
         )
     except (ValueError, TypeError, KeyError):
         return None
@@ -493,6 +520,7 @@ def read_edge_spec(element: BaseElement) -> EdgeSpec | None:
             ta=_side_pref(str(spec.get("ta", "auto"))),
             route=_route_style(str(spec.get("route", "orthogonal"))),
             label=str(spec.get("label", "")),
+            themed=bool(spec.get("themed", True)),
         )
     except (ValueError, TypeError, KeyError):
         return None
@@ -513,6 +541,7 @@ def read_container_spec(element: BaseElement) -> ContainerSpec | None:
             label=str(spec["label"]),
             members=tuple(str(member) for member in members),
             auto=bool(spec.get("auto", False)),
+            themed=bool(spec.get("themed", True)),
         )
     except (ValueError, TypeError, KeyError):
         return None
@@ -527,6 +556,7 @@ def _write_container_spec(element: BaseElement, spec: ContainerSpec) -> None:
             "label": spec.label,
             "members": list(spec.members),
             "auto": spec.auto,
+            "themed": spec.themed,
         },
     )
 
@@ -542,6 +572,7 @@ def _write_node_spec(element: BaseElement, spec: NodeSpec) -> None:
             "w": spec.w,
             "h": spec.h,
             "auto": spec.auto,
+            "themed": spec.themed,
         },
     )
 
@@ -558,6 +589,7 @@ def _write_edge_spec(element: BaseElement, spec: EdgeSpec) -> None:
             "ta": spec.ta,
             "route": spec.route,
             "label": spec.label,
+            "themed": spec.themed,
         },
     )
 
@@ -632,7 +664,7 @@ def _place_facade(
     tree — an unservable role must not leave a half-built facade behind.
     """
     parent_element = doc.resolve_parent(parent)
-    classes = resolve_auto_styles(
+    dressing = resolve_dressing(
         doc, category=category, prim=prim, role=role, styles=styles, themed=themed
     )
     resolved = _resolve_paint_refs(doc, style)
@@ -644,8 +676,7 @@ def _place_facade(
     element.set(_CATEGORY_ATTR, category)
     if stamp_prim:
         element.set(_PRIM_ATTR, prim)
-    if classes:
-        apply_styles(doc, str(element.get_id()), classes)
+    attach_dressing(doc, element, dressing)
     if resolved:
         element.style = inkex.Style(resolved)
     return NodeRef(id=str(element.get_id()), tag=str(element.TAG), name=name)
@@ -822,13 +853,48 @@ def _stackable(parent: BaseElement) -> Iterator[BaseElement]:
 
 
 def _stack_below(parent: BaseElement, gap: float) -> float | None:
-    """The y a new facade stacks at: under the lowest stackable facade already in this parent."""
+    """The WORLD y a new facade stacks at: under the lowest stackable facade in this parent.
+
+    World, because that is the only frame the boxes it measures agree in — cross it with
+    :func:`auto_position` before writing the answer onto a child of ``parent``.
+    """
     bottoms = [
         box[1] + box[3]
         for box in (_bbox_xywh(node) for node in _stackable(parent))
         if box is not None
     ]
     return max(bottoms) + gap if bottoms else None
+
+
+def auto_position(parent: BaseElement, world: Point) -> Point:
+    """A position the facade MEASURED, expressed in the frame its parent reads coordinates in.
+
+    The frame contract every ``add_*`` op keeps. An x/y the CALLER gave is parent-local already —
+    the same promise ``add_rect`` makes — and is written verbatim. A position DERIVED from other
+    nodes' boxes (a stack's lowest edge, the face of a callout's target) can only be computed in
+    world, because that is the one frame two nodes' boxes agree in, and so has to be crossed back
+    before it is written: otherwise the facade lands displaced by every transform between it and
+    the root, and the gap a stack measured is not the gap it draws.
+    """
+    return _to_local_point(parent, world)
+
+
+def auto_origin(parent: BaseElement, stacked: float | None, origin: float = _AUTO_ORIGIN) -> Point:
+    """Where an auto-placed facade goes, in the frame ``parent`` reads coordinates in.
+
+    Two different things wear the name "automatic". A stack is MEASURED off other nodes, so its y
+    is a world number and crosses back through :func:`auto_position`. The corner a facade takes
+    when there is nothing above it to stack under is not measured off anything: it is a plain
+    default, and a default stands in for the argument the caller did not pass — which would have
+    been parent-local. Treating it as world instead would make an auto-placed facade ignore the
+    transform of the very layer it was added to, which is not what putting it there asked for.
+
+    Only the y of a stack is meaningful (stacking is a statement about vertical order), so that
+    is the only component taken from the crossing.
+    """
+    if stacked is None:
+        return (origin, origin)
+    return (origin, auto_position(parent, (origin, stacked))[1])
 
 
 def add_diagram_node(
@@ -868,9 +934,11 @@ def add_diagram_node(
         w = width if width is not None else max(_MIN_W, text_w + 2 * pad)
         h = height if height is not None else max(_MIN_H, text_h + 2 * pad)
 
-    stacked = _stack_below(doc.resolve_parent(parent), gap)
-    at_x = x if x is not None else 20.0
-    at_y = y if y is not None else (20.0 if stacked is None else stacked)
+    parent_element = doc.resolve_parent(parent)
+    stacked = _stack_below(parent_element, gap)
+    auto_x, auto_y = auto_origin(parent_element, stacked)
+    at_x = x if x is not None else auto_x
+    at_y = y if y is not None else auto_y
 
     group = inkex.Group()
     ref = _place_facade(
@@ -889,7 +957,10 @@ def add_diagram_node(
     with _facade_body(doc, ref):
         _build_shape(doc, shape, x=at_x, y=at_y, w=w, h=h, parent=ref.id, corner=corner)
         _set_label(doc, group, label, (at_x + w / 2.0, at_y + h / 2.0), halo=None, dy=None)
-        _write_node_spec(group, NodeSpec(kind=kind, label=label, shape=shape, w=w, h=h, auto=auto))
+        _write_node_spec(
+            group,
+            NodeSpec(kind=kind, label=label, shape=shape, w=w, h=h, auto=auto, themed=themed),
+        )
     return PlacedNode(ref=ref, x=at_x, y=at_y, w=w, h=h)
 
 
@@ -903,38 +974,69 @@ def _swap_role(doc: Document, element: BaseElement, old: str, new: str) -> None:
     """
     category = str(element.get(_CATEGORY_ATTR) or "") or None
     prim = str(element.get(_PRIM_ATTR) or "") or None
-    classes = resolve_auto_styles(doc, category=category, prim=prim, role=new, themed=True)
+    dressing = resolve_dressing(doc, category=category, prim=prim, role=new, themed=True)
     owned = {f"{theme}-{old}" for theme in doc.theme_meta}
     remaining = [cls for cls in _class_list(element) if cls not in owned]
     _set_class_list(element, remaining)
-    if classes:
-        apply_styles(doc, str(element.get_id()), classes)
+    attach_dressing(doc, element, dressing)
 
 
-def _missing_role_class(doc: Document, element: BaseElement, role: str) -> bool:
-    """True when a resident theme defines ``role`` but the facade is not actually wearing it.
+def _wears_its_dressing(doc: Document, element: BaseElement, role: str) -> bool:
+    """True when the facade already wears EXACTLY what a fresh dressing for ``role`` would give it.
 
-    The dressed state, not the spec, is what says whether a re-kind has work to do — a facade
-    left undressed by an interrupted edit reads as the right kind and looks like the wrong one.
-    Only a role some resident theme really defines counts, so this never asks for a hook that
-    ``_swap_role`` would then have to refuse.
+    The dressed state, not the spec, is what says whether re-naming a facade's own kind has work
+    to do — a facade left undressed by an interrupted edit reads as the right kind and looks like
+    the wrong one. A role nothing can serve counts as worn: the swap would only raise, and it was
+    never the caller's request to change anything.
     """
-    worn = set(_class_list(element))
-    if any(f"{theme}-{role}" in worn for theme in doc.theme_meta):
-        return False
-    return any(f"{theme}-{role}" in meta.class_names for theme, meta in doc.theme_meta.items())
+    category = str(element.get(_CATEGORY_ATTR) or "") or None
+    prim = str(element.get(_PRIM_ATTR) or "") or None
+    with suppress(InvalidArgument):
+        wanted = resolve_auto_styles(doc, category=category, prim=prim, role=role, themed=True)
+        worn = set(_class_list(element))
+        return all(cls in worn for cls in wanted)
+    return True
 
 
-def _rekind(doc: Document, element: BaseElement, old: str, new: str | None) -> bool:
+def _rekind(
+    doc: Document, element: BaseElement, old: str, new: str | None, *, themed: bool
+) -> bool:
     """Re-dress a facade for ``new`` when the caller named a kind; True when anything changed.
 
     Naming the kind the facade already claims is NOT a no-op when the facade is not wearing that
-    kind's class: it is the way to repair one, so the short-circuit reads the classes, not the spec.
+    kind's dressing: it is the way to repair one, so the short-circuit reads the classes, not the
+    spec. It IS a no-op for a facade built ``themed=False``, whose spec records that it is meant
+    to be undressed — echoing its kind back at it must not quietly dress it after all.
     """
-    if new is None or (new == old and not _missing_role_class(doc, element, old)):
+    if new is None:
+        return False
+    if new == old and (not themed or _wears_its_dressing(doc, element, old)):
         return False
     _swap_role(doc, element, old, new)
     return True
+
+
+def set_spec_themed(element: BaseElement, themed: bool) -> bool:
+    """Record dressing intent on whichever facade spec ``element`` carries; False if it has none.
+
+    A scoped ``apply_theme``/``clear_theme`` changes how a facade LOOKS, and the spec is where a
+    facade keeps what it MEANS to look like — leaving the two disagreeing is what makes a later
+    kind-echo edit either re-dress a deliberately bare facade or refuse to repair a dressed one.
+    """
+    for attr in (_NODE_ATTR, _EDGE_ATTR, _CONTAINER_ATTR, _CALLOUT_ATTR, _CARD_ATTR):
+        raw = element.get(attr)
+        if raw is None:
+            continue
+        try:
+            spec = json.loads(raw)
+        except ValueError:
+            return False
+        if not isinstance(spec, dict):
+            return False
+        spec["themed"] = themed
+        element.set(attr, json.dumps(spec, separators=(",", ":")))
+        return True
+    return False
 
 
 def edit_diagram_node(
@@ -958,6 +1060,12 @@ def edit_diagram_node(
     body = _body(group)
     if body is None:
         raise InvalidArgument(f"diagram node {target!r} has lost its shape child")
+
+    # The re-kind goes FIRST because it is the only step that can refuse: it resolves the new
+    # dressing in full before it changes anything, so a bogus kind leaves the node's geometry,
+    # its label and its spec exactly as they were rather than half-edited. Its siblings
+    # (edit_diagram_edge, edit_callout, edit_callout_card) are ordered the same way.
+    _rekind(doc, group, spec.kind, kind, themed=spec.themed)
 
     w, h, remeasured = spec.w, spec.h, False
     origin = _local_origin(body)
@@ -983,7 +1091,6 @@ def edit_diagram_node(
             halo=None,
             dy=None,
         )
-    _rekind(doc, group, spec.kind, kind)
 
     _write_node_spec(
         group,
@@ -994,6 +1101,7 @@ def edit_diagram_node(
             w=w,
             h=h,
             auto=spec.auto,
+            themed=spec.themed,
         ),
     )
     return NodeEdit(
@@ -1180,6 +1288,7 @@ def add_diagram_edge(
                 ta=target_anchor,
                 route=route,
                 label=label or "",
+                themed=themed,
             ),
         )
         result = _reroute(doc)
@@ -1205,7 +1314,7 @@ def edit_diagram_edge(
     spec = read_edge_spec(group)
     if spec is None:
         raise InvalidArgument(f"{target!r} is not a diagram edge (no {_EDGE_ATTR} spec)")
-    _rekind(doc, group, spec.kind, kind)
+    _rekind(doc, group, spec.kind, kind, themed=spec.themed)
     _write_edge_spec(
         group,
         EdgeSpec(
@@ -1216,6 +1325,7 @@ def edit_diagram_edge(
             ta=target_anchor if target_anchor is not None else spec.ta,
             route=route if route is not None else spec.route,
             label=label if label is not None else spec.label,
+            themed=spec.themed,
         ),
     )
     result = _reroute(doc)
@@ -1320,14 +1430,25 @@ def _container_box(group: BaseElement) -> tuple[float, float, float, float] | No
 
 
 def _refit_container(doc: Document, group: BaseElement, spec: ContainerSpec) -> bool:
-    """Re-derive an auto container's box from its members' CURRENT boxes; False if it cannot."""
+    """Re-derive an auto container's box from its members' CURRENT boxes; False if it cannot.
+
+    An auto container's rect is DERIVED state, so this normalizes it: the geometry is written in
+    the group's frame (where the label is written too) and the rect's own transform is cleared.
+    Give the container an explicit x/y/width/height if its box is meant to be a decision.
+    """
     pad = _container_pad(doc, spec.kind)
     box = _fit_bounds(doc, spec.members, pad=pad, label=spec.label)
     rect = _body(group)
     if box is None or rect is None:
         return False
-    # The members' union is a WORLD box; the rect's x/y/width/height are read in ITS frame.
-    local = _to_local_box(rect, box)
+    # The members' union is a WORLD box, and BOTH the rect and the label are children of the
+    # group — so both are written in the GROUP's frame, exactly as the add path writes them. A
+    # fitted container's geometry is DERIVED state, so a transform somebody hung on the rect is
+    # not a decision to preserve here: it would displace the fit by its own translation, and the
+    # box is re-derived from the members on every reflow anyway. Clearing it is the normalization
+    # that keeps "where the rect is" a single statement in one frame.
+    local = _to_local_box(group, box)
+    rect.set("transform", None)
     edit_shape(
         doc,
         str(rect.get_id()),
@@ -1432,7 +1553,14 @@ def add_diagram_container(
         )
         _set_container_label(doc, group, label, local, pad)
         _write_container_spec(
-            group, ContainerSpec(kind=kind, label=label, members=tuple(member_ids), auto=auto)
+            group,
+            ContainerSpec(
+                kind=kind,
+                label=label,
+                members=tuple(member_ids),
+                auto=auto,
+                themed=themed,
+            ),
         )
         to_back(doc, ref.id)  # a container is scenery: it draws behind everything it encloses
     return PlacedContainer(ref=ref, x=box[0], y=box[1], w=box[2], h=box[3], auto=auto)
@@ -1493,12 +1621,13 @@ def edit_diagram_container(
             "delete it, or give it an explicit x/y/width/height first"
         )
 
-    _rekind(doc, group, spec.kind, kind)
+    _rekind(doc, group, spec.kind, kind, themed=spec.themed)
     updated = ContainerSpec(
         kind=kind if kind is not None else spec.kind,
         label=label if label is not None else spec.label,
         members=tuple(current),
         auto=spec.auto,
+        themed=spec.themed,
     )
     _write_container_spec(group, updated)
 

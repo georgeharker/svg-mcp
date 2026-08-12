@@ -77,6 +77,7 @@ from .diagram import (
     Point,
     Side,
     _box_of,
+    _facade_body,
     _label_font,
     _num,
     _place_facade,
@@ -85,6 +86,8 @@ from .diagram import (
     _stack_below,
     _token,
     anchor_point,
+    auto_origin,
+    auto_position,
     auto_side,
     measure_label,
     read_container_spec,
@@ -463,7 +466,7 @@ def _build_legend(doc: Document, group: BaseElement, spec: LegendSpec, at: Point
     for child in list(group):
         if isinstance(child.tag, str):
             child.delete()
-    dressing = worn_theme(doc, group, "legend", "container")
+    dressing = worn_theme(doc, group, "legend", "container--legend", "container")
     layout = _legend_layout(doc, spec)
     group_id = str(group.get_id())
     x, y = at
@@ -549,9 +552,13 @@ def add_legend(
     spec = LegendSpec(entries=tuple(resolved), title=title, columns=columns, auto=auto)
 
     gap = _token(serving_theme(doc, "legend"), "--gap-node", 24.0)
-    stacked = _stack_below(doc.resolve_parent(parent), gap)
-    at_x = x if x is not None else _ORIGIN
-    at_y = y if y is not None else (_ORIGIN if stacked is None else stacked)
+    parent_element = doc.resolve_parent(parent)
+    stacked = _stack_below(parent_element, gap)
+    # An x/y the caller gave is PARENT-LOCAL already, exactly as it is for ``add_rect``; only a
+    # MEASURED position — the stack — is a world number, and ``auto_origin`` crosses that one.
+    auto_x, auto_y = auto_origin(parent_element, stacked, _ORIGIN)
+    at_x = x if x is not None else auto_x
+    at_y = y if y is not None else auto_y
 
     group = inkex.Group()
     ref = _place_facade(
@@ -567,10 +574,11 @@ def add_legend(
         styles=styles,
         themed=themed,
     )
-    _write_legend_spec(group, spec)
-    # ``at`` is a WORLD position (an explicit x/y, or the world box the stack was measured from);
-    # the children are authored in the group's frame, so it is crossed over before drawing.
-    layout = _build_legend(doc, group, spec, _to_local_point(group, (at_x, at_y)))
+    # A swatch nothing paints raises mid-build, and a half-drawn key in the tree is worse than
+    # none — the whole group goes again if any row of it fails.
+    with _facade_body(doc, ref):
+        _write_legend_spec(group, spec)
+        layout = _build_legend(doc, group, spec, (at_x, at_y))
     return PlacedLegend(
         ref=ref,
         x=at_x,
@@ -655,7 +663,11 @@ def edit_legend(
 
 @dataclass(frozen=True, slots=True)
 class CalloutSpec:
-    """What a callout says, what it points at, and how it was placed."""
+    """What a callout says, what it points at, and how it was placed.
+
+    ``themed`` is the dressing intent it was built with — see
+    :class:`~svg_mcp.ops.diagram.NodeSpec`.
+    """
 
     target: str
     text: str
@@ -664,6 +676,7 @@ class CalloutSpec:
     distance: float
     max_width: float
     auto: bool
+    themed: bool = True
 
 
 def read_callout_spec(element: BaseElement) -> CalloutSpec | None:
@@ -681,6 +694,7 @@ def read_callout_spec(element: BaseElement) -> CalloutSpec | None:
             distance=float(spec["distance"]),
             max_width=float(spec["max_width"]),
             auto=bool(spec.get("auto", False)),
+            themed=bool(spec.get("themed", True)),
         )
     except (ValueError, TypeError, KeyError):
         return None
@@ -698,6 +712,7 @@ def _write_callout_spec(element: BaseElement, spec: CalloutSpec) -> None:
                 "distance": spec.distance,
                 "max_width": spec.max_width,
                 "auto": spec.auto,
+                "themed": spec.themed,
             },
             separators=(",", ":"),
         ),
@@ -841,7 +856,7 @@ def _derive_leader(doc: Document, group: BaseElement, spec: CalloutSpec) -> bool
     world_start, world_end = _leader_ends(target, card, spec.side)
     start = _to_local_point(group, world_start)
     end = _to_local_point(group, world_end)
-    dressing = worn_theme(doc, group, spec.kind, "container")
+    dressing = worn_theme(doc, group, spec.kind, "container--callout", "container")
     classes = _part_class(doc, "leader", dressing) if dressing is not None else []
     line = _named_part(group, _PART_LEADER)
     if line is None:
@@ -898,7 +913,7 @@ def _build_card(
     # The card's text carries its own part class rather than relying on a `.note text` descendant
     # rule: `.note` is shared with the diagram note KIND, and a rule written that way would resize
     # every diagram note's label as a side effect of adding callouts.
-    dressing = worn_theme(doc, group, spec.kind, "container")
+    dressing = worn_theme(doc, group, spec.kind, "container--callout", "container")
     classes = _part_class(doc, "callout-text", dressing) if dressing is not None else []
     for index, line in enumerate(text.lines):
         middle = at[1] + text.pad + index * (text.line_h + _LINE_LEAD) + text.line_h / 2.0
@@ -957,11 +972,15 @@ def add_callout(
         distance=gap,
         max_width=max_width,
         auto=x is None,
+        themed=themed,
     )
     wrapped = _card_text(doc, spec)
     chosen: Side = side if side != "auto" else roomiest_side(box, _canvas(doc))
+    parent_element = doc.resolve_parent(parent)
     if spec.auto:
-        at = card_box(box, chosen, gap, wrapped.w, wrapped.h)
+        # The side placement is derived from the target's WORLD box, so it crosses into the
+        # parent's frame; an x/y the caller gave is parent-local already and is used verbatim.
+        at = auto_position(parent_element, card_box(box, chosen, gap, wrapped.w, wrapped.h))
     else:
         at = (float(cast(float, x)), float(cast(float, y)))
 
@@ -979,9 +998,10 @@ def add_callout(
         styles=styles,
         themed=themed,
     )
-    _write_callout_spec(group, spec)
-    _build_card(doc, group, spec, _to_local_point(group, at), wrapped)
-    _derive_leader(doc, group, spec)
+    with _facade_body(doc, ref):
+        _write_callout_spec(group, spec)
+        _build_card(doc, group, spec, at, wrapped)
+        _derive_leader(doc, group, spec)
     return PlacedCallout(
         ref=ref,
         x=at[0],
@@ -1013,7 +1033,7 @@ def edit_callout(
     spec = read_callout_spec(group)
     if spec is None:
         raise InvalidArgument(f"{target!r} is not a callout (no {_CALLOUT_ATTR} spec)")
-    _rekind(doc, group, spec.kind, kind)
+    _rekind(doc, group, spec.kind, kind, themed=spec.themed)
     updated = CalloutSpec(
         target=spec.target,
         text=text if text is not None else spec.text,
@@ -1022,6 +1042,7 @@ def edit_callout(
         distance=spec.distance,
         max_width=spec.max_width,
         auto=spec.auto,
+        themed=spec.themed,
     )
     _write_callout_spec(group, updated)
 
@@ -1383,7 +1404,7 @@ def _build_table(doc: Document, group: BaseElement, spec: TableSpec) -> TableLay
 
     # A table not wearing its role hook was built with themed=False; a rebuild that dressed it
     # anyway would quietly overturn that decision, so the absence is honoured (as in a chart).
-    dressing = worn_theme(doc, group, "table", "container")
+    dressing = worn_theme(doc, group, "table", "container--table", "container")
 
     def part(suffix: str) -> list[str]:
         return _part_class(doc, suffix, dressing) if dressing is not None else []
@@ -1478,9 +1499,13 @@ def add_table(
     )
 
     gap = _token(serving_theme(doc, "table"), "--gap-node", 24.0)
-    stacked = _stack_below(doc.resolve_parent(parent), gap)
-    at_x = x if x is not None else _ORIGIN
-    at_y = y if y is not None else (_ORIGIN if stacked is None else stacked)
+    parent_element = doc.resolve_parent(parent)
+    stacked = _stack_below(parent_element, gap)
+    # The translate below is read in the PARENT's frame, so the derived stack position crosses
+    # into it; an x/y the caller gave is already in that frame and is written verbatim.
+    auto_x, auto_y = auto_origin(parent_element, stacked, _ORIGIN)
+    at_x = x if x is not None else auto_x
+    at_y = y if y is not None else auto_y
 
     group = inkex.Group()
     ref = _place_facade(
@@ -1497,8 +1522,9 @@ def add_table(
         themed=themed,
     )
     group.set("transform", f"translate({_num(at_x)},{_num(at_y)})")
-    _write_table_spec(group, spec)
-    layout = _build_table(doc, group, spec)
+    with _facade_body(doc, ref):
+        _write_table_spec(group, spec)
+        layout = _build_table(doc, group, spec)
     return PlacedTable(
         ref=ref,
         x=at_x,
@@ -1582,13 +1608,18 @@ _MIN_CARD_W = 60.0
 
 @dataclass(frozen=True, slots=True)
 class CardSpec:
-    """What a callout card says and how wide it says it. Position lives in the transform."""
+    """What a callout card says and how wide it says it. Position lives in the transform.
+
+    ``themed`` is the dressing intent it was built with — see
+    :class:`~svg_mcp.ops.diagram.NodeSpec`.
+    """
 
     title: str
     body: str
     kind: str
     width: float
     auto: bool
+    themed: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -1626,6 +1657,7 @@ def read_card_spec(element: BaseElement) -> CardSpec | None:
             kind=str(spec["kind"]),
             width=float(spec["width"]),
             auto=bool(spec.get("auto", False)),
+            themed=bool(spec.get("themed", True)),
         )
     except (ValueError, TypeError, KeyError):
         return None
@@ -1641,6 +1673,7 @@ def _write_card_spec(element: BaseElement, spec: CardSpec) -> None:
                 "kind": spec.kind,
                 "width": spec.width,
                 "auto": spec.auto,
+                "themed": spec.themed,
             },
             separators=(",", ":"),
         ),
@@ -1718,7 +1751,7 @@ def _build_callout_card(doc: Document, group: BaseElement, spec: CardSpec) -> Ca
 
     # A card not wearing its kind's hook was built with themed=False; a rebuild that dressed it
     # anyway would quietly overturn that decision, so the absence is honoured (as in a chart).
-    dressing = worn_theme(doc, group, spec.kind, "container")
+    dressing = worn_theme(doc, group, spec.kind, "container--callout-card", "container")
 
     def part(suffix: str) -> list[str]:
         return _part_class(doc, suffix, dressing) if dressing is not None else []
@@ -1780,12 +1813,17 @@ def add_callout_card(
             "padding and a word between them"
         )
     _card_words(title, body)
-    spec = CardSpec(title=title, body=body, kind=kind, width=width, auto=x is None and y is None)
+    spec = CardSpec(
+        title=title, body=body, kind=kind, width=width, auto=x is None and y is None, themed=themed
+    )
 
     gap = _token(serving_theme(doc, kind), "--gap-node", 24.0)
-    stacked = _stack_below(doc.resolve_parent(parent), gap)
-    at_x = x if x is not None else _ORIGIN
-    at_y = y if y is not None else (_ORIGIN if stacked is None else stacked)
+    parent_element = doc.resolve_parent(parent)
+    stacked = _stack_below(parent_element, gap)
+    # As in ``add_table``: the derived stack position is a world y, the caller's x/y is not.
+    auto_x, auto_y = auto_origin(parent_element, stacked, _ORIGIN)
+    at_x = x if x is not None else auto_x
+    at_y = y if y is not None else auto_y
 
     group = inkex.Group()
     ref = _place_facade(
@@ -1802,8 +1840,9 @@ def add_callout_card(
         themed=themed,
     )
     group.set("transform", f"translate({_num(at_x)},{_num(at_y)})")
-    _write_card_spec(group, spec)
-    layout = _build_callout_card(doc, group, spec)
+    with _facade_body(doc, ref):
+        _write_card_spec(group, spec)
+        layout = _build_callout_card(doc, group, spec)
     return PlacedCard(
         ref=ref,
         x=at_x,
@@ -1839,9 +1878,10 @@ def edit_callout_card(
         kind=kind if kind is not None else spec.kind,
         width=spec.width,
         auto=spec.auto,
+        themed=spec.themed,
     )
     _card_words(updated.title, updated.body)
-    _rekind(doc, group, spec.kind, kind)
+    _rekind(doc, group, spec.kind, kind, themed=spec.themed)
     _write_card_spec(group, updated)
     layout = _build_callout_card(doc, group, updated)
     return CardEdit(

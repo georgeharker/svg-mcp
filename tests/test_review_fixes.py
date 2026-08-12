@@ -13,6 +13,7 @@ import pytest
 from svg_mcp import ops
 from svg_mcp.model import Document
 from svg_mcp.model.errors import InvalidArgument, SvgMcpError, ThemeError
+from svg_mcp.ops.annotate import LegendItem
 from svg_mcp.ops.chart import BarData, Series, SparklineData
 from svg_mcp.query import get_bbox
 from svg_mcp.serialize import export_svg
@@ -89,18 +90,21 @@ def test_repeated_syncs_do_not_duplicate_the_imported_css() -> None:
     assert export_svg(reopened).count(".accent {") == 1
 
 
-def test_reloading_the_same_theme_over_imported_css_materializes_after_it() -> None:
+def test_reloading_the_same_theme_over_imported_css_supersedes_the_imported_copy() -> None:
+    # UPDATED for G3 (round 2). The round-1 fix left BOTH copies in the sheet — the imported one
+    # first and the reloaded one after it, winning on order. That was the bug G3 records: the
+    # imported copy outlived the registry that now speaks for it, so unloading the theme could
+    # not undress the document and every round trip stacked another copy. The tie the old
+    # assertion protected is now moot, because there is only one copy to win it.
     doc = _doc()
     ops.load_theme(doc, "house", search_paths=[FIXTURES])
     reopened = ops.load_svg_document(svg=export_svg(doc))
+    assert reopened.imported_css != ""
     ops.load_theme(reopened, "house", search_paths=[FIXTURES])
     sheet = str(reopened.stylesheet().text or "")
     block = reopened.theme_css["house"]
-    # Two copies of the block: the imported one first, the freshly materialized one after, so
-    # the reload wins the equal-specificity tie.
-    assert sheet.startswith(reopened.imported_css)
-    assert sheet.count(block) == 2
-    assert sheet.rindex(block) > len(reopened.imported_css) - len(block)
+    assert sheet.count(block) == 1
+    assert "house-shape" not in reopened.imported_css
 
 
 # --- F2: a rejected boolean must not have consumed its inputs ----------------
@@ -531,3 +535,451 @@ def test_a_genuinely_unknown_role_still_fails_loudly() -> None:
     doc = DocumentStore().create(200, 120)[1]
     with pytest.raises(InvalidArgument, match="role 'nonesuch'"):
         ops.add_rect(doc, x=0, y=0, width=10, height=10, role="nonesuch")
+
+
+# =============================================================================
+# ROUND 2 — the re-review of the fix commit (G1-G9).
+#
+# The first pass fixed each finding where the reviewer pointed, but the same
+# mistake was live in the siblings the finding did not name. Each test below
+# reproduces the exact scenario the re-review recorded.
+# =============================================================================
+
+
+_GAP_NODE = 24.0  # the bundled default's --gap-node, which every stack below is measured against
+
+
+def _world_gap(doc: Document, upper: str, lower: str) -> float:
+    """The clear air between two facades' world boxes — what a stack is supposed to hold fixed."""
+    above, below = _box(doc, upper), _box(doc, lower)
+    return below[1] - (above[1] + above[3])
+
+
+# --- G1: auto-placement lands in the parent's frame, not the world's ---------
+
+
+def test_stacked_nodes_under_a_transformed_ancestor_keep_one_constant_gap() -> None:
+    # The stack is measured off WORLD boxes and used to be written as a parent-local y, so every
+    # node fell a further `translate` past the one above it.
+    doc = _doc(600, 900)
+    layer = ops.create_group(doc, name="shifted", transform="translate(0,200)")
+    first = ops.add_diagram_node(doc, kind="service", label="A", parent=layer.id)
+    second = ops.add_diagram_node(doc, kind="service", label="B", parent=layer.id)
+    third = ops.add_diagram_node(doc, kind="service", label="C", parent=layer.id)
+
+    assert abs(_world_gap(doc, first.ref.id, second.ref.id) - _GAP_NODE) <= 0.5
+    assert abs(_world_gap(doc, second.ref.id, third.ref.id) - _GAP_NODE) <= 0.5
+    # And they are inside the layer they were added to, rather than at the world origin: the
+    # translate the caller put them under is honoured, not ignored.
+    for placed in (first, second, third):
+        assert _box(doc, placed.ref.id)[1] >= 200.0
+
+
+def test_a_table_stacks_under_the_nodes_above_it_in_a_transformed_layer() -> None:
+    doc = _doc(600, 900)
+    layer = ops.create_group(doc, name="shifted", transform="translate(0,200)")
+    ops.add_diagram_node(doc, kind="service", label="A", parent=layer.id)
+    last = ops.add_diagram_node(doc, kind="service", label="B", parent=layer.id)
+    table = ops.add_table(doc, rows=[["a", "1"], ["b", "2"]], parent=layer.id)
+    assert abs(_world_gap(doc, last.ref.id, table.ref.id) - _GAP_NODE) <= 0.5
+
+
+def test_a_chart_stacks_under_a_node_in_a_transformed_layer() -> None:
+    # A chart carries its position in its own translate, so the reported x/y IS what was
+    # written there — and, per the frame contract, it is stated in the parent's frame. (Its
+    # world box starts a little inside that corner, which is the plot's own margin, not drift.)
+    doc = _doc(600, 900)
+    layer = ops.create_group(doc, name="shifted", transform="translate(0,200)")
+    node = ops.add_diagram_node(doc, kind="service", label="A", parent=layer.id)
+    chart = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(categories=["a", "b"], series=[Series(name="s", values=[1, 2])]),
+        parent=layer.id,
+    )
+    assert abs(chart.y - (node.y + node.h + _GAP_NODE)) <= 0.5
+    # ... and that local y really is under the node in the world, not a translate past it.
+    assert abs(_box(doc, chart.ref.id)[1] - (200.0 + chart.y)) <= 5.0
+
+
+# --- G2: a facade whose BUILD fails leaves no orphan -------------------------
+
+
+def test_a_legend_with_an_unpaintable_swatch_adds_nothing_at_all() -> None:
+    doc = _doc(600, 400)
+    ops.add_diagram_node(doc, kind="service", label="API", x=20, y=20)
+    before = export_svg(doc)
+
+    with pytest.raises(InvalidArgument, match="swatch"):
+        ops.add_legend(doc, entries=[LegendItem(label="Ghost", swatch="no-such-kind")], x=200, y=20)
+
+    assert export_svg(doc) == before
+
+
+def test_a_chart_with_an_unknown_style_adds_nothing_at_all() -> None:
+    doc = _doc(600, 400)
+    ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(categories=["a"], series=[Series(name="s", values=[1])]),
+        x=10,
+        y=10,
+    )
+    before = export_svg(doc)
+
+    with pytest.raises(InvalidArgument, match="no style named"):
+        ops.add_chart(
+            doc,
+            kind="bar",
+            data=BarData(categories=["a"], series=[Series(name="s", values=[1])]),
+            x=10,
+            y=200,
+            styles=["nope"],
+        )
+
+    assert export_svg(doc) == before
+
+
+@pytest.mark.parametrize("kind", ["callout", "table", "card"])
+def test_the_other_annotation_facades_leave_no_orphan_either(kind: str) -> None:
+    doc = _doc(600, 400)
+    node = ops.add_diagram_node(doc, kind="service", label="API", x=20, y=20)
+    before = export_svg(doc)
+
+    with pytest.raises(InvalidArgument):
+        if kind == "callout":
+            ops.add_callout(doc, target=node.ref.id, text="hi", x=300, y=20, styles=["nope"])
+        elif kind == "table":
+            ops.add_table(doc, rows=[["a"]], x=300, y=20, styles=["nope"])
+        else:
+            ops.add_callout_card(doc, title="Note", x=300, y=20, styles=["nope"])
+
+    assert export_svg(doc) == before
+
+
+# --- G3: imported CSS is a shim, superseded as the registries take it over ----
+
+
+def test_unloading_a_theme_after_a_round_trip_actually_unstyles_the_document() -> None:
+    doc = _doc()
+    ops.load_theme(doc, "house", search_paths=[FIXTURES])
+    ops.add_rect(doc, x=10, y=10, width=40, height=20)
+    reopened = ops.load_svg_document(svg=export_svg(doc))
+
+    ops.load_theme(reopened, "house", search_paths=[FIXTURES])
+    assert ".house-shape" in str(reopened.stylesheet().text or "")
+    ops.unload_theme(reopened, "house")
+    # The imported copy used to outlive the registry, so the rules stayed and nothing unstyled.
+    assert ".house-shape" not in str(reopened.stylesheet().text or "")
+
+
+def test_two_export_import_load_cycles_do_not_grow_the_stylesheet() -> None:
+    doc = _doc()
+    ops.load_theme(doc, "house", search_paths=[FIXTURES])
+    ops.add_rect(doc, x=10, y=10, width=40, height=20)
+
+    sizes = []
+    current = doc
+    for _ in range(2):
+        current = ops.load_svg_document(svg=export_svg(current))
+        ops.load_theme(current, "house", search_paths=[FIXTURES])
+        sizes.append(len(str(current.stylesheet().text or "")))
+    assert sizes[0] == sizes[1]
+    assert str(current.stylesheet().text or "").count(".house-shape {") == 1
+
+
+def test_a_hand_authored_rule_survives_every_theme_move_around_it() -> None:
+    doc = _doc()
+    ops.load_theme(doc, "house", search_paths=[FIXTURES])
+    exported = export_svg(doc).replace(
+        "</style>", ".hand-authored { fill:#abcdef }</style>", 1
+    )
+
+    reopened = ops.load_svg_document(svg=exported)
+    assert ".hand-authored" in reopened.imported_css
+    ops.load_theme(reopened, "house", search_paths=[FIXTURES])
+    ops.set_theme_variant(reopened, "dark")
+    ops.unload_theme(reopened, "house")
+    # Nothing here manages `.hand-authored`, so nothing here is entitled to drop it.
+    assert ".hand-authored" in str(reopened.stylesheet().text or "")
+
+
+def test_defining_a_style_supersedes_only_its_own_imported_rule() -> None:
+    doc = _doc()
+    ops.define_style(doc, "accent", {"fill": "#ff0000"})
+    reopened = ops.load_svg_document(svg=export_svg(doc))
+    reopened.imported_css += "\n.accent text { fill:#00ff00 }"
+
+    ops.define_style(reopened, "accent", {"fill": "#0000ff"})
+    sheet = str(reopened.stylesheet().text or "")
+    assert sheet.count(".accent {") == 1
+    assert "#ff0000" not in sheet and "#0000ff" in sheet
+    assert ".accent text" in sheet  # a descendant rule is somebody's own CSS, not ours to drop
+
+
+# --- G4: a themed=False facade stays undressed -------------------------------
+
+
+def test_an_unthemed_node_is_not_dressed_by_an_edit_that_echoes_its_kind() -> None:
+    # The reviewer's exact scenario: the label is what the edit is FOR, and the kind is passed
+    # back unchanged the way a caller re-states a spec. The repair path used to read only the
+    # classes, see a `service` rule resident and the node not wearing it, and dress it — which
+    # is indistinguishable from the state a genuinely interrupted edit leaves behind.
+    doc = _doc()
+    ops.add_diagram_node(doc, kind="service", label="Themed", x=200, y=20)  # residency
+    placed = ops.add_diagram_node(doc, kind="service", label="API", x=20, y=20, themed=False)
+    assert _classes(doc, placed.ref.id) == []
+
+    ops.edit_diagram_node(doc, placed.ref.id, label="Gateway", kind="service")
+    assert _classes(doc, placed.ref.id) == []
+
+
+@pytest.mark.parametrize("facade", ["edge", "container", "callout", "card"])
+def test_no_unthemed_facade_is_dressed_by_a_kind_echo(facade: str) -> None:
+    doc = _doc(600, 400)
+    one = ops.add_diagram_node(doc, kind="service", label="A", x=20, y=20)
+    two = ops.add_diagram_node(doc, kind="service", label="B", x=300, y=20)
+
+    if facade == "edge":
+        target = ops.add_diagram_edge(
+            doc, source=one.ref.id, target=two.ref.id, kind="data", themed=False
+        ).ref.id
+        assert _classes(doc, target) == []
+        ops.edit_diagram_edge(doc, target, kind="data")
+    elif facade == "container":
+        target = ops.add_diagram_container(
+            doc, members=[one.ref.id], kind="cluster", themed=False
+        ).ref.id
+        assert _classes(doc, target) == []
+        ops.edit_diagram_container(doc, target, kind="cluster", label="Zone")
+    elif facade == "callout":
+        target = ops.add_callout(
+            doc, target=one.ref.id, text="a note", kind="note", x=300, y=200, themed=False
+        ).ref.id
+        assert _classes(doc, target) == []
+        ops.edit_callout(doc, target, text="a longer note", kind="note")
+    else:
+        target = ops.add_callout_card(
+            doc, title="Note", kind="info", x=300, y=200, themed=False
+        ).ref.id
+        assert _classes(doc, target) == []
+        ops.edit_callout_card(doc, target, title="Note!", kind="info")
+
+    assert _classes(doc, target) == []
+
+
+def test_clearing_a_facades_theme_survives_a_later_kind_echo() -> None:
+    doc = _doc()
+    placed = ops.add_diagram_node(doc, kind="service", label="API", x=20, y=20)
+    assert "default-service" in _classes(doc, placed.ref.id)
+
+    ops.clear_theme(doc, placed.ref.id)
+    assert _classes(doc, placed.ref.id) == []
+    # Undressing it was a decision; naming its own kind back at it is not a request to overturn.
+    ops.edit_diagram_node(doc, placed.ref.id, label="Gateway", kind="service")
+    assert _classes(doc, placed.ref.id) == []
+
+
+def test_a_dressed_facade_stripped_by_hand_is_still_repaired_by_naming_its_kind() -> None:
+    # The other half of G4: a THEMED facade left undressed by an interrupted edit must still be
+    # repairable, which is the whole reason the short-circuit reads the classes.
+    doc = _doc()
+    placed = ops.add_diagram_node(doc, kind="service", label="API", x=20, y=20)
+    ops.remove_styles(doc, placed.ref.id, ["default-shape", "default-service"])
+    assert _classes(doc, placed.ref.id) == []
+
+    ops.edit_diagram_node(doc, placed.ref.id, kind="service")
+    assert "default-service" in _classes(doc, placed.ref.id)
+
+
+def test_a_scoped_apply_theme_makes_a_cleared_facade_dressable_again() -> None:
+    # The other direction of the same flag: dressing a subtree says it is meant to be dressed,
+    # so a facade that was cleared and then re-dressed is re-kindable again.
+    doc = _doc()
+    placed = ops.add_diagram_node(doc, kind="service", label="API", x=20, y=20)
+    ops.clear_theme(doc, placed.ref.id)
+    assert _classes(doc, placed.ref.id) == []
+
+    ops.load_theme(doc, "house", search_paths=[FIXTURES])
+    ops.apply_theme(doc, placed.ref.id, "house")
+    assert "house-shape" in _classes(doc, placed.ref.id)
+
+    ops.edit_diagram_node(doc, placed.ref.id, kind="datastore")
+    assert "default-datastore" in _classes(doc, placed.ref.id)
+
+
+# --- G5: resolving a dressing is a question, not a change --------------------
+
+
+def test_a_failed_boolean_leaves_a_themeless_document_themeless() -> None:
+    doc = _doc()
+    a = ops.add_rect(doc, x=10, y=10, width=40, height=40).id
+    b = ops.add_rect(doc, x=30, y=20, width=40, height=40).id
+    assert doc.theme_meta == {}
+
+    with pytest.raises(InvalidArgument):
+        ops.boolean(doc, op="union", targets=[a, b], role="service", styles=["nope"])
+
+    # The role RESOLVES (the bundled default serves it) but the style does not, so the op fails
+    # after the fallback theme was consulted — consulting it must not have installed it.
+    assert doc.theme_meta == {}
+    assert doc.theme_css == {}
+    assert not str(doc.stylesheet().text or "").strip()
+
+
+def test_asking_whether_a_role_is_servable_installs_nothing() -> None:
+    doc = _doc()
+    with pytest.raises(InvalidArgument):
+        ops.add_rect(doc, x=0, y=0, width=10, height=10, role="service", styles=["nope"])
+    assert doc.theme_meta == {}
+    assert not str(doc.stylesheet().text or "").strip()
+
+
+def test_a_successful_role_using_op_installs_the_fallback_exactly_once() -> None:
+    doc = _doc()
+    a = ops.add_rect(doc, x=10, y=10, width=40, height=40).id
+    b = ops.add_rect(doc, x=30, y=20, width=40, height=40).id
+    ref = ops.boolean(doc, op="union", targets=[a, b], role="service")
+    assert "default-service" in _classes(doc, ref.id)
+    assert list(doc.theme_meta) == ["default"]
+    sheet = str(doc.stylesheet().text or "")
+    assert sheet.count(".default-service {") == 1
+
+
+# --- G6: an explicit x/y is parent-local, exactly as add_rect's is -----------
+
+
+def test_an_explicit_legend_position_means_what_it_means_for_a_rect() -> None:
+    doc = _doc(600, 400)
+    layer = ops.create_group(doc, name="shifted", transform="translate(100,50)")
+    ops.add_diagram_node(doc, kind="service", label="API", x=20, y=20, parent=layer.id)
+    legend = ops.add_legend(doc, x=10, y=10, parent=layer.id)
+    rect = ops.add_rect(doc, x=10, y=10, width=5, height=5, parent=layer.id)
+
+    legend_box, rect_box = _box(doc, legend.ref.id), _box(doc, rect.id)
+    assert abs(legend_box[0] - rect_box[0]) <= 0.5
+    assert abs(legend_box[1] - rect_box[1]) <= 0.5
+    assert abs(legend_box[0] - 110.0) <= 0.5  # parent offset + the caller's own 10
+
+
+def test_an_explicit_callout_position_means_what_it_means_for_a_rect() -> None:
+    doc = _doc(600, 400)
+    layer = ops.create_group(doc, name="shifted", transform="translate(100,50)")
+    node = ops.add_diagram_node(doc, kind="service", label="API", x=20, y=20, parent=layer.id)
+    callout = ops.add_callout(
+        doc, target=node.ref.id, text="a note", parent=layer.id, x=250, y=150
+    )
+    card = next(
+        child for child in doc.resolve(callout.ref.id) if str(child.TAG) == "rect"
+    )
+    box = _box(doc, str(card.get_id()))
+    assert abs(box[0] - 350.0) <= 0.5 and abs(box[1] - 200.0) <= 0.5
+
+
+# --- G7: an edit validates before it mutates ---------------------------------
+
+
+def test_a_node_edit_with_a_bogus_kind_changes_nothing_at_all() -> None:
+    doc = _doc()
+    placed = ops.add_diagram_node(doc, kind="service", label="API", x=20, y=20)
+    before = export_svg(doc)
+
+    with pytest.raises(InvalidArgument):
+        ops.edit_diagram_node(
+            doc, placed.ref.id, label="a much longer label than before", kind="no-such-kind"
+        )
+
+    # The label used to be re-measured, the shape re-sized and the text re-written BEFORE the
+    # kind was resolved, so a refused edit left a node relabelled by a call that failed.
+    assert export_svg(doc) == before
+
+
+# --- G8: a refit writes both children in the group's frame -------------------
+
+
+def test_a_container_refits_around_its_members_after_its_rect_is_translated() -> None:
+    doc = _doc(600, 400)
+    one = ops.add_diagram_node(doc, kind="service", label="A", x=20, y=20)
+    two = ops.add_diagram_node(doc, kind="service", label="B", x=250, y=20)
+    placed = ops.add_diagram_container(
+        doc, members=[one.ref.id, two.ref.id], label="Zone"
+    )
+    rect = next(child for child in doc.resolve(placed.ref.id) if str(child.TAG) == "rect")
+
+    ops.translate_node(doc, str(rect.get_id()), dx=40, dy=30)
+    ops.reflow(doc)
+
+    members = (
+        min(_box(doc, one.ref.id)[0], _box(doc, two.ref.id)[0]),
+        min(_box(doc, one.ref.id)[1], _box(doc, two.ref.id)[1]),
+        max(
+            _box(doc, one.ref.id)[0] + _box(doc, one.ref.id)[2],
+            _box(doc, two.ref.id)[0] + _box(doc, two.ref.id)[2],
+        ),
+    )
+    first = _box(doc, str(rect.get_id()))
+    assert first[0] < members[0] and first[1] < members[1]
+    assert first[0] + first[2] > members[2]
+    # The label rides with the box, and a second pass is a fixpoint rather than another slide.
+    label = next(child for child in doc.resolve(placed.ref.id) if str(child.TAG) == "text")
+    label_box = _box(doc, str(label.get_id()))
+    assert first[0] <= label_box[0] + 0.5 and first[1] <= label_box[1] + 0.5
+
+    ops.reflow(doc)
+    assert _close(first, _box(doc, str(rect.get_id())), 0.5)
+
+
+# --- G9: a facade wears whichever of its hooks the theme actually defines ----
+
+_GAUGE = """
+:root { --gauge-ink: #204020 }
+
+/** Bars, gauge's way. Deliberately NO bare `.chart` rule. */
+.chart--bar { fill: none }
+
+/** An axis. */
+.axis { stroke: var(--gauge-ink) }
+
+/** A gridline. */
+.gridline { stroke: #dddddd }
+
+/** A tick label. */
+.tick-label { fill: var(--gauge-ink) }
+
+/** The first series. */
+.series-1 { fill: #204020 }
+"""
+_GAUGE_MANIFEST = 'name = "gauge"\n\n[serves]\ncategories = ["chart"]\n'
+
+
+def _part_classes(doc: Document, target: str) -> set[str]:
+    group = doc.resolve(target)
+    return {
+        cls
+        for child in group.iter()
+        if child is not group
+        for cls in str(child.get("class") or "").split()
+    }
+
+
+def test_a_chart_wearing_only_its_type_hook_still_dresses_its_parts(tmp_path: Path) -> None:
+    paths = _write_theme(tmp_path, "gauge", _GAUGE, _GAUGE_MANIFEST)
+    doc = _doc(400, 300)
+    ops.load_theme(doc, "gauge", search_paths=[paths])
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(categories=["a", "b"], series=[Series(name="s", values=[1, 2])]),
+        x=10,
+        y=10,
+    )
+    assert "gauge-chart--bar" in _classes(doc, placed.ref.id)
+    assert "gauge-chart" not in _classes(doc, placed.ref.id)
+
+    # `worn_theme` used to ask about the bare `.chart` hook alone, call this chart undressed,
+    # and rebuild every axis, gridline and bar with no class on it.
+    built = _part_classes(doc, placed.ref.id)
+    assert "gauge-axis" in built and "gauge-series-1" in built
+
+    ops.edit_chart(doc, placed.ref.id, title="Counts")
+    assert _part_classes(doc, placed.ref.id) >= {"gauge-axis", "gauge-series-1"}

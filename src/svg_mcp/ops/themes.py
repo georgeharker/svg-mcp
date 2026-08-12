@@ -34,7 +34,13 @@ from ..theme.css import CATEGORIES
 from ..theme.loader import DEFAULT_THEME, default_search_paths, materialize
 from ..theme.loader import load_theme as _read_theme
 from ..theme.model import MaterializedTheme, Theme
-from .resources import _class_list, _set_class_list, _sync_stylesheet, apply_styles
+from .resources import (
+    _class_list,
+    _set_class_list,
+    _sync_stylesheet,
+    apply_styles,
+    supersede_imported_theme,
+)
 
 
 class StyleInfo(BaseModel):
@@ -101,7 +107,12 @@ def _install(
     search_paths: Sequence[Path],
     routes: Sequence[str],
 ) -> None:
-    """Put a materialized theme's block and meta into the document, replacing any prior one."""
+    """Put a materialized theme's block and meta into the document, replacing any prior one.
+
+    The block SUPERSEDES whatever an import preserved of this same theme, so a round-tripped
+    document has exactly one copy of these rules and unloading the theme really does undress it.
+    """
+    supersede_imported_theme(doc, result.name, result.css)
     doc.theme_css[result.name] = result.css
     doc.theme_meta[result.name] = ThemeMeta(
         variant=result.variant,
@@ -406,26 +417,54 @@ path this fallback would otherwise take on every single construction.
 """
 
 
-def _fallback_theme(doc: Document, suffix: str) -> str | None:
-    """The bundled ``default`` theme, materialized on FIRST NEED, if it defines ``-{suffix}``.
+@dataclass(frozen=True, slots=True)
+class _PendingTheme:
+    """A theme READ and materialized to answer a hook, and not (yet) installed in a document.
 
-    Installed with no routes at all: it dresses the roles (and the chart category) a document
-    actually names and nothing else, so a document that never names one stays exactly as it
-    would be with no theme engine in play. A project or user theme called ``default`` shadows
-    the bundled one, the same way it does for an explicit ``load_theme``. Returns the NAME of
-    the theme that answered, so a caller can go on to ask it for its other hooks too.
+    Resolving a dressing may have to reach for the bundled default, and resolving is allowed to
+    answer questions but not to change the document — so what an answer would COST is carried
+    here until something actually attaches it. See :class:`Dressing`.
+    """
+
+    theme: Theme
+    result: MaterializedTheme
+    search_paths: tuple[Path, ...]
+
+
+def _read_fallback(doc: Document, suffix: str) -> tuple[str, _PendingTheme | None] | None:
+    """The bundled ``default`` theme, if it defines ``-{suffix}`` — READ, never installed.
+
+    Returns the name of the theme that answered plus, when it is not resident yet, what
+    installing it would take. A project or user theme called ``default`` shadows the bundled one,
+    the same way it does for an explicit ``load_theme``.
     """
     if DEFAULT_THEME in doc.theme_meta:
-        return DEFAULT_THEME if _hook(doc, DEFAULT_THEME, suffix) is not None else None
+        return (DEFAULT_THEME, None) if _hook(doc, DEFAULT_THEME, suffix) is not None else None
     paths = default_search_paths()
     theme = _read_theme(DEFAULT_THEME, paths)
     if theme.name in doc.theme_meta:
-        return theme.name if _hook(doc, theme.name, suffix) is not None else None
+        return (theme.name, None) if _hook(doc, theme.name, suffix) is not None else None
     result = materialize(theme)
     if f"{theme.name}-{suffix}" not in result.class_names:
-        return None  # nothing to serve, so nothing is installed either
-    _install(doc, theme, result, search_paths=paths, routes=())
-    return theme.name
+        return None  # nothing to serve, so nothing would be installed either
+    return (theme.name, _PendingTheme(theme=theme, result=result, search_paths=tuple(paths)))
+
+
+def _fallback_theme(doc: Document, suffix: str) -> str | None:
+    """The bundled ``default`` theme, materialized AND installed on FIRST NEED, if it serves it.
+
+    Installed with no routes at all: it dresses the roles (and the chart category) a document
+    actually names and nothing else, so a document that never names one stays exactly as it
+    would be with no theme engine in play. Returns the NAME of the theme that answered, so a
+    caller can go on to ask it for its other hooks too.
+    """
+    found = _read_fallback(doc, suffix)
+    if found is None:
+        return None
+    name, pending = found
+    if pending is not None:
+        _install(doc, pending.theme, pending.result, search_paths=pending.search_paths, routes=())
+    return name
 
 
 def _fallback_hook(doc: Document, role: str) -> str | None:
@@ -515,6 +554,110 @@ def serving_theme(doc: Document, role: str) -> ServingTheme:
     return ServingTheme()
 
 
+@dataclass(frozen=True, slots=True)
+class Dressing:
+    """The classes a node will wear, plus the theme install that attaching them still owes.
+
+    Resolving is PURE — see :func:`resolve_dressing` — so the bundled default a role needs may
+    have been read off disk and materialized in memory without being written anywhere. Handing
+    the dressing to :func:`attach_dressing` is what commits both halves; dropping it (a failed
+    validation, a facade whose build raised) leaves the document exactly as it was.
+    """
+
+    classes: tuple[str, ...]
+    pending: tuple[_PendingTheme, ...] = ()
+
+
+def resolve_dressing(
+    doc: Document,
+    *,
+    category: str | None,
+    prim: str | None = None,
+    role: str | None = None,
+    styles: Sequence[str] | None = None,
+    themed: bool = True,
+) -> Dressing:
+    """Work out what a node would wear, WITHOUT needing the node — or touching the document.
+
+    Every way this can fail (an unservable role, a style name nothing defines) fails here, so a
+    caller can validate a dressing before it commits any structure — and a caller that then
+    throws the answer away has changed nothing: no theme is installed, no stylesheet rewritten.
+    See :func:`apply_auto_styles` for the cascade rules.
+    """
+    classes: list[str] = []
+    pending: dict[str, _PendingTheme] = {}
+
+    def hook(theme: str | None, suffix: str) -> str | None:
+        """``{theme}-{suffix}``, from a resident theme or from one merely read so far."""
+        waiting = pending.get(theme) if theme is not None else None
+        if waiting is None:
+            return _hook(doc, theme, suffix)
+        name = f"{theme}-{suffix}"
+        return name if name in waiting.result.class_names else None
+
+    def fallback(suffix: str) -> str | None:
+        """The bundled default's name, if it serves ``-{suffix}`` — read, not installed."""
+        for name, held in pending.items():
+            if f"{name}-{suffix}" in held.result.class_names:
+                return name
+        found = _read_fallback(doc, suffix)
+        if found is None:
+            return None
+        name, waiting = found
+        if waiting is not None:
+            pending[name] = waiting
+        return name
+
+    category_theme = doc.theme_routing.get(category) if category is not None else None
+    if themed and category is not None:
+        if category_theme is None and category in _FALLBACK_CATEGORIES:
+            category_theme = fallback(category)
+        suffixes = [category, f"{category}--{prim}"] if prim else [category]
+        classes.extend(
+            found for found in (hook(category_theme, s) for s in suffixes) if found is not None
+        )
+    if themed and role is not None:
+        # Routed theme first, then the category's theme, then the bundled default — the
+        # recorded contract is that the default serves any role NO resident theme was routed
+        # for, and a theme claiming a CATEGORY is not a claim on every role inside it.
+        role_theme = doc.theme_routing.get(role)
+        found = hook(role_theme, role) if role_theme is not None else None
+        if found is None:
+            found = hook(category_theme, role)
+        if found is None:
+            found = hook(fallback(role), role)
+        if found is None:
+            served = sorted(key for key in doc.theme_routing if key not in CATEGORIES)
+            offered = _fallback_roles(doc)
+            raise InvalidArgument(
+                f"no theme defines a style for role {role!r}; residents serve: "
+                f"{served or '(none)'}; the fallback theme offers: {offered or '(none)'}"
+            )
+        classes.append(found)
+    classes.extend(resolve_style_ref(doc, ref) for ref in styles or ())
+    return Dressing(classes=tuple(classes), pending=tuple(pending.values()))
+
+
+def attach_dressing(doc: Document, element: BaseElement, dressing: Dressing) -> list[str]:
+    """Commit a resolved dressing: install what it owes, then link the node to its classes.
+
+    The install is deliberately deferred to here rather than done at resolve time — a document
+    must not grow a theme block because something ASKED whether a role could be served.
+    """
+    for waiting in dressing.pending:
+        if waiting.result.name not in doc.theme_meta:
+            _install(
+                doc,
+                waiting.theme,
+                waiting.result,
+                search_paths=waiting.search_paths,
+                routes=(),
+            )
+    if dressing.classes:
+        apply_styles(doc, str(element.get_id()), list(dressing.classes))
+    return list(dressing.classes)
+
+
 def resolve_auto_styles(
     doc: Document,
     *,
@@ -524,41 +667,16 @@ def resolve_auto_styles(
     styles: Sequence[str] | None = None,
     themed: bool = True,
 ) -> list[str]:
-    """Work out the class list a node would wear, WITHOUT needing the node — or touching the tree.
+    """The class list a node would wear — :func:`resolve_dressing` for a caller that only asks.
 
-    Every way this can fail (an unservable role, a style name nothing defines) fails here, so a
-    caller can validate a dressing before it commits any structure to the document and be sure
-    that the matching :func:`apply_auto_styles` will not raise afterwards. See it for the rules.
+    Pure: use it to check that a dressing is servable (and that the matching
+    :func:`apply_auto_styles` will not raise) without committing anything to the document.
     """
-    classes: list[str] = []
-    category_theme = doc.theme_routing.get(category) if category is not None else None
-    if themed and category is not None:
-        if category_theme is None and category in _FALLBACK_CATEGORIES:
-            category_theme = _fallback_theme(doc, category)
-        suffixes = [category, f"{category}--{prim}"] if prim else [category]
-        classes.extend(
-            hook for hook in (_hook(doc, category_theme, s) for s in suffixes) if hook is not None
-        )
-    if themed and role is not None:
-        # Routed theme first, then the category's theme, then the bundled default — the
-        # recorded contract is that the default serves any role NO resident theme was routed
-        # for, and a theme claiming a CATEGORY is not a claim on every role inside it.
-        role_theme = doc.theme_routing.get(role)
-        hook = _hook(doc, role_theme, role) if role_theme is not None else None
-        if hook is None:
-            hook = _hook(doc, category_theme, role)
-        if hook is None:
-            hook = _fallback_hook(doc, role)
-        if hook is None:
-            served = sorted(key for key in doc.theme_routing if key not in CATEGORIES)
-            offered = _fallback_roles(doc)
-            raise InvalidArgument(
-                f"no theme defines a style for role {role!r}; residents serve: "
-                f"{served or '(none)'}; the fallback theme offers: {offered or '(none)'}"
-            )
-        classes.append(hook)
-    classes.extend(resolve_style_ref(doc, ref) for ref in styles or ())
-    return classes
+    return list(
+        resolve_dressing(
+            doc, category=category, prim=prim, role=role, styles=styles, themed=themed
+        ).classes
+    )
 
 
 def apply_auto_styles(
@@ -583,12 +701,13 @@ def apply_auto_styles(
     nothing anywhere defines is an error. An UNROUTED category falls back the same way, but only
     for the handful of categories in ``_FALLBACK_CATEGORIES`` — see there for why not all.
     """
-    classes = resolve_auto_styles(
-        doc, category=category, prim=prim, role=role, styles=styles, themed=themed
+    return attach_dressing(
+        doc,
+        element,
+        resolve_dressing(
+            doc, category=category, prim=prim, role=role, styles=styles, themed=themed
+        ),
     )
-    if classes:
-        apply_styles(doc, str(element.get_id()), classes)
-    return classes
 
 
 # --- scoped apply / clear ----------------------------------------------------
@@ -672,8 +791,13 @@ def apply_theme(
     other themes' classes first, carrying their roles across as it goes. A node wearing no theme
     class at all gets this theme's category hooks, derived from what it was built as.
 
+    A facade root this dresses has its spec's ``themed`` flag set: appearance and recorded intent
+    have to agree, or a later edit that echoes the facade's own kind cannot tell which to believe.
+
     Classes no resident theme defines — anything from ``define_style`` — are never touched.
     """
+    from .diagram import set_spec_themed  # diagram imports this module, not vice versa
+
     defines, used_variant = _materialize_for_scope(doc, theme, variant, search_paths)
     prefix = f"{theme}-"
     change = ThemeScopeChange(theme=theme, variant=used_variant)
@@ -693,6 +817,8 @@ def apply_theme(
         if not gained and len(remaining) == len(current):
             continue
         _set_class_list(node, [*remaining, *gained])
+        if gained:
+            set_spec_themed(node, True)
         change.nodes_touched += 1
         change.classes_added += len(gained)
         change.classes_removed += len(current) - len(remaining)
@@ -704,7 +830,13 @@ def clear_theme(doc: Document, target: str, theme: str | None = None) -> ThemeSc
 
     The rules stay in the document — this unlinks nodes from them. Doc-local styles from
     ``define_style`` are left alone, and a node left with no classes loses the attribute.
+
+    A facade root this strips has its spec's ``themed`` flag cleared: undressing it is a decision
+    about how it should look, and an edit that later echoes the facade's own kind must honour it
+    rather than quietly dress it again.
     """
+    from .diagram import set_spec_themed  # diagram imports this module, not vice versa
+
     if theme is not None:
         _resident(doc, theme)
     names = {theme} if theme is not None else set(doc.theme_meta)
@@ -717,6 +849,7 @@ def clear_theme(doc: Document, target: str, theme: str | None = None) -> ThemeSc
         if len(kept) == len(current):
             continue
         _set_class_list(node, kept)
+        set_spec_themed(node, False)
         change.nodes_touched += 1
         change.classes_removed += len(current) - len(kept)
     return change
