@@ -124,6 +124,13 @@
   --chart-axis-label-size: 11px;
   --chart-title-size: 13px;
   --chart-gap: 8px;
+  /* The numbers written ON the data, and the labels on reference lines. A shade under the ticks:
+   * a value label sits inside the plot, where it has to stay out of the data's way. */
+  --chart-value-label-size: 10px;
+  --chart-reference-label-size: 10px;
+  /* The KPI in a donut's hole, and its caption. The one place a chart sets type big. */
+  --chart-donut-center-size: 20px;
+  --chart-donut-subtext-size: 10px;
 }
 
 /* --- diagram node kinds ------------------------------------------------
@@ -582,6 +589,60 @@
   font-family: var(--font);
   font-size: var(--chart-title-size);
   font-weight: 600;
+}
+
+/** A value written on the data: a bar's number at its end, a point's above its mark, a donut
+ * slice's outside the ring. Full ink rather than the ticks' muted grey — it IS the datum, where
+ * a tick is only the ruler beside it — but a size down, because it sits among the marks. */
+.value-label {
+  fill: var(--ink);
+  stroke: none;
+  font-family: var(--font);
+  font-size: var(--chart-value-label-size);
+}
+
+/** A reference line: a threshold, a target, last year's number. Dashed and half-strength, so it
+ * reads as a statement ABOUT the data rather than as another series in it. */
+.reference {
+  stroke: var(--ink);
+  stroke-opacity: 0.6;
+  stroke-width: 1px;
+  stroke-dasharray: 4 3;
+  fill: none;
+}
+
+/** A reference BAND — the same statement with a width to it (a tolerance, a target range). It
+ * comes after `.reference` deliberately: a band wears both classes, and this is the half that
+ * turns the dashed rule into a wash. */
+.reference-band {
+  fill: var(--ink);
+  fill-opacity: 0.08;
+  stroke: none;
+}
+
+/** What a reference line is called, right-aligned at the end of it. */
+.reference-label {
+  fill: var(--ink-muted);
+  stroke: none;
+  font-family: var(--font);
+  font-size: var(--chart-reference-label-size);
+}
+
+/** The number in a donut's hole — the KPI the ring is there to break down. */
+.donut-center {
+  fill: var(--ink);
+  stroke: none;
+  font-family: var(--font);
+  font-size: var(--chart-donut-center-size);
+  font-weight: 600;
+}
+
+/** The caption under it: what the number is OF. */
+.donut-subtext {
+  fill: var(--ink-muted);
+  stroke: none;
+  font-family: var(--font);
+  font-size: var(--chart-donut-subtext-size);
 }
 
 /** Series 1 — the house first colour: single-series bars, lines, and every sparkline. */

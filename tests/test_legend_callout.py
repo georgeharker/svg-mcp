@@ -24,6 +24,14 @@ from svg_mcp.ops.annotate import (
     scan_legend_entries,
     wrap_words,
 )
+from svg_mcp.ops.chart import (
+    BarData,
+    DonutData,
+    PointSeries,
+    ScatterData,
+    Series,
+    Slice,
+)
 from svg_mcp.ops.diagram import Box, measure_label
 from svg_mcp.query import get_params
 from svg_mcp.render import get_renderer
@@ -649,6 +657,147 @@ def test_get_params_hands_back_the_spec_a_callout_was_built_from() -> None:
     assert params["target"] == node.ref.id
     assert (params["text"], params["kind"], params["side"]) == ("hot path", "warning", "S")
     assert (params["distance"], params["max_width"], params["auto"]) == (25.0, 160.0, True)
+
+
+# --- 8b. callouts that point at one datum of a chart -------------------------
+
+
+def _chart(doc: Document, values: list[float] | None = None) -> ops.PlacedChart:
+    return ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["a", "b", "c"],
+            series=[Series(name="s", values=values or [10.0, 42.0, 73.0])],
+        ),
+        x=0,
+        y=0,
+        width=320,
+        height=200,
+    )
+
+
+def _bar_top(doc: Document, chart_id: str, index: int) -> tuple[float, float]:
+    """The middle of the top edge of one bar, in world coordinates."""
+    group = next(
+        child
+        for child in doc.resolve(chart_id)
+        if str(child.get("class") or "").startswith("default-series")
+    )
+    rect = [node for node in group if str(node.tag).endswith("rect")][index]
+    return (_num(rect, "x") + _num(rect, "width") / 2.0, _num(rect, "y"))
+
+
+def test_a_datum_callout_lands_on_the_bar_it_names() -> None:
+    doc = _doc()
+    chart = _chart(doc)
+    placed = ops.add_callout(
+        doc, target=chart.ref.id, text="the spike", datum=ops.ChartDatum(index=1), x=420, y=60
+    )
+    assert _ends(doc, placed.ref.id)[1] == pytest.approx(_bar_top(doc, chart.ref.id, 1), abs=1.0)
+
+
+def test_a_datum_callout_names_its_series_by_name_as_well_as_by_number() -> None:
+    doc = _doc()
+    chart = ops.add_chart(
+        doc,
+        kind="scatter",
+        data=ScatterData(
+            series=[
+                PointSeries(name="a", points=[(1, 2), (2, 5)]),
+                PointSeries(name="b", points=[(1, 9), (2, 7)]),
+            ]
+        ),
+        x=0,
+        y=0,
+        width=320,
+        height=200,
+    )
+    by_name = ops.add_callout(
+        doc, target=chart.ref.id, text="b", datum=ops.ChartDatum(series="b", index=0), x=420, y=60
+    )
+    by_index = ops.add_callout(
+        doc, target=chart.ref.id, text="b", datum=ops.ChartDatum(series=1, index=0), x=420, y=200
+    )
+    assert _ends(doc, by_name.ref.id)[1] == pytest.approx(_ends(doc, by_index.ref.id)[1])
+
+
+def test_a_datum_callout_points_at_the_slice_of_a_donut() -> None:
+    doc = _doc()
+    chart = ops.add_chart(
+        doc,
+        kind="donut",
+        data=DonutData(slices=[Slice(label="a", value=75), Slice(label="b", value=25)]),
+        x=0,
+        y=0,
+        width=200,
+        height=200,
+    )
+    placed = ops.add_callout(
+        doc, target=chart.ref.id, text="the rest", datum=ops.ChartDatum(index=1), x=420, y=60
+    )
+    # Slice b runs from 9 o'clock to 12, so its middle is up and to the left of the ring's centre.
+    x, y = _ends(doc, placed.ref.id)[1]
+    assert x < 100.0 and y < 100.0
+
+
+def test_a_datum_callout_re_anchors_after_the_chart_s_data_changes() -> None:
+    doc = _doc()
+    chart = _chart(doc)
+    placed = ops.add_callout(
+        doc, target=chart.ref.id, text="the spike", datum=ops.ChartDatum(index=1), x=420, y=60
+    )
+    before = _ends(doc, placed.ref.id)[1]
+    ops.edit_chart(
+        doc,
+        chart.ref.id,
+        data=BarData(categories=["a", "b", "c"], series=[Series(name="s", values=[10, 5, 73])]),
+    )
+    assert ops.reflow(doc).callouts_reanchored == 1
+    after = _ends(doc, placed.ref.id)[1]
+    assert after != pytest.approx(before, abs=1.0)
+    assert after == pytest.approx(_bar_top(doc, chart.ref.id, 1), abs=1.0)
+
+
+def test_a_datum_callout_survives_the_round_trip_through_the_spec() -> None:
+    doc = _doc()
+    chart = _chart(doc)
+    placed = ops.add_callout(
+        doc, target=chart.ref.id, text="the spike", datum=ops.ChartDatum(series=0, index=2)
+    )
+    spec = read_callout_spec(doc.resolve(placed.ref.id))
+    assert spec is not None and spec.datum is not None
+    assert (spec.datum.series, spec.datum.index) == (0, 2)
+
+
+def test_a_callout_at_a_box_writes_no_datum_into_its_spec_at_all() -> None:
+    doc = _doc()
+    node = ops.add_diagram_node(doc, kind="service", label="API", x=40, y=220)
+    placed = ops.add_callout(doc, target=node.ref.id, text="plain")
+    assert "datum" not in str(doc.resolve(placed.ref.id).get("data-callout"))
+
+
+def test_a_datum_past_the_end_of_the_series_is_refused_by_number() -> None:
+    doc = _doc()
+    chart = _chart(doc)
+    with pytest.raises(InvalidArgument, match="index 9"):
+        ops.add_callout(doc, target=chart.ref.id, text="?", datum=ops.ChartDatum(index=9))
+
+
+def test_a_datum_on_a_series_the_chart_has_not_got_is_refused_by_name() -> None:
+    doc = _doc()
+    chart = _chart(doc)
+    with pytest.raises(InvalidArgument, match="'nope'"):
+        ops.add_callout(
+            doc, target=chart.ref.id, text="?", datum=ops.ChartDatum(series="nope", index=0)
+        )
+
+
+def test_a_datum_on_something_that_is_not_a_chart_says_so() -> None:
+    doc = _doc()
+    node = ops.add_diagram_node(doc, kind="service", label="API", x=40, y=220)
+    with pytest.raises(InvalidArgument, match="is not a chart"):
+        ops.add_callout(doc, target=node.ref.id, text="?", datum=ops.ChartDatum(index=0))
 
 
 # --- 9. what it actually renders ---------------------------------------------

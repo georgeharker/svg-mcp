@@ -22,7 +22,10 @@ from svg_mcp.ops.chart import (
     DonutData,
     LineData,
     PointSeries,
+    ReferenceLine,
+    Scale,
     ScatterData,
+    Segment,
     Series,
     Sizes,
     Slice,
@@ -32,13 +35,19 @@ from svg_mcp.ops.chart import (
     donut_angles,
     format_tick,
     include_zero,
+    label_centre,
     log_ticks,
     marker_points,
     nice_step,
     nice_ticks,
+    order_indices,
     plot_margins,
     read_chart_spec,
+    reference_extent,
     resolve_axis,
+    stack_extents,
+    stack_segments,
+    step_points,
     tick_text,
 )
 from svg_mcp.query import get_params
@@ -1351,3 +1360,809 @@ def test_passing_axes_none_is_the_same_as_not_passing_axes() -> None:
     implicit = _bar_chart(doc, [10.0, 42.0, 73.0])
     explicit = _bar_chart(doc, [10.0, 42.0, 73.0], axes=None)
     assert _drawing_digest(doc, [implicit.ref.id]) == _drawing_digest(doc, [explicit.ref.id])
+
+
+# --- 14. the presentation layer, pure ----------------------------------------
+
+
+def test_a_stack_runs_positives_up_and_negatives_down_from_zero() -> None:
+    assert stack_segments([10.0, 20.0]) == [Segment(0.0, 10.0), Segment(10.0, 30.0)]
+    # -5 does not sit on top of the 10: it hangs off zero on its own running total.
+    assert stack_segments([10.0, -5.0, -3.0]) == [
+        Segment(0.0, 10.0),
+        Segment(-5.0, 0.0),
+        Segment(-8.0, -5.0),
+    ]
+
+
+def test_a_zero_keeps_its_place_in_the_stacking_order() -> None:
+    assert stack_segments([10.0, 0.0, 5.0]) == [
+        Segment(0.0, 10.0),
+        Segment(10.0, 10.0),
+        Segment(10.0, 15.0),
+    ]
+
+
+def test_a_stack_reaches_as_far_down_as_it_reaches_up() -> None:
+    assert stack_extents([10.0, -5.0, -3.0]) == (-8.0, 10.0)
+    assert stack_extents([10.0, 20.0]) == (0.0, 30.0)
+
+
+def test_a_post_step_holds_the_value_and_then_rises() -> None:
+    assert step_points([(0.0, 1.0), (1.0, 4.0)], "post") == [(0.0, 1.0), (1.0, 1.0), (1.0, 4.0)]
+
+
+def test_a_pre_step_rises_first_and_then_holds() -> None:
+    assert step_points([(0.0, 1.0), (1.0, 4.0)], "pre") == [(0.0, 1.0), (0.0, 4.0), (1.0, 4.0)]
+
+
+def test_a_step_of_one_point_is_that_point() -> None:
+    assert step_points([(2.0, 3.0)], "post") == [(2.0, 3.0)]
+
+
+def test_a_value_label_sits_outside_its_mark_until_the_edge_is_too_close() -> None:
+    # A bar ending at 100 in a plot running 0..200: plenty of room above it.
+    assert label_centre(100.0, -1.0, gap=8.0, extent=10.0, lo=0.0, hi=200.0) == 87.0
+    # The same bar ending at 4: outside would put half the label off the top, so it flips inside.
+    assert label_centre(4.0, -1.0, gap=8.0, extent=10.0, lo=0.0, hi=200.0) == 17.0
+    # And the same rule the other way round, for a horizontal bar growing to the right.
+    assert label_centre(100.0, 1.0, gap=8.0, extent=20.0, lo=0.0, hi=200.0) == 118.0
+    assert label_centre(196.0, 1.0, gap=8.0, extent=20.0, lo=0.0, hi=200.0) == 178.0
+
+
+def test_a_reference_off_the_axis_is_dropped_but_a_band_is_clamped_to_it() -> None:
+    scale = Scale(lo=0.0, hi=80.0)
+    assert reference_extent(60.0, None, scale) == (60.0, 60.0)
+    assert reference_extent(500.0, None, scale) is None
+    assert reference_extent(-50.0, 40.0, scale) == (0.0, 40.0)
+    assert reference_extent(60.0, 500.0, scale) == (60.0, 80.0)
+    # A band wholly outside has nothing in range to clamp TO, so it is dropped like a line.
+    assert reference_extent(200.0, 500.0, scale) is None
+
+
+def test_ordering_ranks_by_value_by_label_or_by_the_list_it_was_given() -> None:
+    labels = ["a", "b", "c"]
+    keys = [10.0, 73.0, 42.0]
+    assert order_indices(labels, keys, "given") == [0, 1, 2]
+    assert order_indices(labels, keys, "value_desc") == [1, 2, 0]
+    assert order_indices(labels, keys, "value_asc") == [0, 2, 1]
+    assert order_indices(["b", "c", "a"], keys, "label") == [2, 0, 1]
+    assert order_indices(labels, keys, ["c", "a"]) == [2, 0, 1]
+
+
+def test_ordering_by_a_name_the_chart_has_not_got_says_which_one() -> None:
+    with pytest.raises(InvalidArgument, match="'nope'"):
+        order_indices(["a", "b"], [1.0, 2.0], ["nope", "a"])
+
+
+# --- 15. value labels ---------------------------------------------------------
+
+
+def _plot_box(doc: Document, chart_id: str) -> tuple[float, float, float, float]:
+    """The plot rect, read back off the two axis lines the chart drew."""
+    lines = _wearing(doc, chart_id, "default-axis")
+    vertical = next(line for line in lines if line.get("x1") == line.get("x2"))
+    horizontal = next(line for line in lines if line.get("y1") == line.get("y2"))
+    top, bottom = sorted((float(str(vertical.get("y1"))), float(str(vertical.get("y2")))))
+    left, right = sorted((float(str(horizontal.get("x1"))), float(str(horizontal.get("x2")))))
+    return (float(str(vertical.get("x1"))), top, right - left, bottom - top)
+
+
+def _labels_at(doc: Document, chart_id: str) -> dict[str, tuple[float, float]]:
+    return {
+        str(node.text or ""): (float(str(node.get("x"))), float(str(node.get("y"))))
+        for node in _wearing(doc, chart_id, "default-value-label")
+    }
+
+
+def _series_rects(doc: Document, chart_id: str, index: int = 0) -> list[list[float]]:
+    group = [
+        child
+        for child in doc.resolve(chart_id)
+        if str(child.get("class") or "").startswith("default-series")
+    ][index]
+    return [
+        [float(str(node.get(key))) for key in ("x", "y", "width", "height")]
+        for node in group
+        if str(node.tag).endswith("rect")
+    ]
+
+
+def test_a_value_label_is_written_the_way_the_axis_writes_its_ticks() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["a", "b"],
+            series=[Series(name="s", values=[0.25, 0.5])],
+            value_labels=True,
+        ),
+        x=0,
+        y=0,
+        axes=AxesSpec(tick_format=TickFormat(style="percent")),
+    )
+    assert set(_labels_at(doc, placed.ref.id)) == {"25%", "50%"}
+
+
+def test_a_value_format_on_the_data_overrules_the_axis_format() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["a"],
+            series=[Series(name="s", values=[1500.0])],
+            value_labels=True,
+            value_format=TickFormat(style="si"),
+        ),
+        x=0,
+        y=0,
+        axes=AxesSpec(tick_format=TickFormat(style="plain")),
+    )
+    assert set(_labels_at(doc, placed.ref.id)) == {"1.5k"}
+
+
+def test_a_bar_that_reaches_the_top_takes_its_label_inside_instead() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["a", "b"],
+            series=[Series(name="s", values=[10.0, 80.0])],
+            value_labels=True,
+        ),
+        x=0,
+        y=0,
+        axes=AxesSpec(y_min=0, y_max=80),
+    )
+    labels = _labels_at(doc, placed.ref.id)
+    short, tall = _series_rects(doc, placed.ref.id)
+    assert labels["10"][1] < short[1]  # the short bar's number is ABOVE its end
+    assert labels["80"][1] > tall[1]  # the tall one's would have hung off the plot, so it flipped
+    assert labels["80"][1] > _plot_box(doc, placed.ref.id)[1]
+
+
+def test_value_labels_live_outside_the_window_the_data_is_clipped_to() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["a", "b"],
+            series=[Series(name="s", values=[10.0, 900.0])],
+            value_labels=True,
+        ),
+        x=0,
+        y=0,
+        axes=AxesSpec(y_max=100),
+    )
+    clipped = [
+        node
+        for node in _wearing(doc, placed.ref.id, "default-value-label")
+        for parent in [node.getparent()]
+        if parent is not None and parent.get("clip-path") is not None
+    ]
+    assert _labels_at(doc, placed.ref.id) and not clipped
+
+
+def test_a_line_and_a_scatter_write_their_values_above_their_marks() -> None:
+    doc = _doc()
+    for kind, data in (
+        ("line", LineData(series=[PointSeries(name="s", points=[(0, 1), (1, 4)])],
+                          value_labels=True)),
+        ("scatter", ScatterData(series=[PointSeries(name="s", points=[(0, 1), (1, 4)])],
+                                value_labels=True)),
+    ):
+        placed = ops.add_chart(doc, kind=kind, data=data, x=0, y=0)  # type: ignore[arg-type]
+        labels = _labels_at(doc, placed.ref.id)
+        assert set(labels) == {"1", "4"}
+        assert labels["1"][1] > labels["4"][1]  # 4 is higher up the plot than 1
+
+
+# --- 16. reference lines and bands -------------------------------------------
+
+
+def _references(doc: Document, chart_id: str) -> list[BaseElement]:
+    return _wearing(doc, chart_id, "default-reference")
+
+
+def _gridline_at(doc: Document, chart_id: str, index: int) -> float:
+    """The y of the index-th horizontal gridline, counting from the bottom of the plot."""
+    ys = sorted(
+        (float(str(line.get("y1"))) for line in _wearing(doc, chart_id, "default-gridline")),
+        reverse=True,
+    )
+    return ys[index]
+
+
+def test_a_reference_line_lands_on_the_value_it_names() -> None:
+    doc = _doc()
+    placed = _bar_chart(doc, [10.0, 73.0], AxesSpec(reference_lines=[ReferenceLine(value=60)]))
+    line = next(node for node in _references(doc, placed.ref.id) if str(node.tag).endswith("line"))
+    # The ticks are 0/20/40/60/80, so 60 is the fourth gridline up — and the reference is on it.
+    assert float(str(line.get("y1"))) == pytest.approx(_gridline_at(doc, placed.ref.id, 3))
+    assert line.get("y1") == line.get("y2")
+
+
+def test_a_reference_line_lands_on_the_value_it_names_on_a_log_axis_too() -> None:
+    doc = _doc()
+    placed = _bar_chart(
+        doc,
+        [1.0, 100.0],
+        AxesSpec(scale="log", y_min=1, y_max=100, ticks=[1, 10, 100],
+                 reference_lines=[ReferenceLine(value=10)]),
+    )
+    line = next(node for node in _references(doc, placed.ref.id) if str(node.tag).endswith("line"))
+    # Halfway up a two-decade axis, which is what makes it a log scale and not a linear one.
+    x, top, w, h = _plot_box(doc, placed.ref.id)
+    assert float(str(line.get("y1"))) == pytest.approx(top + h / 2.0, abs=0.5)
+
+
+def test_a_reference_label_is_right_aligned_at_the_end_of_its_line() -> None:
+    doc = _doc()
+    placed = _bar_chart(
+        doc, [10.0, 73.0], AxesSpec(reference_lines=[ReferenceLine(value=60, label="target")])
+    )
+    label = next(
+        node for node in _wearing(doc, placed.ref.id, "default-reference-label")
+    )
+    x, top, w, _ = _plot_box(doc, placed.ref.id)
+    assert str(label.text) == "target"
+    assert "text-anchor:end" in str(label.get("style")).replace(" ", "")
+    assert float(str(label.get("x"))) == pytest.approx(x + w, abs=4.0)
+
+
+def test_a_reference_off_the_end_of_the_axis_is_simply_not_drawn() -> None:
+    doc = _doc()
+    placed = _bar_chart(doc, [10.0, 73.0], AxesSpec(reference_lines=[ReferenceLine(value=500)]))
+    assert _references(doc, placed.ref.id) == []
+
+
+def test_a_reference_band_is_clamped_to_the_axis_and_drawn_behind_the_bars() -> None:
+    doc = _doc()
+    placed = _bar_chart(
+        doc, [10.0, 73.0], AxesSpec(reference_lines=[ReferenceLine(value=-50, to=40)])
+    )
+    band = next(node for node in _references(doc, placed.ref.id) if str(node.tag).endswith("rect"))
+    _, top, _, height = _plot_box(doc, placed.ref.id)
+    # -50 is off the bottom, so the band starts at the axis floor: it fills the bottom half.
+    assert float(str(band.get("y"))) + float(str(band.get("height"))) == pytest.approx(top + height)
+    assert float(str(band.get("height"))) == pytest.approx(height / 2.0, abs=0.5)
+    assert "default-reference-band" in str(band.get("class"))
+
+    children = [child for child in doc.resolve(placed.ref.id) if isinstance(child.tag, str)]
+    series = next(
+        index
+        for index, child in enumerate(children)
+        if str(child.get("class") or "").startswith("default-series")
+    )
+    assert children.index(band) < series
+
+
+def test_a_reference_line_is_drawn_over_the_bars_it_judges() -> None:
+    doc = _doc()
+    placed = _bar_chart(doc, [10.0, 73.0], AxesSpec(reference_lines=[ReferenceLine(value=60)]))
+    children = [child for child in doc.resolve(placed.ref.id) if isinstance(child.tag, str)]
+    line = next(node for node in _references(doc, placed.ref.id) if str(node.tag).endswith("line"))
+    series = next(
+        index
+        for index, child in enumerate(children)
+        if str(child.get("class") or "").startswith("default-series")
+    )
+    assert children.index(line) > series
+
+
+def test_a_value_reference_turns_with_the_bars_it_is_drawn_across() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["a", "b"],
+            series=[Series(name="s", values=[10.0, 73.0])],
+            orientation="horizontal",
+        ),
+        x=0,
+        y=0,
+        axes=AxesSpec(reference_lines=[ReferenceLine(value=60)]),
+    )
+    line = next(node for node in _references(doc, placed.ref.id) if str(node.tag).endswith("line"))
+    # The value axis is x now, so the threshold is a VERTICAL rule three quarters of the way over.
+    x, _, w, _ = _plot_box(doc, placed.ref.id)
+    assert line.get("x1") == line.get("x2")
+    assert float(str(line.get("x1"))) == pytest.approx(x + w * 0.75, abs=0.5)
+
+
+def test_a_reference_on_a_numeric_x_is_drawn_and_on_a_categorical_one_is_not() -> None:
+    doc = _doc()
+    on_x = ops.add_chart(
+        doc,
+        kind="line",
+        data=LineData(series=[PointSeries(name="s", points=[(0, 1), (4, 5)])]),
+        x=0,
+        y=0,
+        axes=AxesSpec(reference_lines=[ReferenceLine(value=2, axis="x")]),
+    )
+    line = next(node for node in _references(doc, on_x.ref.id) if str(node.tag).endswith("line"))
+    assert line.get("x1") == line.get("x2")
+
+    categorical = _bar_chart(
+        doc, [10.0, 73.0], AxesSpec(reference_lines=[ReferenceLine(value=2, axis="x")])
+    )
+    assert _references(doc, categorical.ref.id) == []
+
+
+# --- 17. horizontal bars ------------------------------------------------------
+
+
+def _horizontal(doc: Document, categories: list[str], values: list[float]) -> ops.PlacedChart:
+    return ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=categories,
+            series=[Series(name="s", values=values)],
+            orientation="horizontal",
+            value_labels=True,
+        ),
+        x=0,
+        y=0,
+        width=320,
+        height=200,
+    )
+
+
+def test_horizontal_bars_measure_the_left_margin_from_the_category_names() -> None:
+    doc = _doc()
+    short = _horizontal(doc, ["a", "b"], [10.0, 73.0])
+    long = _horizontal(doc, ["a very long category name", "b"], [10.0, 73.0])
+    assert _plot_box(doc, long.ref.id)[0] > _plot_box(doc, short.ref.id)[0] + 20.0
+
+
+def test_horizontal_bars_grow_along_x_from_the_value_axis() -> None:
+    doc = _doc()
+    placed = _horizontal(doc, ["a", "b"], [10.0, 73.0])
+    x, _, w, _ = _plot_box(doc, placed.ref.id)
+    small, big = _series_rects(doc, placed.ref.id)
+    assert small[0] == pytest.approx(x) and big[0] == pytest.approx(x)  # both start at zero
+    assert big[2] > small[2] * 5  # 73 is a lot more than 10
+    assert big[1] > small[1]  # and the categories run down the side, in order
+
+
+def test_a_horizontal_bar_writes_its_value_to_the_right_of_its_end() -> None:
+    doc = _doc()
+    placed = _horizontal(doc, ["a", "b"], [10.0, 73.0])
+    labels = _labels_at(doc, placed.ref.id)
+    small, _ = _series_rects(doc, placed.ref.id)
+    assert labels["10"][0] > small[0] + small[2]
+
+
+def test_horizontal_bars_turn_the_gridlines_with_the_axes() -> None:
+    doc = _doc()
+    placed = _horizontal(doc, ["a", "b"], [10.0, 73.0])
+    grid = _wearing(doc, placed.ref.id, "default-gridline")
+    assert grid and all(line.get("x1") == line.get("x2") for line in grid)
+
+
+# --- 18. stacked bars ---------------------------------------------------------
+
+
+def _stacked(
+    doc: Document,
+    series: list[Series],
+    axes: AxesSpec | None = None,
+    *,
+    value_labels: bool = False,
+    stack_total_labels: bool = False,
+) -> ops.PlacedChart:
+    return ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=[f"c{index}" for index in range(len(series[0].values))],
+            series=series,
+            stacked=True,
+            value_labels=value_labels,
+            stack_total_labels=stack_total_labels,
+        ),
+        x=0,
+        y=0,
+        width=320,
+        height=200,
+        axes=axes,
+    )
+
+
+def test_a_stacked_segment_starts_where_the_one_below_it_ended() -> None:
+    doc = _doc()
+    placed = _stacked(
+        doc, [Series(name="one", values=[10.0]), Series(name="two", values=[15.0])]
+    )
+    lower = _series_rects(doc, placed.ref.id, 0)[0]
+    upper = _series_rects(doc, placed.ref.id, 1)[0]
+    assert upper[1] + upper[3] == pytest.approx(lower[1])  # they touch, and do not overlap
+    assert upper[0] == lower[0] and upper[2] == lower[2]  # one band, shared
+
+
+def test_a_stack_scales_its_axis_to_the_totals_and_not_to_the_parts() -> None:
+    doc = _doc()
+    stacked = _stacked(
+        doc, [Series(name="one", values=[60.0]), Series(name="two", values=[60.0])]
+    )
+    grouped = _bar_chart(doc, [60.0])
+    # The stack is 120 tall, so the axis has to reach past 120 — where the same numbers drawn
+    # side by side need an axis of 60.
+    assert float(_texts(doc, stacked.ref.id, "default-tick-label")[-2]) >= 120.0
+    assert float(_texts(doc, grouped.ref.id, "default-tick-label")[-2]) < 120.0
+
+
+def test_a_negative_series_stacks_downward_from_zero() -> None:
+    doc = _doc()
+    placed = _stacked(
+        doc, [Series(name="up", values=[10.0]), Series(name="down", values=[-5.0])]
+    )
+    up = _series_rects(doc, placed.ref.id, 0)[0]
+    down = _series_rects(doc, placed.ref.id, 1)[0]
+    assert down[1] == pytest.approx(up[1] + up[3])  # it hangs off zero, under the positive bar
+
+
+def test_a_stacked_segment_too_short_for_its_number_goes_unlabelled() -> None:
+    doc = _doc()
+    placed = _stacked(
+        doc,
+        [Series(name="big", values=[100.0]), Series(name="sliver", values=[0.4])],
+        value_labels=True,
+    )
+    assert set(_labels_at(doc, placed.ref.id)) == {"100"}
+
+
+def test_a_stack_total_is_written_beyond_the_end_of_the_stack() -> None:
+    doc = _doc()
+    placed = _stacked(
+        doc,
+        [Series(name="one", values=[10.0]), Series(name="two", values=[15.0])],
+        AxesSpec(y_max=100),  # headroom, so the total is not pushed inside by the plot edge
+        stack_total_labels=True,
+    )
+    top = _series_rects(doc, placed.ref.id, 1)[0]
+    assert _labels_at(doc, placed.ref.id)["25"][1] < top[1]
+
+
+def test_stacking_works_turned_on_its_side_too() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["c"],
+            series=[Series(name="one", values=[10.0]), Series(name="two", values=[15.0])],
+            stacked=True,
+            orientation="horizontal",
+        ),
+        x=0,
+        y=0,
+    )
+    lower = _series_rects(doc, placed.ref.id, 0)[0]
+    upper = _series_rects(doc, placed.ref.id, 1)[0]
+    assert upper[0] == pytest.approx(lower[0] + lower[2])
+    assert upper[1] == lower[1] and upper[3] == lower[3]
+
+
+def test_a_stack_on_a_log_axis_is_refused_rather_than_fudged() -> None:
+    doc = _doc()
+    with pytest.raises(InvalidArgument, match="no zero"):
+        ops.add_chart(
+            doc,
+            kind="bar",
+            data=BarData(
+                categories=["c"], series=[Series(name="one", values=[10.0])], stacked=True
+            ),
+            x=0,
+            y=0,
+            axes=AxesSpec(scale="log"),
+        )
+
+
+# --- 19. ordering and steps ---------------------------------------------------
+
+
+def _drawn_categories(doc: Document, chart_id: str, count: int) -> list[str]:
+    """The category names, in the order the chart drew them along the x axis."""
+    return _texts(doc, chart_id, "default-tick-label")[-count:]
+
+
+def _ordered(doc: Document, order: object) -> list[str]:
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["a", "b", "c"],
+            series=[Series(name="s", values=[10.0, 73.0, 42.0])],
+            order=order,  # type: ignore[arg-type]
+        ),
+        x=0,
+        y=0,
+    )
+    return _drawn_categories(doc, placed.ref.id, 3)
+
+
+def test_every_ordering_mode_draws_the_categories_in_its_own_order() -> None:
+    doc = _doc()
+    assert _ordered(doc, "given") == ["a", "b", "c"]
+    assert _ordered(doc, "value_desc") == ["b", "c", "a"]
+    assert _ordered(doc, "value_asc") == ["a", "c", "b"]
+    assert _ordered(doc, "label") == ["a", "b", "c"]
+    assert _ordered(doc, ["c", "a"]) == ["c", "a", "b"]
+
+
+def test_a_multi_series_bar_orders_by_the_first_series() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["a", "b", "c"],
+            series=[
+                Series(name="one", values=[10.0, 73.0, 42.0]),
+                Series(name="two", values=[99.0, 1.0, 1.0]),
+            ],
+            order="value_desc",
+        ),
+        x=0,
+        y=0,
+    )
+    assert _drawn_categories(doc, placed.ref.id, 3) == ["b", "c", "a"]
+
+
+def test_a_stack_orders_by_the_total_because_no_one_series_is_the_subject() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["a", "b", "c"],
+            series=[
+                Series(name="one", values=[10.0, 73.0, 42.0]),
+                Series(name="two", values=[99.0, 1.0, 1.0]),
+            ],
+            stacked=True,
+            order="value_desc",
+        ),
+        x=0,
+        y=0,
+    )
+    assert _drawn_categories(doc, placed.ref.id, 3) == ["a", "b", "c"]
+
+
+def test_ordering_by_a_category_the_chart_has_not_got_is_refused_by_name() -> None:
+    doc = _doc()
+    with pytest.raises(InvalidArgument, match="'nope'"):
+        ops.add_chart(
+            doc,
+            kind="bar",
+            data=BarData(
+                categories=["a"], series=[Series(name="s", values=[1.0])], order=["nope"]
+            ),
+            x=0,
+            y=0,
+        )
+
+
+def _polyline_points(doc: Document, chart_id: str) -> list[tuple[float, float]]:
+    line = next(
+        node for node in doc.resolve(chart_id).iter() if str(node.tag).endswith("polyline")
+    )
+    pairs = str(line.get("points")).replace(",", " ").split()
+    return [(float(pairs[i]), float(pairs[i + 1])) for i in range(0, len(pairs), 2)]
+
+
+def _step_chart(doc: Document, mode: str) -> ops.PlacedChart:
+    return ops.add_chart(
+        doc,
+        kind="line",
+        data=LineData(
+            series=[PointSeries(name="s", points=[(0, 1), (1, 4)])],
+            step=mode,  # type: ignore[arg-type]
+        ),
+        x=0,
+        y=0,
+    )
+
+
+def test_a_post_step_polyline_holds_then_rises() -> None:
+    doc = _doc()
+    placed = _step_chart(doc, "post")
+    (x0, y0), (x1, y1), (x2, y2) = _polyline_points(doc, placed.ref.id)
+    assert (x1, y1) == pytest.approx((x2, y0))  # along at the old value, then up at the new x
+    assert y2 < y0
+
+
+def test_a_pre_step_polyline_rises_then_holds() -> None:
+    doc = _doc()
+    placed = _step_chart(doc, "pre")
+    (x0, y0), (x1, y1), (x2, y2) = _polyline_points(doc, placed.ref.id)
+    assert (x1, y1) == pytest.approx((x0, y2))  # up at the old x, then along at the new value
+
+
+def test_an_area_wash_follows_the_staircase_and_not_the_slope() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="line",
+        data=LineData(series=[PointSeries(name="s", points=[(0, 1), (1, 4)])], step="post",
+                      area=True),
+        x=0,
+        y=0,
+    )
+    path = next(
+        node for node in doc.resolve(placed.ref.id).iter() if str(node.tag).endswith("path")
+    )
+    # Three outline points (hold, rise) plus the corner the wash closes on, where the sloped
+    # version of the same series would have two and two.
+    assert str(path.get("d")).count("L") == 4
+
+
+# --- 20. donut extras ---------------------------------------------------------
+
+
+def test_a_donut_hole_carries_the_number_and_its_caption_centred() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="donut",
+        data=DonutData(
+            slices=[Slice(label="a", value=60), Slice(label="b", value=40)],
+            center_text="97",
+            center_subtext="total units",
+        ),
+        x=0,
+        y=0,
+        width=320,
+        height=200,
+    )
+    big = _wearing(doc, placed.ref.id, "default-donut-center")[0]
+    small = _wearing(doc, placed.ref.id, "default-donut-subtext")[0]
+    assert (str(big.text), str(small.text)) == ("97", "total units")
+    assert float(str(big.get("x"))) == pytest.approx(160.0)  # the ring's own centre
+    assert float(str(small.get("x"))) == pytest.approx(160.0)
+    assert float(str(small.get("y"))) > float(str(big.get("y")))
+
+
+def test_a_donut_with_no_centre_text_writes_none_of_it() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc, kind="donut", data=DonutData(slices=[Slice(label="a", value=1)]), x=0, y=0
+    )
+    assert _wearing(doc, placed.ref.id, "default-donut-center") == []
+
+
+def test_slice_labels_name_each_slice_outside_the_ring() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="donut",
+        data=DonutData(
+            slices=[Slice(label="a", value=60), Slice(label="b", value=40)], slice_labels=True
+        ),
+        x=0,
+        y=0,
+    )
+    assert set(_labels_at(doc, placed.ref.id)) == {"a 60", "b 40"}
+
+
+def test_a_thin_slice_gets_a_stub_to_hang_its_label_off() -> None:
+    doc = _doc()
+    fat = ops.add_chart(
+        doc,
+        kind="donut",
+        data=DonutData(
+            slices=[Slice(label="a", value=50), Slice(label="b", value=50)], slice_labels=True
+        ),
+        x=0,
+        y=0,
+    )
+    thin = ops.add_chart(
+        doc,
+        kind="donut",
+        data=DonutData(
+            slices=[Slice(label="a", value=99), Slice(label="b", value=1)], slice_labels=True
+        ),
+        x=0,
+        y=0,
+    )
+    lines = [_tags_under(doc, chart.ref.id).count("line") for chart in (fat, thin)]
+    assert lines == [0, 1]
+
+
+def test_a_donut_still_starts_at_twelve_o_clock_when_nobody_says_otherwise() -> None:
+    assert donut_angles([1.0, 1.0])[0][0] == -math.pi / 2.0
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="donut",
+        data=DonutData(slices=[Slice(label="a", value=60), Slice(label="b", value=40)]),
+        x=0,
+        y=0,
+        width=320,
+        height=200,
+    )
+    wedge = next(
+        node for node in doc.resolve(placed.ref.id).iter() if str(node.tag).endswith("path")
+    )
+    # The first wedge opens straight up from the centre: (cx, cy - outer).
+    start = str(wedge.get("d")).split()[1:3]
+    assert [float(value) for value in start] == pytest.approx([160.0, 4.0], abs=0.5)
+
+
+def test_a_start_angle_turns_the_whole_ring() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="donut",
+        data=DonutData(
+            slices=[Slice(label="a", value=60), Slice(label="b", value=40)], start_angle=0.0
+        ),
+        x=0,
+        y=0,
+        width=320,
+        height=200,
+    )
+    wedge = next(
+        node for node in doc.resolve(placed.ref.id).iter() if str(node.tag).endswith("path")
+    )
+    start = str(wedge.get("d")).split()[1:3]
+    assert [float(value) for value in start] == pytest.approx([256.0, 100.0], abs=0.5)
+
+
+def test_a_donut_orders_its_slices_the_way_it_is_asked_to() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="donut",
+        data=DonutData(
+            slices=[
+                Slice(label="a", value=10),
+                Slice(label="b", value=60),
+                Slice(label="c", value=30),
+            ],
+            order="value_desc",
+        ),
+        x=0,
+        y=0,
+    )
+    drawn = [
+        str(node.get("data-slice"))
+        for node in doc.resolve(placed.ref.id)
+        if node.get("data-slice") is not None
+    ]
+    assert drawn == ["b", "c", "a"]
+
+
+def test_a_stack_total_label_silences_the_segment_label_it_would_sit_on() -> None:
+    # A stack reaching the plot edge flips its total INSIDE, onto the top segment's own
+    # label; two numbers in one place read as neither, so the segment's is dropped.
+    doc = _doc()
+    ref = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["Q4"],
+            series=[Series(name="core", values=[52.0]), Series(name="addon", values=[22.0])],
+            stacked=True,
+            stack_total_labels=True,
+            value_labels=True,
+        ),
+        axes=AxesSpec(y_max=74.0),  # the stack ends exactly at the top: the total must flip in
+        width=260,
+        height=180,
+    )
+    labels = [
+        (node.text or "")
+        for node in doc.resolve(ref.ref.id).iter()
+        if str(node.TAG).endswith("text")
+    ]
+    assert "74" in " ".join(labels)  # the total is drawn
+    assert "52" in " ".join(labels)  # the roomy bottom segment keeps its label
+    assert "22" not in " ".join(labels)  # the one the total landed on is silenced

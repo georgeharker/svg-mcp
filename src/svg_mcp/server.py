@@ -197,6 +197,16 @@ CHARTS
   vocabulary, no format strings); `gridlines` and `tick_marks` and `x_tick_rotate` do the rest.
 - `scale="log"` is available on the value axis, for strictly positive data. Bars on it measure
   from the axis minimum rather than from zero, because a log axis has no zero to measure from.
+- `axes.reference_lines=[{value, label, to, axis, kind}]` draws the thresholds the data is READ
+  AGAINST — a target, a budget, a tolerance band (`to` makes it a band). Lines are drawn over the
+  data, bands behind it; one off the axis is dropped, a band clamps to it.
+- Per-kind, in `data`: `value_labels` writes each number on its mark (bars flip the label inside
+  when the plot edge is close; nothing is ever clipped); `stacked` sums the series per category
+  (negatives stack DOWNWARD from zero, the axis follows the TOTALS, `stack_total_labels` writes
+  them); `orientation="horizontal"` swaps the axes so long category names get the left margin —
+  which is then measured from THEM; `order` = "value_desc"/"value_asc"/"label"/an explicit list;
+  `step="post"|"pre"` on a line draws a staircase; a donut takes `center_text`/`center_subtext`
+  (the KPI-in-the-hole idiom), `slice_labels` and `start_angle`.
 - Still out of scope: statistical transforms, a second y axis, colormaps. If you need one, the
   answer is a different picture, not a hack.
 - `edit_chart(target, data=…)` re-derives the whole plot in place, keeping the group's id,
@@ -211,6 +221,9 @@ LEGENDS & CALLOUTS
   "danger". It wraps the text, places the card off the roomiest side, and draws a LEADER that
   `reflow`/`layout_diagram` re-anchor, so the note stays attached however far the node moves.
   Do NOT hand-place a text box beside a node: that annotation dies at the next layout pass.
+- To annotate ONE number of a chart, add `datum={series, index}` and target the chart: the leader
+  lands on that bar/point/slice and is re-derived from the spec, so it follows the mark through
+  an `edit_chart` that changes the data.
 - For a note about the PICTURE rather than about one node — a takeaway, a caveat, a status —
   `add_callout_card(title, body, kind)`: the same card, no leader, height derived from the words.
 
@@ -3687,18 +3700,29 @@ def add_chart(
     charts are the one category the bundled default styles outright.
 
     The shape of `data` depends on `kind`:
-      - bar: {categories: [str], series: [{name, values: [float]}], hatch: bool} — one value per
-        category per series; more than one series draws them side by side within each category.
+      - bar: {categories: [str], series: [{name, values: [float]}], hatch: bool,
+        orientation: "vertical"|"horizontal", stacked: bool, value_labels: bool,
+        stack_total_labels: bool, value_format: {...}, order: "given"|"value_desc"|"value_asc"|
+        "label"|[str]} — one value per category per series; more than one series draws them side
+        by side, or summed when `stacked`.
       - line: {series: [{name, points: [[x, y]]}], points: bool, area: bool, hatch: bool,
-        marker: "circle"|"square"|"diamond"|"triangle"|"none", marker_size: float}
-      - scatter: {series: [{name, points: [[x, y]]}], marker, marker_size}
-      - donut: {slices: [{label, value}], hatch: bool} — values must be positive.
+        marker: "circle"|"square"|"diamond"|"triangle"|"none", marker_size: float,
+        step: "none"|"pre"|"post", value_labels: bool, value_format: {...}}
+      - scatter: {series: [{name, points: [[x, y]]}], marker, marker_size, value_labels,
+        value_format}
+      - donut: {slices: [{label, value}], hatch: bool, slice_labels: bool, center_text: str,
+        center_subtext: str, start_angle: float, order, value_format} — values must be positive.
       - sparkline: {values: [float], last_point: bool, extremes: bool, baseline: float} — a bare
         trend line, no axes/ticks/title, 120x32 by default.
 
     `hatch` fills each series with diagonal lines in its own colour, so the series stay apart in
-    print and in greyscale. x is categorical (bar) or numeric (line/scatter). No statistical
-    transforms, no second y axis, no colormaps. Edit it later with `edit_chart`.
+    print and in greyscale. `value_labels` writes each number on its mark, formatted like the
+    axis unless `value_format` says otherwise — bars flip a label inside when the plot edge is
+    close, and no label is ever clipped. `stacked` stacks negatives DOWNWARD from zero and scales
+    the axis to the totals. `orientation="horizontal"` swaps the axes, so long category names get
+    the left margin and the margin is measured from them. x is categorical (bar) or numeric
+    (line/scatter). No statistical transforms, no second y axis, no colormaps. Edit it later with
+    `edit_chart`.
 
     Args:
         kind: Which plot to draw.
@@ -3718,7 +3742,9 @@ def add_chart(
             target COUNT or an explicit list of values (out-of-range ones are dropped);
             `tick_format`/`x_tick_format` = {style: "plain"|"percent"|"currency"|"si"|"fixed",
             decimals, prefix, suffix, thousands}; `gridlines: "x"|"y"|"both"|"none"`;
-            `tick_marks` in px; `x_tick_rotate` in degrees (negative reads bottom-left up).
+            `tick_marks` in px; `x_tick_rotate` in degrees (negative reads bottom-left up, and
+            turns whichever axis is along the bottom); `reference_lines` = [{value, label, axis,
+            to, kind}] for thresholds (drawn over the data) and bands (`to` set, drawn behind it).
             Ignored by `donut` and `sparkline`.
         parent: Group/layer id (or name); omit for the document root.
         name: Friendly label for the group.
@@ -3923,6 +3949,7 @@ def add_callout(
     text: str,
     kind: Literal["note", "info", "warning", "success", "danger"] = "note",
     side: Literal["auto", "N", "S", "E", "W"] = "auto",
+    datum: ops.ChartDatum | None = None,
     distance: float | None = None,
     x: float | None = None,
     y: float | None = None,
@@ -3942,12 +3969,20 @@ def add_callout(
     Left to itself the card sits off the side of the target with the most free canvas, one
     `--callout-gap` clear of it. Give x/y and the card is placed verbatim.
 
+    To annotate ONE number of a chart, pass `datum` and target the chart: the leader lands on
+    that bar/point/slice and is re-derived on every reflow, so it follows the mark through an
+    `edit_chart` that changes the data.
+
     Args:
         target: The node id or name the callout points at.
         text: The words. Wrapped at `max_width`; the card is sized to what it wrapped to.
         kind: "note" (neutral), "info", "warning", "success", "danger" — or any role a resident
             theme serves.
         side: Which face of the target to sit off; "auto" picks the roomiest.
+        datum: {series, index} — point the leader at one datum of a CHART instead of at its box.
+            `series` is a series name or index (ignored by a donut); `index` is the position in
+            the data as you gave it (a bar's category, a point's place, a slice). The target must
+            be a chart and the datum must exist, or it is an error naming which.
         distance: Gap between the target's edge and the card's, in user units; omit for the
             theme's `--callout-gap`.
         x: Left edge of the card; give x AND y to place it by hand.
@@ -3970,6 +4005,7 @@ def add_callout(
         text=text,
         kind=kind,
         side=side,
+        datum=datum,
         distance=distance,
         x=x,
         y=y,

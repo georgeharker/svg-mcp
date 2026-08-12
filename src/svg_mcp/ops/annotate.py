@@ -45,7 +45,7 @@ from typing import Literal, cast
 
 import inkex
 from inkex import BaseElement
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ..model.document import Document
 from ..model.errors import InvalidArgument
@@ -55,11 +55,13 @@ from .chart import (
     _SERIES_COUNT,
     _TITLE_SIZE,
     BarData,
+    ChartDatum,
     ChartSpec,
     DonutData,
     LineData,
     ScatterData,
     _part,
+    datum_anchor,
     read_chart_spec,
 )
 from .diagram import (
@@ -677,6 +679,11 @@ class CalloutSpec:
     max_width: float
     auto: bool
     themed: bool = True
+    datum: ChartDatum | None = None
+    """The chart datum the leader points at, when it points at one datum rather than at a box.
+
+    Stored so a ``reflow`` re-anchors the leader on the same bar after an ``edit_chart`` has
+    moved it — the WHOLE point of naming a datum rather than a coordinate."""
 
 
 def read_callout_spec(element: BaseElement) -> CalloutSpec | None:
@@ -686,6 +693,7 @@ def read_callout_spec(element: BaseElement) -> CalloutSpec | None:
         return None
     try:
         spec = json.loads(raw)
+        datum = spec.get("datum")
         return CalloutSpec(
             target=str(spec["target"]),
             text=str(spec["text"]),
@@ -695,28 +703,28 @@ def read_callout_spec(element: BaseElement) -> CalloutSpec | None:
             max_width=float(spec["max_width"]),
             auto=bool(spec.get("auto", False)),
             themed=bool(spec.get("themed", True)),
+            datum=None if datum is None else ChartDatum.model_validate(datum),
         )
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, ValidationError):
         return None
 
 
 def _write_callout_spec(element: BaseElement, spec: CalloutSpec) -> None:
-    element.set(
-        _CALLOUT_ATTR,
-        json.dumps(
-            {
-                "target": spec.target,
-                "text": spec.text,
-                "kind": spec.kind,
-                "side": spec.side,
-                "distance": spec.distance,
-                "max_width": spec.max_width,
-                "auto": spec.auto,
-                "themed": spec.themed,
-            },
-            separators=(",", ":"),
-        ),
-    )
+    """Store the spec. A callout that points at a BOX writes no ``datum`` key at all — an absent
+    optional block is what keeps an unchanged callout's markup unchanged."""
+    stored: dict[str, object] = {
+        "target": spec.target,
+        "text": spec.text,
+        "kind": spec.kind,
+        "side": spec.side,
+        "distance": spec.distance,
+        "max_width": spec.max_width,
+        "auto": spec.auto,
+        "themed": spec.themed,
+    }
+    if spec.datum is not None:
+        stored["datum"] = spec.datum.model_dump()
+    element.set(_CALLOUT_ATTR, json.dumps(stored, separators=(",", ":")))
 
 
 def wrap_words(text: str, *, max_width: float, font: str, size: float) -> list[str]:
@@ -830,12 +838,20 @@ def _card_of(group: BaseElement) -> Box | None:
     return None if box is None else Box(box[0], box[1], box[2], box[3])
 
 
-def _leader_ends(target: Box, card: Box, side: AnchorPref) -> tuple[Point, Point]:
+def _leader_ends(
+    target: Box, card: Box, side: AnchorPref, at: Point | None = None
+) -> tuple[Point, Point]:
     """The two ends of a leader: the target's face midpoint, and the card's facing midpoint.
 
     ``fraction`` is fixed at 0.5 and nothing is spread — a callout is the only thing pointing at
     its target, so there are no siblings to share the face with.
+
+    ``at`` is a DATUM anchor, and it replaces the target's face outright: a note about one bar
+    points at that bar, not at the side of the chart it happens to be in. ``side`` is then moot
+    (there is no face to choose), but the card still turns whichever of its own faces looks at it.
     """
+    if at is not None:
+        return (anchor_point(card, auto_side(card, Box(at[0], at[1], 0.0, 0.0)), 0.5), at)
     at_target = side if side != "auto" else auto_side(target, card)
     return (
         anchor_point(card, auto_side(card, target), 0.5),
@@ -853,7 +869,14 @@ def _derive_leader(doc: Document, group: BaseElement, spec: CalloutSpec) -> bool
     card = _card_of(group)
     if target is None or card is None:
         return False
-    world_start, world_end = _leader_ends(target, card, spec.side)
+    at = None
+    if spec.datum is not None:
+        # The datum is re-derived, not remembered: this is what re-anchors the leader on the same
+        # bar after an `edit_chart` changed the data under it.
+        at = datum_anchor(doc, doc.resolve(spec.target), spec.datum)
+        if at is None:
+            return False
+    world_start, world_end = _leader_ends(target, card, spec.side, at)
     start = _to_local_point(group, world_start)
     end = _to_local_point(group, world_end)
     dressing = worn_theme(doc, group, spec.kind, "container--callout", "container")
@@ -928,6 +951,7 @@ def add_callout(
     text: str,
     kind: str = "note",
     side: CalloutSide = "auto",
+    datum: ChartDatum | None = None,
     distance: float | None = None,
     x: float | None = None,
     y: float | None = None,
@@ -946,6 +970,11 @@ def add_callout(
 
     The leader is DERIVED, never stored: ``reflow`` re-anchors it at both ends after the target
     moves, so an annotation survives a layout pass that a hand-drawn line would not.
+
+    ``datum`` points the leader at ONE mark of a chart — a bar, a point, a slice — instead of at
+    the side of the chart's box. It names the datum by series and position rather than by
+    coordinate, so it is re-derived on every reflow and still lands on the same number after an
+    ``edit_chart`` has moved every mark on the plot.
     """
     if max_width < _MIN_MAX_WIDTH:
         raise InvalidArgument(f"a callout needs at least {_MIN_MAX_WIDTH:g} to wrap its text into")
@@ -957,7 +986,18 @@ def add_callout(
     box = _box_of(doc, target)
     if box is None:
         raise InvalidArgument(f"callout target {target!r} has no bounding box to point at")
-    target_id = str(doc.resolve(target).get_id())
+    element = doc.resolve(target)
+    if datum is not None:
+        if read_chart_spec(element) is None:
+            raise InvalidArgument(
+                f"callout target {target!r} is not a chart, so it has no data to point at; drop "
+                "`datum` to point at the node's own box instead"
+            )
+        if datum_anchor(doc, element, datum) is None:
+            raise InvalidArgument(
+                f"this chart has no datum at series {datum.series!r}, index {datum.index}"
+            )
+    target_id = str(element.get_id())
     gap = (
         distance
         if distance is not None
@@ -973,6 +1013,7 @@ def add_callout(
         max_width=max_width,
         auto=x is None,
         themed=themed,
+        datum=datum,
     )
     wrapped = _card_text(doc, spec)
     chosen: Side = side if side != "auto" else roomiest_side(box, _canvas(doc))
@@ -1043,6 +1084,7 @@ def edit_callout(
         max_width=spec.max_width,
         auto=spec.auto,
         themed=spec.themed,
+        datum=spec.datum,
     )
     _write_callout_spec(group, updated)
 

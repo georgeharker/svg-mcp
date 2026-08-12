@@ -67,6 +67,18 @@ def _to_local_point(element: BaseElement, point: tuple[float, float]) -> tuple[f
     return (float(moved[0]), float(moved[1]))
 
 
+def _to_world_point(element: BaseElement, point: tuple[float, float]) -> tuple[float, float]:
+    """A point in ``element``'s own frame expressed in WORLD coordinates — ``_to_local_point``
+    the other way round. What anything that computes a position INSIDE a facade and then has to
+    hand it to something outside (a callout's leader, say) crosses back over with."""
+    try:
+        frame = element.composed_transform()
+    except Exception:  # pragma: no cover - a detached or transform-less node
+        return (float(point[0]), float(point[1]))
+    moved = frame.apply_to_point(point)
+    return (float(moved[0]), float(moved[1]))
+
+
 def _to_local_box(
     element: BaseElement, box: tuple[float, float, float, float]
 ) -> tuple[float, float, float, float]:

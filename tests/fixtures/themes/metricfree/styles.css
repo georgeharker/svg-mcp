@@ -11,6 +11,10 @@
   --chart-axis-label-size: 11px;
   --chart-title-size: 13px;
   --chart-gap: 8px;
+  --chart-value-label-size: 10px;
+  --chart-reference-label-size: 10px;
+  --chart-donut-center-size: 20px;
+  --chart-donut-subtext-size: 10px;
 }
 
 /** A chart facade. */
@@ -39,6 +43,24 @@
 
 /** A chart title. */
 .chart-title { fill: #1a1d21; stroke: none; font-family: var(--font); font-size: var(--chart-title-size) }
+
+/** A value written on the data. */
+.value-label { fill: #1a1d21; stroke: none; font-family: var(--font); font-size: var(--chart-value-label-size) }
+
+/** A reference line. */
+.reference { stroke: #1a1d21; stroke-opacity: 0.6; stroke-width: 1; stroke-dasharray: 4 3; fill: none }
+
+/** A reference band. */
+.reference-band { fill: #1a1d21; fill-opacity: 0.08; stroke: none }
+
+/** A reference line's label. */
+.reference-label { fill: #6b7280; stroke: none; font-family: var(--font); font-size: var(--chart-reference-label-size) }
+
+/** The number in a donut's hole. */
+.donut-center { fill: #1a1d21; stroke: none; font-family: var(--font); font-size: var(--chart-donut-center-size); font-weight: 600 }
+
+/** The caption under it. */
+.donut-subtext { fill: #6b7280; stroke: none; font-family: var(--font); font-size: var(--chart-donut-subtext-size) }
 
 /** Series 1. */
 .series-1 { fill: #4477aa; stroke: #4477aa }

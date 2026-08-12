@@ -89,12 +89,26 @@ draws exactly what it always drew.
 | `tick_format` / `x_tick_format` | `{style, decimals, prefix, suffix, thousands}` with `style` one of `plain`, `percent` (×100, owns the `%`), `currency` (`prefix` or `$`), `si` (k/M/G/T, m/µ/n below 1), `fixed`. A **closed vocabulary** — an arbitrary format string is how an axis ends up with five identical labels. |
 | `gridlines` | `"y"` (default), `"x"`, `"both"`, `"none"`. |
 | `tick_marks` | Length in px of a mark outside the plot at each tick; they participate in the measured margins. |
-| `x_tick_rotate` | Degrees; negative reads bottom-left to top-right. The bottom margin grows to the turned label's real extent. |
+| `x_tick_rotate` | Degrees; negative reads bottom-left to top-right. The bottom margin grows to the turned label's real extent. Turns whatever is on the **bottom** axis — the categories normally, the values on horizontal bars. |
+| `reference_lines` | Thresholds and bands: `[{value, axis, label, to, kind}]`. A **line** (no `to`) is drawn over the data — a threshold has to read across what it judges — and a **band** (`to` set) behind it. `axis` is the *data* axis: `"y"` is the value axis however the bars are turned, `"x"` the numeric x of a line/scatter (dropped where x is categorical). A line off the axis is dropped silently; a band clamps to it. `kind` names the role class (`.reference` by default). |
 
-Per-kind extras: `marker`/`marker_size` on `line`/`scatter` (circle, square, diamond,
-triangle, none), `hatch` on `bar`/`donut`/`line` areas (diagonal fill in each series'
-own colour, so print and greyscale keep them apart), and `last_point`/`extremes`/`baseline`
-on a `sparkline`.
+### Per-kind options
+
+| option | on | what it does |
+| --- | --- | --- |
+| `marker` / `marker_size` | line, scatter | circle, square, diamond, triangle, none. |
+| `hatch` | bar, donut, line area | Diagonal fill in each series' own colour, so print and greyscale keep them apart. |
+| `last_point` / `extremes` / `baseline` | sparkline | Dots on the last / lowest+highest value; a reference line across the trend. |
+| `value_labels` | bar, line, scatter | Write each datum's value on its mark, formatted by `value_format` or else by the axis's own `tick_format`. Bars label just outside the bar's end and **flip inside** when the plot edge is too close; line/scatter label above the mark (below it at the top of the plot). Labels live outside the clip, so a pinned axis can never cut one in half. |
+| `slice_labels` | donut | Name + value outside each slice; a slice too thin to label at the rim gets a 6px radial stub. The ring shrinks by the measured label width to make room. |
+| `value_format` | bar, line, scatter, donut | A `TickFormat` for the value labels alone. |
+| `orientation` | bar | `"horizontal"` runs the value axis along x and the categories down the **left margin — which is then measured from the category names**, the whole reason to turn a bar chart on its side. |
+| `stacked` | bar | Sum the series within each category (they share one band; it wins over side-by-side). Positives stack up from zero, negatives **down** from zero on their own running total. The axis is scaled to the **totals**. Segment labels go in the segment's centre and are omitted when it is too short to hold them. Not available on a log scale — a stack is a sum measured from a zero a log axis hasn't got. |
+| `stack_total_labels` | bar | Each stack's total, just beyond the end of it. |
+| `order` | bar, donut | `"given"`, `"value_desc"`, `"value_asc"`, `"label"`, or an explicit `[str]` of category/slice names (unnamed ones keep their given place after the named; an unknown name is an error naming it). `value_*` ranks by the **first** series, or by the total when stacked. |
+| `step` | line | `"pre"`/`"post"` — a staircase instead of a slope (`post` holds, then rises). The area wash follows the same outline; the marks stay on the real readings. |
+| `center_text` / `center_subtext` | donut | The KPI idiom: a big number in the hole and a caption under it. |
+| `start_angle` | donut | Degrees from 3 o'clock, clockwise. Default -90 = 12 o'clock. |
 
 Deliberately out of scope: statistical transforms, multiple/secondary axes, colormaps —
 data that doesn't fit a tool-call argument belongs to a plotting library; `import_svg` its
@@ -109,6 +123,11 @@ output instead.
 - `add_callout(target, text, kind)` — a wrapped-text card with a leader line pointing at
   a node **id**; the leader re-anchors on every `reflow`, so annotations survive layout
   changes. Kinds: `note`, `info`, `warning`, `success`, `danger`.
+  Pass `datum={series, index}` with a **chart** as the target and the leader points at that
+  one bar/point/slice instead of at the chart's box. The datum is named, not measured, so
+  `reflow` re-derives it and the leader still lands on the same number after an `edit_chart`
+  changes the data. `series` is a name or index (a donut has one, so only `index` counts);
+  `index` is the position in the data **as you gave it**, before any `order` moved it.
 - `add_callout_card(title, body, kind)` — a standalone card with a kind-colored accent
   bar; same kind vocabulary, no leader.
 - `add_table(rows, header, title)` — column widths measured from content, numeric columns
