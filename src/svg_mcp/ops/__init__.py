@@ -98,6 +98,7 @@ from .diagram import (
 )
 from .diagram_layout import DiagramLayout, layout_diagram
 from .geometry import edit_path, edit_shape
+from .graph import GraphEdge, GraphImport, GraphNode, add_diagram_graph
 from .layers import list_layers, move_to_layer, rename_layer, set_layer_state
 from .meta import resize_document, set_description, set_document_metadata, set_title
 from .modify import (
@@ -236,6 +237,9 @@ __all__ = [
     "ContainerEdit",
     "DiagramLayout",
     "EdgeEdit",
+    "GraphEdge",
+    "GraphImport",
+    "GraphNode",
     "NodeEdit",
     "PlacedContainer",
     "PlacedEdge",
@@ -244,6 +248,7 @@ __all__ = [
     "add_diagram_node",
     "add_diagram_edge",
     "add_diagram_container",
+    "add_diagram_graph",
     "edit_diagram_node",
     "edit_diagram_edge",
     "edit_diagram_container",

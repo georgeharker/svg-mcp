@@ -181,6 +181,10 @@ DIAGRAMS (box-arrow)
 - Skip coordinates entirely: add nodes and edges, then `layout_diagram(algorithm="layered",
   direction="LR")` (or "tree"/"grid"). Fine-tune with `translate_node` + `reflow` afterwards —
   layout is opt-in and won't run again behind your back.
+- Have a graph already (call graph, imports, dependency tree)? One `add_diagram_graph` call
+  ingests `{nodes, edges}` — the producer's own shape, `from`/`to` and extra keys and all — and
+  lays it out. Don't hand-write N `add_diagram_node` calls. It filters by glob, drops self-edges,
+  merges parallel edges, and can filter or label by weight.
 - Edit in place: `edit_diagram_node`/`edit_diagram_edge`/`edit_diagram_container` patch
   label/kind/route/members; `get_params` reads any facade's spec back.
 
@@ -3632,6 +3636,100 @@ def layout_diagram(
         origin_x=origin_x,
         origin_y=origin_y,
         columns=columns,
+    )
+
+
+@mcp.tool
+@emits_change
+def add_diagram_graph(
+    *,
+    document_id: str | None = None,
+    nodes: list[ops.GraphNode],
+    edges: list[ops.GraphEdge],
+    default_node_kind: str = "service",
+    default_edge_kind: str = "data",
+    label_mode: Literal["id", "basename", "trimmed"] = "trimmed",
+    min_weight: float | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+    weight_labels: bool = False,
+    layout: Literal["layered", "tree", "grid", "none"] = "layered",
+    direction: Literal["LR", "TB"] = "LR",
+    spacing_main: float | None = None,
+    spacing_cross: float | None = None,
+    parent: str | None = None,
+    themed: bool = True,
+) -> ops.GraphImport:
+    """Ingest a WHOLE graph — `{nodes, edges}` — as one laid-out diagram, in one call.
+
+    Already have the graph (a call graph, an import graph, a dependency tree, a service map)?
+    Paste it in. This is N `add_diagram_node` + M `add_diagram_edge` + `layout_diagram` done for
+    you, and the wire shape MIRRORS what such exports emit, so no transcription step:
+
+        nodes: [{"id": "src/ops/diagram.py", "file": "…", "symbols": 177}]
+        edges: [{"from": "src/ops/annotate.py", "to": "src/ops/diagram.py",
+                 "kind": "calls", "weight": 49}]
+
+    `from`/`to` and `source`/`target` are both accepted, and extra keys per object (`file`,
+    `symbols`, …) are IGNORED rather than rejected — a richer export must not fail to ingest.
+
+    What it does on your behalf: self-edges are dropped and counted (a box cannot point at
+    itself); parallel edges between the same pair collapse into one with their weights summed;
+    an edge naming an id no node declares is REJECTED, never auto-created — that is a hole in the
+    export, not something to invent a box for. A `kind` your themes cannot dress ("calls") falls
+    back to the default kind and is listed in `kinds_defaulted`.
+
+    Weight is DATA: it filters (`min_weight`) and can be written on the line (`weight_labels`).
+    It never restyles the edge — line weight belongs to the theme.
+
+    Each node is NAMED after its graph id, so the ids stay the vocabulary. Note that a name
+    containing "/" cannot be passed to `target=`/`source=` elsewhere (a slash there means a
+    hierarchy path) — use the returned `mapping` for follow-up calls like `add_callout`.
+
+    Args:
+        nodes: [{id, label?, kind?}] — `label` omitted is derived via `label_mode`; `kind` is a
+            DIAGRAM kind ("service", "datastore", …), not the producer's taxonomy.
+        edges: [{from|source, to|target, kind?, label?, weight?}].
+        default_node_kind: Kind for nodes that name none.
+        default_edge_kind: Kind for edges that name none.
+        label_mode: How to caption a node with no explicit label — "id" (verbatim), "basename"
+            (after the last "/", extension dropped), "trimmed" (drop the prefix every id shares,
+            then the extension). Default "trimmed": full file paths are unreadable as box labels.
+        min_weight: Drop edges below this weight (edges carrying no weight are kept).
+        include: Glob patterns; a node is kept only if its id matches one. Omit for all.
+        exclude: Glob patterns; a matching node is dropped even if `include` matched it.
+        weight_labels: Write each edge's weight on the line (an explicit `label` wins).
+        layout: Finish with this layout, or "none" to leave the nodes stacked for hand placement.
+        direction: "LR" or "TB", passed to the layout.
+        spacing_main: Gap between ranks; omit for the theme's `--gap-layer`.
+        spacing_cross: Gap within a rank; omit for the theme's `--gap-node`.
+        parent: Group/layer id to build into; omit for the document root. The layout pass covers
+            every diagram node in that parent, so build into a fresh group to leave an existing
+            diagram undisturbed.
+        themed: false = skip the theme's automatic hooks on everything created.
+
+    Returns:
+        {nodes_created, edges_created, self_edges_dropped, edges_dropped_filtered,
+        edges_dropped_weight, nodes_filtered, mapping (graph id → node id), kinds_defaulted,
+        and ranks/cycles_broken/edges_rerouted when a layout ran}.
+    """
+    return ops.add_diagram_graph(
+        _doc(document_id),
+        nodes=nodes,
+        edges=edges,
+        default_node_kind=default_node_kind,
+        default_edge_kind=default_edge_kind,
+        label_mode=label_mode,
+        min_weight=min_weight,
+        include=include,
+        exclude=exclude,
+        weight_labels=weight_labels,
+        layout=layout,
+        direction=direction,
+        spacing_main=spacing_main,
+        spacing_cross=spacing_cross,
+        parent=parent,
+        themed=themed,
     )
 
 
