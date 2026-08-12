@@ -39,8 +39,7 @@ from ..theme.model import Category
 from .construct import _CATEGORY_ATTR, _PRIM_ATTR, _place_and_style, _points_str
 from .diagram import _CHART_ATTR, _label_font, _num, _stack_below, _token, measure_label
 from .paint import resolve_paint_refs as _resolve_paint_refs
-from .resources import _class_list
-from .themes import ServingTheme, apply_auto_styles, serving_theme, serving_theme_name
+from .themes import ServingTheme, apply_auto_styles, serving_theme, worn_theme
 
 Style = dict[str, str]
 Point = tuple[float, float]
@@ -918,14 +917,20 @@ def _hole(theme: ServingTheme) -> float:
     return value if 0.0 <= value < 1.0 else _DONUT_HOLE
 
 
-def _build(doc: Document, group: BaseElement, spec: ChartSpec, themed: bool) -> None:
-    """Draw (or re-draw) every child of a chart group from its spec. Idempotent by construction."""
+def _build(doc: Document, group: BaseElement, spec: ChartSpec) -> None:
+    """Draw (or re-draw) every child of a chart group from its spec. Idempotent by construction.
+
+    The theme the marks are painted in is read off the classes the GROUP wears, not off a scan of
+    the routing table: the group already carries the hook it was dressed with, and a scan can
+    name a different theme once a second one is resident. A group wearing no chart hook was built
+    ``themed=False``, and a rebuild that dressed it anyway would overturn that decision.
+    """
     for child in list(group):
         if isinstance(child.tag, str):
             child.delete()
     theme = serving_theme(doc, "chart")
     font = _label_font(theme)
-    dressing = serving_theme_name(doc, "chart") if themed else None
+    dressing = worn_theme(doc, group, "chart")
     group_id = str(group.get_id())
     if spec.kind == "sparkline":
         # A sparkline is the line and nothing else, by definition — no frame, no title.
@@ -1042,7 +1047,7 @@ def add_chart(
         auto=auto,
     )
     _write_chart_spec(group, spec)
-    _build(doc, group, spec, themed)
+    _build(doc, group, spec)
     return PlacedChart(ref=ref, x=at_x, y=at_y, w=w, h=h)
 
 
@@ -1083,11 +1088,7 @@ def edit_chart(
         auto=current.auto and width is None and height is None,
     )
     _write_chart_spec(group, spec)
-    # A chart not wearing its category hook was built with themed=False; a rebuild that dressed
-    # it anyway would quietly overturn that decision, so the absence is honoured.
-    dressing = serving_theme_name(doc, "chart")
-    themed = dressing is not None and f"{dressing}-chart" in _class_list(group)
-    _build(doc, group, spec, themed)
+    _build(doc, group, spec)
     return ChartEdit(
         ref=NodeRef(id=str(group.get_id()), tag=str(group.TAG), name=getattr(group, "label", None)),
         children=sum(1 for child in group if isinstance(child.tag, str)),

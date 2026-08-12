@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -30,7 +31,7 @@ from pydantic import BaseModel, Field
 from ..model.document import Document
 from ..model.errors import InvalidArgument, SvgMcpError
 from ..model.handles import NodeRef, names_node
-from ..query.outline import _bbox_xywh
+from ..query.outline import _bbox_xywh, _to_local_box
 from ..typeset import FontNotFound, measure_text
 from .construct import (
     _CATEGORY_ATTR,
@@ -48,8 +49,8 @@ from .construct import (
 from .geometry import edit_shape
 from .modify import to_back
 from .paint import resolve_paint_refs as _resolve_paint_refs
-from .resources import _class_list, _set_class_list
-from .themes import ServingTheme, apply_auto_styles, serving_theme
+from .resources import _class_list, _set_class_list, apply_styles
+from .themes import ServingTheme, resolve_auto_styles, serving_theme
 
 Style = dict[str, str]
 Point = tuple[float, float]
@@ -626,21 +627,45 @@ def _place_facade(
 
     ``stamp_prim`` is False for a facade whose category has only one shape to be: a container is
     always a box, so ``data-prim`` would restate ``data-category`` and buy nothing.
+
+    As in ``_place_and_style``, everything that can fail is resolved BEFORE the group joins the
+    tree — an unservable role must not leave a half-built facade behind.
     """
-    doc.resolve_parent(parent).add(element)
+    parent_element = doc.resolve_parent(parent)
+    classes = resolve_auto_styles(
+        doc, category=category, prim=prim, role=role, styles=styles, themed=themed
+    )
+    resolved = _resolve_paint_refs(doc, style)
+
+    parent_element.add(element)
     element.set_id(doc.new_id(prefix))
     if name is not None:
         element.label = name
     element.set(_CATEGORY_ATTR, category)
     if stamp_prim:
         element.set(_PRIM_ATTR, prim)
-    apply_auto_styles(
-        doc, element, category=category, prim=prim, role=role, styles=styles, themed=themed
-    )
-    resolved = _resolve_paint_refs(doc, style)
+    if classes:
+        apply_styles(doc, str(element.get_id()), classes)
     if resolved:
         element.style = inkex.Style(resolved)
     return NodeRef(id=str(element.get_id()), tag=str(element.TAG), name=name)
+
+
+@contextmanager
+def _facade_body(doc: Document, ref: NodeRef) -> Iterator[None]:
+    """Build a facade's children, removing the WHOLE group again if any part of the build fails.
+
+    ``_place_facade`` validates its own dressing up front, but the children a facade goes on to
+    draw are built incrementally; a half-drawn facade left in the tree by a raising build is
+    worse than none at all, and nothing outside the group can be holding a handle on it yet.
+    """
+    try:
+        yield
+    except Exception:
+        element = doc.svg.getElementById(ref.id)
+        if element is not None:
+            element.delete()
+        raise
 
 
 def _diamond(x: float, y: float, w: float, h: float) -> list[Point]:
@@ -861,18 +886,55 @@ def add_diagram_node(
         styles=styles,
         themed=themed,
     )
-    _build_shape(doc, shape, x=at_x, y=at_y, w=w, h=h, parent=ref.id, corner=corner)
-    _set_label(doc, group, label, (at_x + w / 2.0, at_y + h / 2.0), halo=None, dy=None)
-    _write_node_spec(group, NodeSpec(kind=kind, label=label, shape=shape, w=w, h=h, auto=auto))
+    with _facade_body(doc, ref):
+        _build_shape(doc, shape, x=at_x, y=at_y, w=w, h=h, parent=ref.id, corner=corner)
+        _set_label(doc, group, label, (at_x + w / 2.0, at_y + h / 2.0), halo=None, dy=None)
+        _write_node_spec(group, NodeSpec(kind=kind, label=label, shape=shape, w=w, h=h, auto=auto))
     return PlacedNode(ref=ref, x=at_x, y=at_y, w=w, h=h)
 
 
 def _swap_role(doc: Document, element: BaseElement, old: str, new: str) -> None:
-    """Move a facade from one role class to another, leaving everything else it carries alone."""
+    """Move a facade from one role class to another, leaving everything else it carries alone.
+
+    The NEW dressing is resolved in full FIRST — including the facade's own category and
+    primitive, read off the stamps, so a routed theme's category context is honoured exactly as
+    it was at construction. Only once that has succeeded is the old role class taken off: a kind
+    nothing can serve leaves the facade wearing precisely what it wore before.
+    """
+    category = str(element.get(_CATEGORY_ATTR) or "") or None
+    prim = str(element.get(_PRIM_ATTR) or "") or None
+    classes = resolve_auto_styles(doc, category=category, prim=prim, role=new, themed=True)
     owned = {f"{theme}-{old}" for theme in doc.theme_meta}
     remaining = [cls for cls in _class_list(element) if cls not in owned]
     _set_class_list(element, remaining)
-    apply_auto_styles(doc, element, category=None, role=new, themed=True)
+    if classes:
+        apply_styles(doc, str(element.get_id()), classes)
+
+
+def _missing_role_class(doc: Document, element: BaseElement, role: str) -> bool:
+    """True when a resident theme defines ``role`` but the facade is not actually wearing it.
+
+    The dressed state, not the spec, is what says whether a re-kind has work to do — a facade
+    left undressed by an interrupted edit reads as the right kind and looks like the wrong one.
+    Only a role some resident theme really defines counts, so this never asks for a hook that
+    ``_swap_role`` would then have to refuse.
+    """
+    worn = set(_class_list(element))
+    if any(f"{theme}-{role}" in worn for theme in doc.theme_meta):
+        return False
+    return any(f"{theme}-{role}" in meta.class_names for theme, meta in doc.theme_meta.items())
+
+
+def _rekind(doc: Document, element: BaseElement, old: str, new: str | None) -> bool:
+    """Re-dress a facade for ``new`` when the caller named a kind; True when anything changed.
+
+    Naming the kind the facade already claims is NOT a no-op when the facade is not wearing that
+    kind's class: it is the way to repair one, so the short-circuit reads the classes, not the spec.
+    """
+    if new is None or (new == old and not _missing_role_class(doc, element, old)):
+        return False
+    _swap_role(doc, element, old, new)
+    return True
 
 
 def edit_diagram_node(
@@ -921,8 +983,7 @@ def edit_diagram_node(
             halo=None,
             dy=None,
         )
-    if kind is not None and kind != spec.kind:
-        _swap_role(doc, group, spec.kind, kind)
+    _rekind(doc, group, spec.kind, kind)
 
     _write_node_spec(
         group,
@@ -1108,19 +1169,20 @@ def add_diagram_edge(
         styles=styles,
         themed=themed,
     )
-    _write_edge_spec(
-        group,
-        EdgeSpec(
-            source=source_id,
-            target=target_id,
-            kind=kind,
-            sa=source_anchor,
-            ta=target_anchor,
-            route=route,
-            label=label or "",
-        ),
-    )
-    result = _reroute(doc)
+    with _facade_body(doc, ref):
+        _write_edge_spec(
+            group,
+            EdgeSpec(
+                source=source_id,
+                target=target_id,
+                kind=kind,
+                sa=source_anchor,
+                ta=target_anchor,
+                route=route,
+                label=label or "",
+            ),
+        )
+        result = _reroute(doc)
     return PlacedEdge(ref=ref, edges_rerouted=result.edges_rerouted)
 
 
@@ -1143,8 +1205,7 @@ def edit_diagram_edge(
     spec = read_edge_spec(group)
     if spec is None:
         raise InvalidArgument(f"{target!r} is not a diagram edge (no {_EDGE_ATTR} spec)")
-    if kind is not None and kind != spec.kind:
-        _swap_role(doc, group, spec.kind, kind)
+    _rekind(doc, group, spec.kind, kind)
     _write_edge_spec(
         group,
         EdgeSpec(
@@ -1265,13 +1326,15 @@ def _refit_container(doc: Document, group: BaseElement, spec: ContainerSpec) -> 
     rect = _body(group)
     if box is None or rect is None:
         return False
+    # The members' union is a WORLD box; the rect's x/y/width/height are read in ITS frame.
+    local = _to_local_box(rect, box)
     edit_shape(
         doc,
         str(rect.get_id()),
         expect_tag="rect",
-        attrs={"x": box[0], "y": box[1], "width": box[2], "height": box[3]},
+        attrs={"x": local[0], "y": local[1], "width": local[2], "height": local[3]},
     )
-    _set_container_label(doc, group, spec.label, box, pad)
+    _set_container_label(doc, group, spec.label, local, pad)
     return True
 
 
@@ -1354,12 +1417,24 @@ def add_diagram_container(
         themed=themed,
         stamp_prim=False,
     )
-    add_rect(doc, x=box[0], y=box[1], width=box[2], height=box[3], parent=ref.id, themed=False)
-    _set_container_label(doc, group, label, box, pad)
-    _write_container_spec(
-        group, ContainerSpec(kind=kind, label=label, members=tuple(member_ids), auto=auto)
-    )
-    to_back(doc, ref.id)  # a container is scenery: it draws behind everything it encloses
+    with _facade_body(doc, ref):
+        # ``box`` is a WORLD union of the members' boxes; the rect's numbers are read in the
+        # group's frame, so it has to be crossed over before anything is drawn from it.
+        local = _to_local_box(group, box)
+        add_rect(
+            doc,
+            x=local[0],
+            y=local[1],
+            width=local[2],
+            height=local[3],
+            parent=ref.id,
+            themed=False,
+        )
+        _set_container_label(doc, group, label, local, pad)
+        _write_container_spec(
+            group, ContainerSpec(kind=kind, label=label, members=tuple(member_ids), auto=auto)
+        )
+        to_back(doc, ref.id)  # a container is scenery: it draws behind everything it encloses
     return PlacedContainer(ref=ref, x=box[0], y=box[1], w=box[2], h=box[3], auto=auto)
 
 
@@ -1418,8 +1493,7 @@ def edit_diagram_container(
             "delete it, or give it an explicit x/y/width/height first"
         )
 
-    if kind is not None and kind != spec.kind:
-        _swap_role(doc, group, spec.kind, kind)
+    _rekind(doc, group, spec.kind, kind)
     updated = ContainerSpec(
         kind=kind if kind is not None else spec.kind,
         label=label if label is not None else spec.label,
@@ -1468,9 +1542,24 @@ def reflow(
 
     Containers with an explicit box are never touched — that geometry was a decision. Legends are
     never touched at all: what a key says, and where it sits, are both deliberate.
+
+    ``scope`` narrows the pass to the handles it names. Entries are resolved LENIENTLY: deleting
+    a node is the commonest reason to reflow at all, so a handle that no longer resolves is
+    reported in ``skipped`` (as the caller wrote it) and the rest of the scope still applies.
+    An EMPTY ``scope`` is an explicit no-op — it names nothing, so nothing is re-derived; omit
+    the argument entirely to reflow the whole document.
     """
-    ids = {str(doc.resolve(entry).get_id()) for entry in scope} if scope else None
+    ids: set[str] | None = None
+    unresolved: list[str] = []
+    if scope is not None:
+        ids = set()
+        for entry in scope:
+            try:
+                ids.add(str(doc.resolve(entry).get_id()))
+            except SvgMcpError:
+                unresolved.append(entry)
     result = _reroute(doc, scope=ids) if edges else Reflow()
+    result.skipped.extend(unresolved)
     if edges:
         # ``ops.annotate`` imports this module, not vice versa — hence the deferred import, the
         # same shape ``ops.themes`` uses to reach back into ``ops.construct``.

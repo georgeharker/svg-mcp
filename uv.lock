@@ -1729,7 +1729,7 @@ wheels = [
 
 [[package]]
 name = "svg-mcp"
-version = "0.4.1"
+version = "0.4.4"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -1740,6 +1740,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "resvg-py" },
+    { name = "tinycss2" },
 ]
 
 [package.optional-dependencies]
@@ -1772,6 +1773,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "resvg-py", specifier = ">=0.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
+    { name = "tinycss2", specifier = ">=1.2" },
 ]
 provides-extras = ["cairo", "dev"]
 

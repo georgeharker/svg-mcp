@@ -33,7 +33,8 @@ from ..theme.model import Category
 from ..typeset import FontNotFound, glyph_run, is_bold, parse_font_size, text_on_path_d
 from .geometry import _merge_style_and_transform
 from .paint import resolve_paint_refs as _resolve_paint_refs
-from .themes import apply_auto_styles
+from .resources import apply_styles
+from .themes import resolve_auto_styles
 
 Style = dict[str, str]
 Point = tuple[float, float]
@@ -129,20 +130,30 @@ def _place_and_style(
     the ``{theme}-{category}--{prefix}`` hook. A ``category`` of None means the node is not
     themable at all (groups, layers, ``<use>``), so no hook is even looked up — and nothing is
     recorded, since there is no category to record.
+
+    EVERYTHING that can fail — the parent handle, the dressing, the paint refs, the transform —
+    is resolved BEFORE the element joins the tree, so a rejected style name leaves no orphan
+    behind. Nothing after the insertion below is allowed to raise.
     """
-    doc.resolve_parent(parent).add(element)
+    parent_element = doc.resolve_parent(parent)
+    classes = resolve_auto_styles(
+        doc, category=category, prim=prefix, role=role, styles=styles, themed=themed
+    )
+    resolved_style = _resolve_paint_refs(doc, style)
+    parsed_transform = inkex.Transform(transform) if transform is not None else None
+
+    parent_element.add(element)
     element.set_id(doc.new_id(prefix))
     if name is not None:
         element.label = name
     if category is not None:
         element.set(_CATEGORY_ATTR, category)
         element.set(_PRIM_ATTR, prefix)
-    apply_auto_styles(
-        doc, element, category=category, prim=prefix, role=role, styles=styles, themed=themed
-    )
-    _apply_style(element, _resolve_paint_refs(doc, style))
-    if transform is not None:
-        element.transform = inkex.Transform(transform)
+    if classes:
+        apply_styles(doc, str(element.get_id()), classes)
+    _apply_style(element, resolved_style)
+    if parsed_transform is not None:
+        element.transform = parsed_transform
     return NodeRef(id=str(element.get_id()), tag=str(element.TAG), name=name)
 
 
@@ -1192,6 +1203,11 @@ def add_text_run(
 ) -> NodeRef:
     """Append a ``<tspan>`` run to an existing text (or tspan) node for multi-run/line text."""
     parent_element = doc.resolve(parent)
+    # Resolved before the tspan joins the tree, for the reason ``_place_and_style`` explains.
+    classes = resolve_auto_styles(
+        doc, category="text", prim="tspan", role=role, styles=styles, themed=themed
+    )
+    resolved_style = _resolve_paint_refs(doc, style)
     tspan = inkex.Tspan()
     for key, value in (("x", x), ("y", y), ("dx", dx), ("dy", dy)):
         if value is not None:
@@ -1203,10 +1219,9 @@ def add_text_run(
         tspan.label = name
     tspan.set(_CATEGORY_ATTR, "text")
     tspan.set(_PRIM_ATTR, "tspan")
-    apply_auto_styles(
-        doc, tspan, category="text", prim="tspan", role=role, styles=styles, themed=themed
-    )
-    _apply_style(tspan, _resolve_paint_refs(doc, style))
+    if classes:
+        apply_styles(doc, str(tspan.get_id()), classes)
+    _apply_style(tspan, resolved_style)
     return NodeRef(id=str(tspan.get_id()), tag=str(tspan.TAG), name=name)
 
 

@@ -275,6 +275,23 @@ def _bad(origin: str, selector: str, what: str) -> str:
 # --- step 4: var() resolution ----------------------------------------------
 
 
+def resolve_token_table(tokens: Mapping[str, str], *, origin: str) -> dict[str, str]:
+    """Resolve the token table against ITSELF, to a fixpoint; the result is var-free.
+
+    Tokens routinely chain — ``--ink: var(--gray-900)`` is the ordinary way to name a palette
+    entry — and a table left unresolved hands that literal ``var(--gray-900)`` to every consumer
+    that reads a token directly (a chart's ink, a facade's padding) rather than through a rule.
+    The contract is the rules': a reference cycle names the chain, and a var() naming a token
+    that is neither declared nor given a fallback is a load error rather than a silent drop.
+    """
+    return {
+        name: _resolve_value(
+            value, tokens, origin=origin, prop=name, selector=":root", seen=(name,)
+        )
+        for name, value in tokens.items()
+    }
+
+
 def resolve_vars(
     rules: Sequence[Rule], tokens: Mapping[str, str], *, origin: str
 ) -> tuple[Rule, ...]:
@@ -297,7 +314,7 @@ def resolve_vars(
                             origin=origin,
                             prop=declaration.prop,
                             selector=selector,
-                            seen=frozenset(),
+                            seen=(),
                         ),
                     )
                     for declaration in rule.declarations
@@ -315,7 +332,7 @@ def _resolve_value(
     origin: str,
     prop: str,
     selector: str,
-    seen: frozenset[str],
+    seen: tuple[str, ...],
 ) -> str:
     out: list[str] = []
     index = 0
@@ -339,9 +356,10 @@ def _resolve_value(
                 "tokens are custom properties and start with '--'"
             )
         if name in seen:
-            raise ThemeError(f"{origin}: token '{name}' resolves to itself (cycle)")
+            chain = " -> ".join([*seen, name])
+            raise ThemeError(f"{origin}: token reference cycle: {chain}")
         if name in tokens:
-            source, next_seen = tokens[name], seen | {name}
+            source, next_seen = tokens[name], (*seen, name)
         elif fallback is not None:
             source, next_seen = fallback, seen
         else:

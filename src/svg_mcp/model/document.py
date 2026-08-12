@@ -57,6 +57,13 @@ class Document:
         self.svg = svg
         # Named styles the AI defines, mirrored into a single <style> sheet in <defs>.
         self.styles: dict[str, dict[str, str]] = {}
+        # CSS captured from an imported document's own svg-mcp <style> sheet. The registries
+        # (theme_css, styles) start empty on import, so without this the first _sync_stylesheet
+        # would rewrite the sheet from nothing and silently unstyle every classed node.
+        # It is emitted FIRST, before the theme blocks and named styles, so re-loading the same
+        # theme (or redefining a style) materializes AFTER it and wins the equal-specificity tie.
+        # A second export/import folds everything back into this field — that is expected.
+        self.imported_css: str = ""
         # Materialized theme stylesheets, theme name -> CSS text, in the order they were applied.
         # They are emitted BEFORE doc.styles so a named style beats a theme hook on a tie.
         self.theme_css: dict[str, str] = {}
@@ -140,9 +147,13 @@ class Document:
 
     @classmethod
     def from_svg(cls, svg_text: str) -> Document:
-        """Load an existing SVG document from a string."""
+        """Load an existing SVG document from a string, keeping any svg-mcp sheet it carries."""
         tree = inkex.load_svg(svg_text)
-        return cls(tree.getroot())
+        document = cls(tree.getroot())
+        existing = document.svg.getElementById(cls._STYLESHEET_ID)
+        if existing is not None:
+            document.imported_css = str(existing.text or "").strip()
+        return document
 
     def new_id(self, prefix: str) -> str:
         """Allocate a fresh, document-unique id with the given prefix."""

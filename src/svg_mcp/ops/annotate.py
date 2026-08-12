@@ -50,7 +50,7 @@ from pydantic import BaseModel, ConfigDict
 from ..model.document import Document
 from ..model.errors import InvalidArgument
 from ..model.handles import NodeRef
-from ..query.outline import _bbox_xywh
+from ..query.outline import _bbox_xywh, _to_local_point
 from .chart import (
     _SERIES_COUNT,
     _TITLE_SIZE,
@@ -80,9 +80,9 @@ from .diagram import (
     _label_font,
     _num,
     _place_facade,
+    _rekind,
     _side_pref,
     _stack_below,
-    _swap_role,
     _token,
     anchor_point,
     auto_side,
@@ -91,8 +91,7 @@ from .diagram import (
     read_edge_spec,
     read_node_spec,
 )
-from .resources import _class_list
-from .themes import _fallback_hook, _hook, serving_theme, serving_theme_name
+from .themes import _fallback_hook, _hook, serving_theme, serving_theme_name, worn_theme
 
 Style = dict[str, str]
 
@@ -357,6 +356,9 @@ def _swatch_class(doc: Document, swatch: str) -> str:
     if any(swatch in meta.class_names for meta in doc.theme_meta.values()):
         return swatch
     key = "chart" if swatch.startswith("series-") else swatch
+    # No ``owner`` preference here, unlike ``_part_class``: a swatch is not part of the legend's
+    # own dressing, it STANDS IN for another facade's kind, and it has to be painted by whichever
+    # theme paints that kind — or the key stops describing the picture it is a key to.
     hook = _hook(doc, serving_theme_name(doc, key), swatch)
     if hook is None:
         hook = _fallback_hook(doc, swatch)
@@ -368,9 +370,16 @@ def _swatch_class(doc: Document, swatch: str) -> str:
     return hook
 
 
-def _part_class(doc: Document, suffix: str) -> list[str]:
-    """A part class (``leader``, ``callout-text``) if some theme defines it, else nothing."""
-    hook = _hook(doc, serving_theme_name(doc, suffix), suffix)
+def _part_class(doc: Document, suffix: str, owner: str | None = None) -> list[str]:
+    """A part class (``leader``, ``callout-text``) if some theme defines it, else nothing.
+
+    ``owner`` is the theme the facade being rebuilt is actually WEARING; it gets first refusal,
+    so a rebuild dresses its children in the same theme as the group rather than in whichever
+    theme a routing scan happens to name today.
+    """
+    hook = _hook(doc, owner, suffix) if owner is not None else None
+    if hook is None:
+        hook = _hook(doc, serving_theme_name(doc, suffix), suffix)
     if hook is None:
         hook = _fallback_hook(doc, suffix)
     return [] if hook is None else [hook]
@@ -445,13 +454,16 @@ def _text_part(
     )
 
 
-def _build_legend(
-    doc: Document, group: BaseElement, spec: LegendSpec, at: Point, *, themed: bool
-) -> LegendLayout:
-    """Draw (or re-draw) every child of a legend from its spec. Idempotent by construction."""
+def _build_legend(doc: Document, group: BaseElement, spec: LegendSpec, at: Point) -> LegendLayout:
+    """Draw (or re-draw) every child of a legend from its spec. Idempotent by construction.
+
+    ``at`` is in the GROUP's frame, and the theme to dress the swatches in is read off the group
+    itself — so a rebuild lands the key exactly where it was, in the theme it is already wearing.
+    """
     for child in list(group):
         if isinstance(child.tag, str):
             child.delete()
+    dressing = worn_theme(doc, group, "legend", "container")
     layout = _legend_layout(doc, spec)
     group_id = str(group.get_id())
     x, y = at
@@ -475,7 +487,7 @@ def _build_legend(
         row, column = divmod(index, columns)
         cell_x = x + layout.pad + column * (layout.column + _COLUMN_GAP)
         middle = y + layout.pad + layout.title_h + row * layout.row + layout.row / 2.0
-        classes = [_swatch_class(doc, entry.swatch)] if themed else []
+        classes = [_swatch_class(doc, entry.swatch)] if dressing is not None else []
         if entry.form == "line":
             _part(
                 doc,
@@ -556,7 +568,9 @@ def add_legend(
         themed=themed,
     )
     _write_legend_spec(group, spec)
-    layout = _build_legend(doc, group, spec, (at_x, at_y), themed=themed)
+    # ``at`` is a WORLD position (an explicit x/y, or the world box the stack was measured from);
+    # the children are authored in the group's frame, so it is crossed over before drawing.
+    layout = _build_legend(doc, group, spec, _to_local_point(group, (at_x, at_y)))
     return PlacedLegend(
         ref=ref,
         x=at_x,
@@ -569,10 +583,17 @@ def add_legend(
 
 
 def _legend_origin(group: BaseElement) -> Point:
-    """Where a legend is drawn, read off the card it owns — never off a transform it has none of."""
+    """Where a legend is drawn, in the GROUP's frame — read off the card it owns.
+
+    ``_bbox_xywh`` answers in world coordinates, but this origin is fed straight back to the
+    drawing pass, which authors in the group's frame; without crossing back, a legend under any
+    ancestor transform walks by that transform on every single edit.
+    """
     card = next((child for child in group if isinstance(child, inkex.Rectangle)), None)
     box = _bbox_xywh(card) if card is not None else None
-    return (_ORIGIN, _ORIGIN) if box is None else (box[0], box[1])
+    if box is None:
+        return (_ORIGIN, _ORIGIN)
+    return _to_local_point(group, (box[0], box[1]))
 
 
 def edit_legend(
@@ -621,9 +642,7 @@ def edit_legend(
         auto=auto,
     )
     _write_legend_spec(group, updated)
-    dressing = serving_theme_name(doc, "legend")
-    themed = dressing is not None and f"{dressing}-legend" in _class_list(group)
-    _build_legend(doc, group, updated, _legend_origin(group), themed=themed)
+    _build_legend(doc, group, updated, _legend_origin(group))
     return LegendEdit(
         ref=NodeRef(id=str(group.get_id()), tag=str(group.TAG), name=getattr(group, "label", None)),
         entries=[entry.label for entry in updated.entries],
@@ -810,13 +829,20 @@ def _leader_ends(target: Box, card: Box, side: AnchorPref) -> tuple[Point, Point
 
 
 def _derive_leader(doc: Document, group: BaseElement, spec: CalloutSpec) -> bool:
-    """Re-draw a callout's leader from where its card and its target are NOW; False if it cannot."""
+    """Re-draw a callout's leader from where its card and its target are NOW; False if it cannot.
+
+    Both boxes are WORLD boxes, so both ends of the leader are computed in world and then crossed
+    into the group's frame — the line is a child of the group, and its x1/y1/x2/y2 are read there.
+    """
     target = _box_of(doc, spec.target)
     card = _card_of(group)
     if target is None or card is None:
         return False
-    start, end = _leader_ends(target, card, spec.side)
-    classes = _part_class(doc, "leader") if _themed_callout(doc, group) else []
+    world_start, world_end = _leader_ends(target, card, spec.side)
+    start = _to_local_point(group, world_start)
+    end = _to_local_point(group, world_end)
+    dressing = worn_theme(doc, group, spec.kind, "container")
+    classes = _part_class(doc, "leader", dressing) if dressing is not None else []
     line = _named_part(group, _PART_LEADER)
     if line is None:
         line = _part(
@@ -848,16 +874,13 @@ def _derive_leader(doc: Document, group: BaseElement, spec: CalloutSpec) -> bool
     return True
 
 
-def _themed_callout(doc: Document, group: BaseElement) -> bool:
-    """Whether this callout was dressed — read off the role class it is (or is not) wearing."""
-    worn = set(_class_list(group))
-    return any(cls in worn for meta in doc.theme_meta.values() for cls in meta.class_names)
-
-
 def _build_card(
-    doc: Document, group: BaseElement, spec: CalloutSpec, at: Point, text: CardText, *, themed: bool
+    doc: Document, group: BaseElement, spec: CalloutSpec, at: Point, text: CardText
 ) -> None:
-    """Draw (or re-draw) a callout's card and its wrapped text. The leader is derived separately."""
+    """Draw (or re-draw) a callout's card and its wrapped text. The leader is derived separately.
+
+    ``at`` is in the GROUP's frame, and the theme the text is set in is read off the group.
+    """
     for child in list(group):
         if isinstance(child.tag, str) and child.get(_PART_ATTR) in (None, _PART_CARD, _PART_TEXT):
             child.delete()
@@ -875,7 +898,8 @@ def _build_card(
     # The card's text carries its own part class rather than relying on a `.note text` descendant
     # rule: `.note` is shared with the diagram note KIND, and a rule written that way would resize
     # every diagram note's label as a side effect of adding callouts.
-    classes = _part_class(doc, "callout-text") if themed else []
+    dressing = worn_theme(doc, group, spec.kind, "container")
+    classes = _part_class(doc, "callout-text", dressing) if dressing is not None else []
     for index, line in enumerate(text.lines):
         middle = at[1] + text.pad + index * (text.line_h + _LINE_LEAD) + text.line_h / 2.0
         element = _text_part(doc, group_id, line, (at[0] + text.pad, middle), classes)
@@ -956,7 +980,7 @@ def add_callout(
         themed=themed,
     )
     _write_callout_spec(group, spec)
-    _build_card(doc, group, spec, at, wrapped, themed=themed)
+    _build_card(doc, group, spec, _to_local_point(group, at), wrapped)
     _derive_leader(doc, group, spec)
     return PlacedCallout(
         ref=ref,
@@ -989,8 +1013,7 @@ def edit_callout(
     spec = read_callout_spec(group)
     if spec is None:
         raise InvalidArgument(f"{target!r} is not a callout (no {_CALLOUT_ATTR} spec)")
-    if kind is not None and kind != spec.kind:
-        _swap_role(doc, group, spec.kind, kind)
+    _rekind(doc, group, spec.kind, kind)
     updated = CalloutSpec(
         target=spec.target,
         text=text if text is not None else spec.text,
@@ -1014,7 +1037,7 @@ def edit_callout(
             )
             at = card_box(box, chosen, updated.distance, wrapped.w, wrapped.h)
             replaced = (at[0], at[1]) != (current.x, current.y) if current is not None else True
-        _build_card(doc, group, updated, at, wrapped, themed=_themed_callout(doc, group))
+        _build_card(doc, group, updated, _to_local_point(group, at), wrapped)
         lines = len(wrapped.lines)
     else:
         lines = sum(1 for child in group if child.get(_PART_ATTR) == _PART_TEXT)
@@ -1346,9 +1369,7 @@ def _rect_part(
     )
 
 
-def _build_table(
-    doc: Document, group: BaseElement, spec: TableSpec, *, themed: bool
-) -> TableLayout:
+def _build_table(doc: Document, group: BaseElement, spec: TableSpec) -> TableLayout:
     """Draw (or re-draw) every child of a table from its spec. Idempotent by construction.
 
     Everything is authored in the group's own frame, so the group's ``translate`` is the ONLY
@@ -1360,8 +1381,12 @@ def _build_table(
     layout = _table_layout(doc, spec)
     group_id = str(group.get_id())
 
+    # A table not wearing its role hook was built with themed=False; a rebuild that dressed it
+    # anyway would quietly overturn that decision, so the absence is honoured (as in a chart).
+    dressing = worn_theme(doc, group, "table", "container")
+
     def part(suffix: str) -> list[str]:
-        return _part_class(doc, suffix) if themed else []
+        return _part_class(doc, suffix, dressing) if dressing is not None else []
 
     top = layout.title_h
     # The border is drawn bare: the GROUP wears `.table`, so its canvas fill and hairline edge
@@ -1473,7 +1498,7 @@ def add_table(
     )
     group.set("transform", f"translate({_num(at_x)},{_num(at_y)})")
     _write_table_spec(group, spec)
-    layout = _build_table(doc, group, spec, themed=themed)
+    layout = _build_table(doc, group, spec)
     return PlacedTable(
         ref=ref,
         x=at_x,
@@ -1532,11 +1557,7 @@ def edit_table(
         auto=spec.auto,
     )
     _write_table_spec(group, updated)
-    # A table not wearing its role hook was built with themed=False; a rebuild that dressed it
-    # anyway would quietly overturn that decision, so the absence is honoured (as in edit_chart).
-    dressing = serving_theme_name(doc, "table")
-    themed = dressing is not None and f"{dressing}-table" in _class_list(group)
-    _build_table(doc, group, updated, themed=themed)
+    _build_table(doc, group, updated)
     return TableEdit(
         ref=NodeRef(id=str(group.get_id()), tag=str(group.TAG), name=getattr(group, "label", None)),
         children=sum(1 for child in group if isinstance(child.tag, str)),
@@ -1682,9 +1703,7 @@ def _stack_h(count: int, line_h: float) -> float:
     return 0.0 if count == 0 else count * line_h + (count - 1) * _LINE_LEAD
 
 
-def _build_callout_card(
-    doc: Document, group: BaseElement, spec: CardSpec, *, themed: bool
-) -> CardLayout:
+def _build_callout_card(doc: Document, group: BaseElement, spec: CardSpec) -> CardLayout:
     """Draw (or re-draw) a card: its body, its accent, its title and its words. Idempotent.
 
     The card rect is bare, so the KIND class on the group paints it — the same way a callout's
@@ -1697,8 +1716,12 @@ def _build_callout_card(
     layout = _card_layout(doc, spec)
     group_id = str(group.get_id())
 
+    # A card not wearing its kind's hook was built with themed=False; a rebuild that dressed it
+    # anyway would quietly overturn that decision, so the absence is honoured (as in a chart).
+    dressing = worn_theme(doc, group, spec.kind, "container")
+
     def part(suffix: str) -> list[str]:
-        return _part_class(doc, suffix) if themed else []
+        return _part_class(doc, suffix, dressing) if dressing is not None else []
 
     _rect_part(doc, group_id, (0.0, 0.0, layout.w, layout.h), ())
     _rect_part(doc, group_id, (0.0, 0.0, _ACCENT_W, layout.h), part("card-accent"))
@@ -1780,7 +1803,7 @@ def add_callout_card(
     )
     group.set("transform", f"translate({_num(at_x)},{_num(at_y)})")
     _write_card_spec(group, spec)
-    layout = _build_callout_card(doc, group, spec, themed=themed)
+    layout = _build_callout_card(doc, group, spec)
     return PlacedCard(
         ref=ref,
         x=at_x,
@@ -1818,10 +1841,9 @@ def edit_callout_card(
         auto=spec.auto,
     )
     _card_words(updated.title, updated.body)
-    if kind is not None and kind != spec.kind:
-        _swap_role(doc, group, spec.kind, kind)
+    _rekind(doc, group, spec.kind, kind)
     _write_card_spec(group, updated)
-    layout = _build_callout_card(doc, group, updated, themed=_themed_callout(doc, group))
+    layout = _build_callout_card(doc, group, updated)
     return CardEdit(
         ref=NodeRef(id=str(group.get_id()), tag=str(group.TAG), name=getattr(group, "label", None)),
         lines=len(layout.body_lines),

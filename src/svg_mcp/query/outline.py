@@ -7,6 +7,7 @@ orient and re-orient mid-edit. Non-visual furniture (defs, namedview, metadata) 
 from __future__ import annotations
 
 import inkex
+from inkex import BaseElement
 
 from ..model.document import Document
 
@@ -41,6 +42,48 @@ def _bbox_xywh(element: object) -> list[float] | None:
     if box is None:
         return None
     return [float(box.left), float(box.top), float(box.width), float(box.height)]
+
+
+def _inverse_frame(element: BaseElement) -> inkex.Transform:
+    """The world → local transform for ``element``'s OWN coordinate space.
+
+    ``_bbox_xywh`` answers in WORLD coordinates, but the numbers written onto a node (x/y/width,
+    x1/y1/x2/y2, …) are read in the frame its ancestors' transforms establish. Anything that
+    measures a box and then writes a child's geometry from it has to cross that boundary, or the
+    child lands offset by every ancestor transform between them — and moves again on every edit.
+
+    Pass the element being written, or (for a child that does not exist yet) the group it is
+    about to join: a child with no transform of its own shares its parent's composed frame.
+    """
+    try:
+        return -element.composed_transform()
+    except Exception:  # pragma: no cover - a detached or transform-less node
+        return inkex.Transform()
+
+
+def _to_local_point(element: BaseElement, point: tuple[float, float]) -> tuple[float, float]:
+    """A WORLD point expressed in ``element``'s own frame (see :func:`_inverse_frame`)."""
+    moved = _inverse_frame(element).apply_to_point(point)
+    return (float(moved[0]), float(moved[1]))
+
+
+def _to_local_box(
+    element: BaseElement, box: tuple[float, float, float, float]
+) -> tuple[float, float, float, float]:
+    """A WORLD ``(x, y, w, h)`` expressed in ``element``'s own frame, re-axis-aligned.
+
+    All four corners are mapped and re-bounded, so a rotating or skewing ancestor still yields
+    the smallest axis-aligned box holding the region rather than a nonsensical width.
+    """
+    inverse = _inverse_frame(element)
+    corners = [
+        inverse.apply_to_point((box[0] + dx * box[2], box[1] + dy * box[3]))
+        for dx in (0.0, 1.0)
+        for dy in (0.0, 1.0)
+    ]
+    xs = [float(corner[0]) for corner in corners]
+    ys = [float(corner[1]) for corner in corners]
+    return (min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
 
 
 def _summarize(element: object, depth: int | None, include_bbox: bool) -> OutlineNode:

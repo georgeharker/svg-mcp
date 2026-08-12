@@ -434,6 +434,27 @@ def _fallback_hook(doc: Document, role: str) -> str | None:
     return None if name is None else _hook(doc, name, role)
 
 
+def worn_theme(doc: Document, element: BaseElement, *suffixes: str) -> str | None:
+    """The resident theme a facade is actually DRESSED BY, or None if it wears no hook at all.
+
+    Read off the classes the element carries, matched against each resident theme's materialized
+    class names — never off an insertion-order scan of the routing table, which answers with
+    whoever serves a key TODAY and can disagree with the hook the facade was built with. The
+    ``suffixes`` are tried in order of authority (a facade's own role first, then its category),
+    so the answer is the theme that dressed this element, not merely one it shares a class with.
+
+    None means the facade wears none of them — it was built ``themed=False``, and a rebuild that
+    dressed it anyway would quietly overturn that decision.
+    """
+    worn = set(_class_list(element))
+    for suffix in suffixes:
+        for theme, meta in doc.theme_meta.items():
+            name = f"{theme}-{suffix}"
+            if name in worn and name in meta.class_names:
+                return theme
+    return None
+
+
 def serving_theme_name(doc: Document, key: str) -> str | None:
     """Which RESIDENT theme's classes a facade's parts should wear for ``key``.
 
@@ -494,9 +515,8 @@ def serving_theme(doc: Document, role: str) -> ServingTheme:
     return ServingTheme()
 
 
-def apply_auto_styles(
+def resolve_auto_styles(
     doc: Document,
-    element: BaseElement,
     *,
     category: str | None,
     prim: str | None = None,
@@ -504,16 +524,11 @@ def apply_auto_styles(
     styles: Sequence[str] | None = None,
     themed: bool = True,
 ) -> list[str]:
-    """Link a new node to the themes serving it, then to the styles the caller named.
+    """Work out the class list a node would wear, WITHOUT needing the node — or touching the tree.
 
-    Hooks are attached in cascade order — category, primitive type, role — and only when the
-    routed theme defines that class; the explicit ``styles`` go last so they win equal-specificity
-    ties. ``themed=False`` skips the hooks but still attaches what the caller named explicitly.
-
-    A role no theme was routed for at all falls back to the bundled ``default`` theme; a role the
-    theme serving this category simply doesn't define is still an error, since that routing was
-    a deliberate choice. An UNROUTED category falls back the same way, but only for the handful
-    of categories in ``_FALLBACK_CATEGORIES`` — see there for why that is not all of them.
+    Every way this can fail (an unservable role, a style name nothing defines) fails here, so a
+    caller can validate a dressing before it commits any structure to the document and be sure
+    that the matching :func:`apply_auto_styles` will not raise afterwards. See it for the rules.
     """
     classes: list[str] = []
     category_theme = doc.theme_routing.get(category) if category is not None else None
@@ -543,6 +558,33 @@ def apply_auto_styles(
             )
         classes.append(hook)
     classes.extend(resolve_style_ref(doc, ref) for ref in styles or ())
+    return classes
+
+
+def apply_auto_styles(
+    doc: Document,
+    element: BaseElement,
+    *,
+    category: str | None,
+    prim: str | None = None,
+    role: str | None = None,
+    styles: Sequence[str] | None = None,
+    themed: bool = True,
+) -> list[str]:
+    """Link a new node to the themes serving it, then to the styles the caller named.
+
+    Hooks are attached in cascade order — category, primitive type, role — and only when the
+    routed theme defines that class; the explicit ``styles`` go last so they win equal-specificity
+    ties. ``themed=False`` skips the hooks but still attaches what the caller named explicitly.
+
+    A role no theme was routed for at all falls back to the bundled ``default`` theme; a role the
+    theme serving this category simply doesn't define is still an error, since that routing was
+    a deliberate choice. An UNROUTED category falls back the same way, but only for the handful
+    of categories in ``_FALLBACK_CATEGORIES`` — see there for why that is not all of them.
+    """
+    classes = resolve_auto_styles(
+        doc, category=category, prim=prim, role=role, styles=styles, themed=themed
+    )
     if classes:
         apply_styles(doc, str(element.get_id()), classes)
     return classes

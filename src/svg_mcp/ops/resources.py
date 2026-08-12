@@ -82,9 +82,12 @@ def _set_prop(element: BaseElement, key: str, value: str) -> None:
 
 
 def _sync_stylesheet(doc: Document) -> None:
-    # Theme blocks first, in the order they were applied; named styles last, so a style the AI
+    # Imported CSS first — it is whatever the document already carried, and the registries know
+    # nothing of it; re-loading the same theme materializes after it and so wins the tie.
+    # Then the theme blocks, in the order they were applied; named styles last, so a style the AI
     # defined by hand wins the equal-specificity tie against a theme hook.
-    blocks = [css for css in doc.theme_css.values() if css]
+    blocks = [doc.imported_css] if doc.imported_css else []
+    blocks.extend(css for css in doc.theme_css.values() if css)
     blocks.extend(
         "." + name + " { " + "; ".join(f"{k}:{v}" for k, v in props.items()) + " }"
         for name, props in doc.styles.items()
@@ -142,7 +145,16 @@ def apply_styles(doc: Document, target: str, names: list[str], *, replace: bool 
 
     The class list is an ordered list of style REFS (theme hooks and named styles), so appending
     keeps earlier refs and their positions; a name already present is not duplicated or moved.
+
+    An empty ``names`` with ``replace=False`` is rejected rather than silently doing nothing:
+    it can only have meant "clear", which is ``replace=True`` with no names (or ``remove_styles``).
     """
+    if not names and not replace:
+        raise InvalidArgument(
+            "apply_styles was given no style names and replace=false, which would do nothing; "
+            "pass replace=true with an empty list to CLEAR the class list, or use remove_styles "
+            "to drop specific names"
+        )
     element = doc.resolve(target)
     if replace:
         _set_class_list(element, list(dict.fromkeys(names)))
@@ -436,6 +448,14 @@ def boolean(
     for el in elements:
         _ensure_renderable(el, f"boolean {op}")
     subject, operands = elements[0], elements[1:]
+
+    # The dressing is settled BEFORE a single input is consumed. Every branch below moves or
+    # deletes the operands, so a role nothing serves (or a style name that does not exist)
+    # discovered at `finish` time would have already destroyed the shapes it was refusing to
+    # style — and there is nothing left to try again with.
+    from .themes import resolve_auto_styles
+
+    resolve_auto_styles(doc, category="shape", role=role, styles=styles, themed=themed)
 
     if op == "union":
         group = inkex.Group.new(name or "")

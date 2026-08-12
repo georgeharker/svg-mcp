@@ -27,6 +27,7 @@ from .css import (
     namespace_rules,
     parse_css,
     parse_variant_css,
+    resolve_token_table,
     resolve_vars,
     serialize_rules,
     tier_sort,
@@ -194,6 +195,10 @@ def materialize(theme: Theme, variant: str | None = None) -> MaterializedTheme:
             )
         tokens.update(theme.variant_tokens[variant])
     origin = str(theme.source)
+    # The table is brought to a fixpoint FIRST: a token may name another token, and everything
+    # downstream (rule substitution, and every consumer that reads ``tokens`` directly) is
+    # entitled to assume what ``ServingTheme`` promises — that a token value is a literal.
+    tokens = resolve_token_table(tokens, origin=origin)
     rules = resolve_vars(theme.rules, tokens, origin=origin)
     rules = namespace_rules(rules, theme.name)
     rules = tier_sort(rules, theme.name, theme.manifest.serves.roles)

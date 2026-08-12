@@ -2989,9 +2989,12 @@ def apply_styles(
     the whole list at once. Inline style (set via `restyle` or an add_*/edit_* `style` arg) is the
     node's EXPLICIT style and still wins over every class rule.
 
+    An empty `names` with `replace=false` is an error — it could only have meant "clear", which
+    is `replace=true` with an empty list (or `remove_styles` for specific names).
+
     Args:
         target: Node id or name.
-        names: Style names to link.
+        names: Style names to link. Empty is only meaningful with replace=true (clears the list).
         replace: false (default) = append to the existing class list; true = overwrite it.
 
     Returns:
@@ -3635,7 +3638,9 @@ def reflow(
             x/y/width/height are never re-fitted either way.
         scope: Limit the rewrite to edges touching these node/edge ids or names, and to
             containers named here or holding one of them; omit for all. Port spreading is still
-            computed over every edge, since ports are shared.
+            computed over every edge, since ports are shared. Handles that no longer resolve
+            are fine to pass — a just-deleted id is reported in `skipped` and the rest of the
+            scope still applies. An EMPTY list names nothing and so re-derives nothing.
 
     Returns:
         {edges_rerouted, skipped, containers_refit, skipped_containers}.
