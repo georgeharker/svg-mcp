@@ -123,12 +123,54 @@ class GraphImport(BaseModel):
 # --- label derivation --------------------------------------------------------
 
 
-# The two ways a graph producer spells a hierarchy. A FILE path is split on "/" and its last
-# segment carries an extension; a dotted FQNAME (``pkg.module.Class.method``) is split on "." and
-# its last segment is the thing itself. Confusing the two is not cosmetic: read as a path,
-# ``svg_mcp.ops.graph.add_diagram_graph`` has the "extension" ``.add_diagram_graph``, and every
-# symbol in a module ends up captioned with the module's name.
-_SEPARATORS = ("/", ".")
+# How a graph producer spells a hierarchy, and it is NOT one convention: a file path uses "/"
+# (or "\\"), and a fully-qualified name uses whatever its language uses — "." for Python/Java/C#,
+# "::" for Rust/C++/Ruby, "\\" for PHP namespaces. Ids also arrive MIXED, e.g. a C++ symbol as
+# ``src/render/canvas.cpp::Canvas::draw``, so the separator is found per id rather than declared.
+#
+# Getting this wrong is not cosmetic. Read ``svg_mcp.ops.graph.add_diagram_graph`` as a path and
+# its "extension" is ``.add_diagram_graph`` — every symbol in a module then ends up captioned
+# with the module's name, silently, on every box.
+# "/" is a path separator everywhere. "\\" is BOTH a Windows path separator and PHP's namespace
+# separator — we cannot tell which from the character, and happily do not need to: it is a
+# hierarchy step under either reading.
+_PATH_SEPARATORS = ("/", "\\")
+_NAME_SEPARATORS = ("::", ".")
+
+# A CLOSED list, for the same reason the chart formatters are closed: the alternative is a
+# heuristic, and every heuristic here is wrong about some language. "Short and alphabetic" would
+# read Go's ``net/http.Client`` as the file ``net/http`` with extension ``.Client`` and caption
+# that box ``http``. An extension nobody listed just stays in the label — longer, never wrong.
+_EXTENSIONS = frozenset({
+    "py", "pyi", "pyx", "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "vue", "svelte",
+    "go", "rs", "rb", "java", "kt", "kts", "scala", "clj", "cljs", "swift", "m", "mm", "cs",
+    "fs", "php", "c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx", "sh", "bash", "zsh", "fish",
+    "lua", "pl", "pm", "r", "jl", "ex", "exs", "erl", "dart", "groovy", "sql", "md", "rst",
+    "json", "yaml", "yml", "toml", "ini", "cfg", "xml", "html", "css", "scss", "sass", "less",
+})  # fmt: skip
+
+
+def _names_a_file(text: str) -> bool:
+    return any(separator in text for separator in _PATH_SEPARATORS)
+
+
+def _separators(file_shaped: bool) -> tuple[str, ...]:
+    """Which strings count as a hierarchy step.
+
+    A dot is the one ambiguous character: a step in ``pkg.module.Class``, an EXTENSION in
+    ``diagram.py``. So it counts as a separator only where no filename is in play — otherwise
+    ``basename`` of ``ops/diagram.py`` is ``py``, which is not a name for anything.
+    """
+    return (*_PATH_SEPARATORS, "::") if file_shaped else (*_PATH_SEPARATORS, *_NAME_SEPARATORS)
+
+
+def _last_boundary(text: str, separators: Sequence[str]) -> int:
+    """The index just past ``text``'s last separator (0 if it has none).
+
+    Whichever separator ends LATEST wins, so a mixed ``src/render/canvas.cpp::Canvas::draw`` cuts
+    at the ``::`` — the symbol — rather than at the ``/`` that only gets you to the file.
+    """
+    return max((text.rfind(sep) + len(sep) for sep in separators if sep in text), default=0)
 
 
 def _shared_prefix(ids: Sequence[str]) -> str:
@@ -136,12 +178,15 @@ def _shared_prefix(ids: Sequence[str]) -> str:
 
     Cut back, because a character-wise prefix is not a hierarchy: ``ops/diagram.py`` and
     ``ops/diagrams.py`` share ``ops/diagram``, and trimming that would leave one node captioned
-    ``s``. Only whole segments are ever removed, so what is left still reads as a path (or as a
-    dotted name — the cut lands on whichever separator appears LAST, which is what tells a
-    ``src/v1.2/`` apart from a ``pkg.module.``).
+    ``s``. Only whole segments are ever removed, so what is left still reads as a path — or as a
+    dotted, ``::``-ed or namespaced name, whichever went in.
+
+    One file path anywhere in the set settles the dot for the WHOLE set: a mixed export is read
+    the conservative way, since cutting a shared prefix mid-filename is the worse mistake.
     """
     if not ids:
         return ""
+    separators = _separators(any(_names_a_file(node_id) for node_id in ids))
     prefix = ids[0]
     for other in ids[1:]:
         limit = min(len(prefix), len(other))
@@ -153,23 +198,17 @@ def _shared_prefix(ids: Sequence[str]) -> str:
         prefix = prefix[:cut]
         if not prefix:
             return ""
-    boundary = max(prefix.rfind(separator) for separator in _SEPARATORS)
-    return prefix[: boundary + 1] if boundary >= 0 else ""
+    return prefix[: _last_boundary(prefix, separators)]
 
 
-def _drop_extension(text: str, *, path_shaped: bool) -> str:
-    """``diagram.py`` → ``diagram``, but only for an id that is a PATH.
+def _drop_extension(text: str) -> str:
+    """``diagram.py`` → ``diagram``, for a dot-tail this module actually recognises as one.
 
-    An extension is a fact about filenames. A dotted fqname's last segment is the symbol, and
-    ``path_shaped`` is judged on the ORIGINAL id, not on what trimming left of it — ``diagram.py``
-    is still a filename after its directories have been cut away.
+    Everything else that can follow a dot — a Go symbol on a package path, a Python attribute, a
+    ``::`` chain hanging off a C++ filename — is the thing the node IS, and must survive intact.
     """
-    if not path_shaped:
-        return text
     head, dot, tail = text.rpartition(".")
-    if dot and head and "/" not in tail:
-        return head
-    return text
+    return head if dot and head and tail.lower() in _EXTENSIONS else text
 
 
 def _derive_label(node: GraphNode, mode: LabelMode, prefix: str) -> str:
@@ -178,12 +217,15 @@ def _derive_label(node: GraphNode, mode: LabelMode, prefix: str) -> str:
         return node.label
     if mode == "id":
         return node.id
-    path_shaped = "/" in node.id
+    # An extension belongs to a filename, so it is only shaved off an id that names a FILE — and
+    # that is judged on the ORIGINAL id, not on what trimming left of it, since `diagram.py` is
+    # still a filename once its directories have been cut away.
+    file_shaped = _names_a_file(node.id)
     if mode == "basename":
-        tail = node.id.rpartition("/" if path_shaped else ".")[2]
-        return _drop_extension(tail or node.id, path_shaped=path_shaped)
-    trimmed = node.id.removeprefix(prefix)
-    return _drop_extension(trimmed or node.id, path_shaped=path_shaped)
+        tail = node.id[_last_boundary(node.id, _separators(file_shaped)) :] or node.id
+        return _drop_extension(tail) if file_shaped else tail
+    trimmed = node.id.removeprefix(prefix) or node.id
+    return _drop_extension(trimmed) if file_shaped else trimmed
 
 
 def _format_weight(weight: float) -> str:

@@ -306,6 +306,62 @@ def test_basename_of_a_dotted_fqname_is_the_symbol_itself() -> None:
     assert _labels(doc)["svg_mcp.ops.graph.add_diagram_graph"] == "add_diagram_graph"
 
 
+def test_a_double_colon_fqname_is_split_on_the_double_colon() -> None:
+    # Rust, C++, Ruby. The "." convention is not the only one, and an id that uses neither must
+    # come through whole rather than being chopped at some character that happens to be in it.
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes(
+            {"id": "svg_mcp::ops::graph::add_diagram_graph"},
+            {"id": "svg_mcp::model::errors::InvalidArgument"},
+        ),
+        edges=[],
+    )
+    assert set(_labels(doc).values()) == {
+        "ops::graph::add_diagram_graph",
+        "model::errors::InvalidArgument",
+    }
+
+
+def test_a_php_namespace_is_split_on_its_backslash() -> None:
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": r"App\Models\User"}, {"id": r"App\Http\Controller"}),
+        edges=[],
+        label_mode="basename",
+    )
+    assert set(_labels(doc).values()) == {"User", "Controller"}
+
+
+def test_a_go_package_path_keeps_the_symbol_that_follows_its_dot() -> None:
+    # `net/http.Client` is a path AND a dotted symbol, and the dot is not an extension. A
+    # "short alphabetic tail" heuristic would caption this box `http`.
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "net/http.Client"}, {"id": "net/url.URL"}),
+        edges=[],
+        label_mode="basename",
+    )
+    assert set(_labels(doc).values()) == {"http.Client", "url.URL"}
+
+
+def test_a_symbol_hanging_off_a_c_plus_plus_file_cuts_at_the_symbol() -> None:
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes(
+            {"id": "src/render/canvas.cpp::Canvas::draw"},
+            {"id": "src/render/canvas.cpp::Canvas::clear"},
+        ),
+        edges=[],
+        label_mode="basename",
+    )
+    assert set(_labels(doc).values()) == {"draw", "clear"}
+
+
 def test_a_dot_in_a_directory_name_is_still_not_an_extension() -> None:
     doc = _doc()
     ops.add_diagram_graph(
