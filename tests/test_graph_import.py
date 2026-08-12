@@ -526,6 +526,131 @@ def test_weight_labels_write_an_integral_weight_as_an_integer_and_a_label_wins()
     assert [spec[3] for spec in _edge_specs(doc)] == ["49", "hot path"]
 
 
+# --- 4b. size: extent as data ------------------------------------------------
+
+
+def _boxes(doc: Document, result: GraphImport) -> dict[str, tuple[float, float]]:
+    out: dict[str, tuple[float, float]] = {}
+    for graph_id, node_id in result.mapping.items():
+        box = _box_of(doc, node_id)
+        if box is not None:
+            out[graph_id] = (box.w, box.h)
+    return out
+
+
+def test_size_field_reads_a_key_the_export_already_carries() -> None:
+    doc = _doc()
+    result = _ingest(doc, size_field="symbols", size_labels=True)
+    assert _labels(doc)["src/svg_mcp/ops/diagram.py"] == "diagram (177)"
+    assert _labels(doc)["src/svg_mcp/ops/annotate.py"] == "annotate (46)"
+    assert result.nodes_created == 3
+
+
+def test_an_explicit_size_beats_the_field() -> None:
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "a", "symbols": 10, "size": 999}, {"id": "b", "symbols": 20}),
+        edges=[],
+        size_field="symbols",
+        size_labels=True,
+    )
+    assert set(_labels(doc).values()) == {"a (999)", "b (20)"}
+
+
+def test_a_size_field_no_node_carries_is_rejected_with_the_keys_they_do() -> None:
+    doc = _doc()
+    with pytest.raises(InvalidArgument) as raised:
+        ops.add_diagram_graph(
+            doc, nodes=_nodes({"id": "a", "symbols": 10}), edges=[], size_field="symbol"
+        )
+    assert "symbol" in str(raised.value) and "symbols" in str(raised.value)
+    assert not _node_names(doc)
+
+
+def test_scaling_one_dimension_leaves_the_other_measured_from_the_label() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "small", "size": 1}, {"id": "big", "size": 100}),
+        edges=[],
+        scale_width=(80.0, 240.0),
+    )
+    boxes = _boxes(doc, result)
+    assert boxes["small"][0] == pytest.approx(80.0)
+    assert boxes["big"][0] == pytest.approx(240.0)
+    assert boxes["small"][1] == boxes["big"][1]  # height still comes from the label
+
+
+def test_scaling_both_dimensions_takes_the_root_so_area_carries_the_quantity() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "a", "size": 0}, {"id": "b", "size": 25}, {"id": "c", "size": 100}),
+        edges=[],
+        scale_width=(0.0, 200.0),
+        scale_height=(0.0, 100.0),
+    )
+    boxes = _boxes(doc, result)
+    # sqrt(25)/sqrt(100) = 0.5, so the middle node lands halfway up each range, not a quarter.
+    assert boxes["b"][0] == pytest.approx(100.0)
+    assert boxes["b"][1] == pytest.approx(50.0)
+
+
+def test_a_scaled_box_never_shrinks_below_what_its_label_needs() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes(
+            {"id": "a_very_long_node_name_indeed_that_needs_room", "size": 1},
+            {"id": "b", "size": 100},
+        ),
+        edges=[],
+        label_mode="id",
+        scale_width=(10.0, 300.0),
+    )
+    boxes = _boxes(doc, result)
+    assert boxes["a_very_long_node_name_indeed_that_needs_room"][0] > 10.0
+
+
+def test_a_group_takes_the_sum_of_its_members_sizes_unless_it_states_one() -> None:
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "pg", "size": 3}, {"id": "redis", "size": 4}, {"id": "web", "size": 5}),
+        edges=[],
+        collapse=_groups({"id": "storage", "members": ["pg", "redis"]}),
+        size_labels=True,
+    )
+    assert set(_labels(doc).values()) == {"storage (7)", "web (5)"}
+
+    other = _doc()
+    ops.add_diagram_graph(
+        other,
+        nodes=_nodes({"id": "pg", "size": 3}, {"id": "redis", "size": 4}),
+        edges=[],
+        collapse=_groups({"id": "storage", "members": ["pg", "redis"], "size": 99}),
+        size_labels=True,
+    )
+    assert _labels(other)["storage"] == "storage (99)"
+
+
+def test_a_node_with_no_size_is_simply_measured_from_its_label() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "small", "size": 1}, {"id": "big", "size": 100}, {"id": "unsized"}),
+        edges=[],
+        scale_width=(200.0, 300.0),
+        size_labels=True,
+    )
+    boxes = _boxes(doc, result)
+    assert boxes["big"][0] == pytest.approx(300.0)
+    assert boxes["small"][0] == pytest.approx(200.0)
+    assert boxes["unsized"][0] < 200.0  # measured, not scaled
+    assert _labels(doc)["unsized"] == "unsized"  # and nothing to write in the label
+
+
 # --- 5. layout ---------------------------------------------------------------
 
 

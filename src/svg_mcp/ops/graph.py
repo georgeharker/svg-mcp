@@ -1,27 +1,37 @@
 """Bulk graph ingestion: a producer's ``{nodes, edges}`` export becomes a laid-out diagram.
 
-Everything here is mechanical translation, and that is the point. A call graph, an import graph,
-a dependency tree — anything that already knows what its nodes and edges ARE — arrives as one
-JSON object, and turning it into a picture should not cost one hand-written ``add_diagram_node``
-per box. The wire shape below MIRRORS what such producers actually emit (``from``/``to``, extra
-descriptive keys per object), so an export pastes in verbatim rather than being transcribed.
+Everything here is mechanical translation, and that is the point. A service map, a dependency
+tree, a state machine, an org chart, a call graph — anything that already knows what its nodes
+and edges ARE — arrives as one JSON object, and turning it into a picture should not cost one
+hand-written ``add_diagram_node`` per box. The wire shape below MIRRORS what such producers
+actually emit (``from``/``to``, extra descriptive keys per object), so an export pastes in
+verbatim rather than being transcribed.
 
-Two decisions run through the whole module:
+Three decisions run through the whole module:
 
-**The models are tolerant, the graph is strict.** :class:`GraphNode` and :class:`GraphEdge` are
-``extra="ignore"`` — alone among this codebase's schemas, which forbid unknown keys — because the
-producer owns its own format: a richer export that also carries ``file``, ``symbols`` or ``loc``
-must not be rejected for being richer than we asked. The GRAPH itself is not tolerant at all: an
-edge naming a node that was never declared is a hole in the data, and inventing the missing box
-would draw a picture the export does not describe.
+**The models are tolerant, the graph is strict.** :class:`GraphNode` keeps unknown keys and
+:class:`GraphEdge` ignores them — alone among this codebase's schemas, which forbid them —
+because the producer owns its own format: a richer export carrying ``file``, ``symbols`` or
+``loc`` must not be rejected for being richer than we asked, and ``size_field`` can then name
+one of those keys without this module having to know the word. The GRAPH itself is not tolerant
+at all: an edge naming a node that was never declared is a hole in the data, and inventing the
+missing box would draw a picture the export does not describe.
 
-**Weight is DATA, not style.** It filters (``min_weight``) and it can be written on the edge
-(``weight_labels``), and that is all. Baking a weight into a stroke width would fight the theme
-for control of the line, and the theme wins that fight everywhere else in this codebase.
+**Data never restyles.** An edge's ``weight`` and a node's ``size`` can be written into a label,
+and a size can — only when asked — scale a box, which is geometry the facade already owns.
+Neither ever touches paint: stroke and fill belong to the theme, and the theme wins that fight
+everywhere else in this codebase.
+
+**Nothing here decides what matters.** No ranking, no threshold, no importance score. Which
+nodes deserve a box, and which several are really one thing, is a semantic judgement about what
+the picture is FOR; the caller states it (``exclude``, ``collapse``) and this does the mechanical
+part in full and reports exactly what it did. Every automatic alternative was tried against a
+real codebase and every one of them nominated the exception module as the architecture.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -33,7 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..model.document import Document
 from ..model.errors import InvalidArgument
 from ..query.outline import _bbox_xywh
-from .diagram import _shape_for, add_diagram_edge, add_diagram_node
+from .diagram import _shape_for, add_diagram_edge, add_diagram_node, auto_size
 from .diagram_layout import DiagramLayout, Direction, layout_diagram
 from .themes import resolve_dressing, serving_theme
 
@@ -50,11 +60,13 @@ GraphLayout = Literal["layered", "tree", "grid", "none"]
 class GraphNode(BaseModel):
     """One node of an incoming graph: an identity, and optionally what to call it and what it is.
 
-    ``extra="ignore"`` deliberately: a code-graph export carries whatever its producer found
-    interesting per node (``file``, ``symbols``, ``loc``, …), and none of that is our business.
+    ``extra="allow"`` deliberately: an export carries whatever its producer found interesting per
+    node (``file``, ``symbols``, ``loc``, ``owner``, …). None of it is our business to interpret —
+    but it is KEPT rather than dropped, so ``size_field`` can name one of those keys and this
+    module never has to learn any producer's vocabulary.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="allow")
 
     id: str
     """The producer's identity for this node — the key its edges name, and the diagram node's
@@ -64,6 +76,12 @@ class GraphNode(BaseModel):
     kind: str | None = None
     """A DIAGRAM kind ("service", "datastore", …) — not a producer taxonomy. None takes
     ``default_node_kind``."""
+    size: float | None = None
+    """How big this node IS — its extent, not its box: symbols, lines, headcount, cost.
+
+    Wins over whatever ``size_field`` names, on the same principle that an explicit ``label``
+    beats ``label_mode``: a value stated per node beats a rule stated once.
+    """
 
 
 class GraphGroup(BaseModel):
@@ -92,6 +110,9 @@ class GraphGroup(BaseModel):
     """What the box says. Omit to derive it from the group's id via ``label_mode``."""
     kind: str | None = None
     """The group's diagram kind. None takes ``default_node_kind``."""
+    size: float | None = None
+    """The group's extent. Omit for the sum of its members' — the sensible auto — and state it
+    only where the whole is not the sum of its parts."""
 
 
 class GraphEdge(BaseModel):
@@ -114,7 +135,8 @@ class GraphEdge(BaseModel):
     label: str | None = None
     """Text on the line. Wins over ``weight_labels``."""
     weight: float | None = None
-    """How strong the relation is. Filters and labels only — never restyles the line."""
+    """How strong the relation is. It labels the line (``weight_labels``) and sums when parallel
+    edges merge — never restyles it."""
 
 
 class GraphImport(BaseModel):
@@ -279,6 +301,41 @@ def _derive_label(node: GraphNode, mode: LabelMode, prefix: str) -> str:
 def _format_weight(weight: float) -> str:
     """A weight as a label: an integral one reads as an integer, since most of them are counts."""
     return str(int(weight)) if float(weight).is_integer() else f"{weight:g}"
+
+
+# --- magnitude ---------------------------------------------------------------
+
+
+def _magnitude(node: GraphNode, size_field: str | None) -> float | None:
+    """How big this node is: its own ``size`` if it states one, else ``size_field``'s value.
+
+    Reading an arbitrary key off the export is why :class:`GraphNode` keeps its extras. The
+    alternative — a fixed ``symbols`` field — would bind this op to one producer's vocabulary,
+    and the next one calls it ``loc``, ``commits`` or ``cost``.
+    """
+    if node.size is not None:
+        return node.size
+    if size_field is None:
+        return None
+    raw = (node.model_extra or {}).get(size_field)
+    if isinstance(raw, bool):  # bool is an int, and "True symbols" is not a magnitude
+        return None
+    if isinstance(raw, int | float):
+        return float(raw)
+    return None  # a key that is there but holds no number is not a magnitude
+
+
+def _scale(value: float, low: float, high: float, span: tuple[float, float], power: float) -> float:
+    """Place ``value`` in ``[low, high]``, compressed by ``power`` across the data's own range."""
+    smallest, largest = span
+    if largest <= smallest:
+        return low  # no variation in the data is no reason to draw a difference
+
+    def lift(number: float) -> float:
+        return math.pow(max(number, 0.0), power)
+
+    reach = (lift(value) - lift(smallest)) / (lift(largest) - lift(smallest))
+    return low + (high - low) * min(max(reach, 0.0), 1.0)
 
 
 # --- filtering and merging ---------------------------------------------------
@@ -477,6 +534,10 @@ def add_diagram_graph(
     collapse: Sequence[GraphGroup] | None = None,
     include: Sequence[str] | None = None,
     exclude: Sequence[str] | None = None,
+    size_field: str | None = None,
+    size_labels: bool = False,
+    scale_width: tuple[float, float] | None = None,
+    scale_height: tuple[float, float] | None = None,
     weight_labels: bool = False,
     layout: GraphLayout = "layered",
     direction: Direction = "LR",
@@ -511,6 +572,14 @@ def add_diagram_graph(
     Kinds are resolved BEFORE the merge so that two parallel edges whose different producer kinds
     both fall back to the default collapse into ONE arrow rather than two identical ones.
 
+    A node's SIZE is its extent — symbols, lines, headcount — and, like weight, it is data: it
+    can be written into the label (``size_labels``) and, only if asked, scale the box
+    (``scale_width``/``scale_height``, each independently optional). The compression exponent is
+    DERIVED rather than offered as a knob: scale one dimension and it maps linearly, scale both
+    and each maps by the square root, so that in either case the box's AREA carries the quantity.
+    A scaled box is floored at the size its label needs, because a diagram whose text overflows
+    its boxes has encoded the data at the cost of the words.
+
     Unknown endpoints are the one thing here that refuses rather than counts. A node the caller
     left out is a decision; a node NOBODY declared is a hole in the data, and auto-creating a box
     for it would draw a graph the producer never described.
@@ -523,7 +592,25 @@ def add_diagram_graph(
             raise InvalidArgument(f"node id {node.id!r} appears twice in `nodes`; ids are identity")
         seen.add(node.id)
 
+    magnitude: dict[str, float] = {}
+    for node in nodes:
+        value = _magnitude(node, size_field)
+        if value is not None:
+            magnitude[node.id] = value
+    if size_field is not None and not magnitude:
+        offered = sorted({key for node in nodes for key in (node.model_extra or {})})
+        raise InvalidArgument(
+            f"size_field={size_field!r} names a key no node carries; the nodes offer: "
+            f"{', '.join(offered) or '(no extra keys at all)'}"
+        )
+
     drawable, representative = _collapse(nodes, collapse or ())
+    for group in collapse or ():
+        parts = [magnitude[member] for member in group.members if member in magnitude]
+        if group.size is not None:
+            magnitude[group.id] = group.size
+        elif parts:
+            magnitude[group.id] = sum(parts)
     # A group id is nameable by an edge too, and a member stays "declared" — it is still a thing
     # the caller told us about, now standing for its group.
     seen |= {node.id for node in drawable}
@@ -585,15 +672,37 @@ def add_diagram_graph(
                 existing.label = edge.label
 
     prefix = _shared_prefix([node.id for node in kept])
+    dims = [span for span in (scale_width, scale_height) if span is not None]
+    # One scaled dimension carries the quantity on its own; two share it, so each takes the root.
+    power = 1.0 / len(dims) if dims else 1.0
+    drawn_sizes = [magnitude[node.id] for node in kept if node.id in magnitude]
+    span = (min(drawn_sizes), max(drawn_sizes)) if drawn_sizes else (0.0, 0.0)
+
     created: list[str] = []
     mapping: dict[str, str] = {}
     laid: DiagramLayout | None = None
     with _rollback(doc, created):
         for node in kept:
+            kind = node_kinds[node.kind] if node.kind is not None else default_node_kind
+            caption = _derive_label(node, label_mode, prefix)
+            value = magnitude.get(node.id)
+            if size_labels and value is not None:
+                caption = f"{caption} ({_format_weight(value)})"
+            width: float | None = None
+            height: float | None = None
+            if value is not None and dims:
+                # Floored at what the label needs: the words are the point of the box.
+                measured_w, measured_h = auto_size(doc, kind, caption)
+                if scale_width is not None:
+                    width = max(measured_w, _scale(value, *scale_width, span, power))
+                if scale_height is not None:
+                    height = max(measured_h, _scale(value, *scale_height, span, power))
             placed = add_diagram_node(
                 doc,
-                kind=node_kinds[node.kind] if node.kind is not None else default_node_kind,
-                label=_derive_label(node, label_mode, prefix),
+                kind=kind,
+                label=caption,
+                width=width,
+                height=height,
                 parent=parent,
                 name=node.id,
                 themed=themed,

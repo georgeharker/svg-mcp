@@ -897,6 +897,28 @@ def auto_origin(parent: BaseElement, stacked: float | None, origin: float = _AUT
     return (origin, auto_position(parent, (origin, stacked))[1])
 
 
+def auto_size(doc: Document, kind: str, label: str, *, shape: str | None = None) -> Point:
+    """The box a kind-shaped node needs to hold ``label``, padded from the serving theme.
+
+    The one place a facade's measured size is decided, so that everything which needs to know
+    what a node WOULD be sized to — creating one, re-labelling one, or scaling one from data
+    without letting its text overflow — asks the same question and gets the same answer.
+
+    ``shape`` overrides the kind's own primitive, for a node that was drawn before its kind
+    changed: geometry follows what is on the canvas, not what the spec was re-pointed at.
+    """
+    theme = serving_theme(doc, kind)
+    drawn = shape if shape is not None else _shape_for(theme, kind)
+    pad = _token(theme, "--pad-node", _DEFAULT_PAD)
+    text_w, text_h = measure_label(label, _label_font(theme), _LABEL_SIZE)
+    if drawn == "polygon":  # a diamond's inscribed text box is half its extents
+        return (
+            max(_DIAMOND_MIN_W, text_w * 1.6 + 2 * pad),
+            max(_DIAMOND_MIN_H, text_h * 2 + 2 * pad),
+        )
+    return (max(_MIN_W, text_w + 2 * pad), max(_MIN_H, text_h + 2 * pad))
+
+
 def add_diagram_node(
     doc: Document,
     *,
@@ -921,18 +943,13 @@ def add_diagram_node(
     """
     theme = serving_theme(doc, kind)
     shape = _shape_for(theme, kind)
-    pad = _token(theme, "--pad-node", _DEFAULT_PAD)
     gap = _token(theme, "--gap-node", _DEFAULT_GAP)
     corner = _token(theme, "--radius", _DEFAULT_CORNER)
 
     auto = width is None and height is None
-    text_w, text_h = measure_label(label, _label_font(theme), _LABEL_SIZE)
-    if shape == "polygon":  # a diamond's inscribed text box is half its extents
-        w = width if width is not None else max(_DIAMOND_MIN_W, text_w * 1.6 + 2 * pad)
-        h = height if height is not None else max(_DIAMOND_MIN_H, text_h * 2 + 2 * pad)
-    else:
-        w = width if width is not None else max(_MIN_W, text_w + 2 * pad)
-        h = height if height is not None else max(_MIN_H, text_h + 2 * pad)
+    measured_w, measured_h = auto_size(doc, kind, label, shape=shape)
+    w = width if width is not None else measured_w
+    h = height if height is not None else measured_h
 
     parent_element = doc.resolve_parent(parent)
     stacked = _stack_below(parent_element, gap)
@@ -1070,15 +1087,7 @@ def edit_diagram_node(
     w, h, remeasured = spec.w, spec.h, False
     origin = _local_origin(body)
     if label is not None and spec.auto:
-        theme = serving_theme(doc, kind or spec.kind)
-        pad = _token(theme, "--pad-node", _DEFAULT_PAD)
-        text_w, text_h = measure_label(label, _label_font(theme), _LABEL_SIZE)
-        if spec.shape == "polygon":
-            w = max(_DIAMOND_MIN_W, text_w * 1.6 + 2 * pad)
-            h = max(_DIAMOND_MIN_H, text_h * 2 + 2 * pad)
-        else:
-            w = max(_MIN_W, text_w + 2 * pad)
-            h = max(_MIN_H, text_h + 2 * pad)
+        w, h = auto_size(doc, kind or spec.kind, label, shape=spec.shape)
         remeasured = True
         _resize_shape(doc, body, spec.shape, x=origin[0], y=origin[1], w=w, h=h)
 

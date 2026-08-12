@@ -3660,6 +3660,10 @@ def add_diagram_graph(
     collapse: list[ops.GraphGroup] | None = None,
     include: list[str] | None = None,
     exclude: list[str] | None = None,
+    size_field: str | None = None,
+    size_labels: bool = False,
+    scale_width: tuple[float, float] | None = None,
+    scale_height: tuple[float, float] | None = None,
     weight_labels: bool = False,
     layout: Literal["layered", "tree", "grid", "none"] = "layered",
     direction: Literal["LR", "TB"] = "LR",
@@ -3705,6 +3709,14 @@ def add_diagram_graph(
     Weight is DATA: it can be written on the line (`weight_labels`) and it sums when parallel
     edges merge. It never restyles the edge — line weight belongs to the theme.
 
+    A node's SIZE is its extent — symbols, lines, headcount, cost — read from `size_field`
+    (naming any key your export already carries, e.g. "symbols") or stated per node as `size`,
+    which wins. It can be written into the label (`size_labels`) and, only if you ask, scale the
+    box: `scale_width=[60, 200]` and/or `scale_height=[36, 120]`, each independently optional.
+    Scale one dimension and it maps linearly, both and each maps by the square root — so the
+    box's AREA carries the quantity either way. A scaled box never shrinks below what its label
+    needs. Area is a weak channel: for "rank these", `add_chart(kind="bar")` is the honest tool.
+
     Each node is NAMED after its graph id, so the ids stay the vocabulary: pass one straight to
     `add_callout(target="src/ops/diagram.py")` afterwards. `mapping` gives the created node ids
     if you prefer them, and `name:<graph id>` forces the name reading if an id ever collides.
@@ -3724,6 +3736,13 @@ def add_diagram_graph(
         include: Ids or glob patterns; a node is kept only if it matches one. Omit for all.
         exclude: Ids or glob patterns; a match is dropped even if `include` matched it. An exact
             id always matches itself, so ids containing glob characters are safe to write.
+        size_field: Name of a key already on your node objects holding its extent ("symbols",
+            "loc", "cost"). A per-node `size` wins over it. Naming a key no node carries is
+            rejected, with the keys they do carry.
+        size_labels: Append the size to each label — "diagram (177)".
+        scale_width: [min, max] box width in user units, mapped from size. Omit to leave width
+            measured from the label.
+        scale_height: [min, max] box height, likewise. Give both to scale area.
         weight_labels: Write each edge's weight on the line (an explicit `label` wins).
         layout: Finish with this layout, or "none" to leave the nodes stacked for hand placement.
         direction: "LR" or "TB", passed to the layout.
@@ -3752,6 +3771,10 @@ def add_diagram_graph(
         default_edge_kind=default_edge_kind,
         label_mode=label_mode,
         collapse=collapse,
+        size_field=size_field,
+        size_labels=size_labels,
+        scale_width=scale_width,
+        scale_height=scale_height,
         include=include,
         exclude=exclude,
         weight_labels=weight_labels,
