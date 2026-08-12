@@ -123,12 +123,22 @@ class GraphImport(BaseModel):
 # --- label derivation --------------------------------------------------------
 
 
-def _shared_prefix(ids: Sequence[str]) -> str:
-    """The longest prefix every id shares, cut back to a ``/`` boundary (``""`` if there is none).
+# The two ways a graph producer spells a hierarchy. A FILE path is split on "/" and its last
+# segment carries an extension; a dotted FQNAME (``pkg.module.Class.method``) is split on "." and
+# its last segment is the thing itself. Confusing the two is not cosmetic: read as a path,
+# ``svg_mcp.ops.graph.add_diagram_graph`` has the "extension" ``.add_diagram_graph``, and every
+# symbol in a module ends up captioned with the module's name.
+_SEPARATORS = ("/", ".")
 
-    Cut back, because a character-wise prefix is not a path: ``ops/diagram.py`` and
+
+def _shared_prefix(ids: Sequence[str]) -> str:
+    """The longest prefix every id shares, cut back to a separator boundary (``""`` if none).
+
+    Cut back, because a character-wise prefix is not a hierarchy: ``ops/diagram.py`` and
     ``ops/diagrams.py`` share ``ops/diagram``, and trimming that would leave one node captioned
-    ``s``. Only whole segments are ever removed, so what is left is still a readable path.
+    ``s``. Only whole segments are ever removed, so what is left still reads as a path (or as a
+    dotted name — the cut lands on whichever separator appears LAST, which is what tells a
+    ``src/v1.2/`` apart from a ``pkg.module.``).
     """
     if not ids:
         return ""
@@ -143,12 +153,19 @@ def _shared_prefix(ids: Sequence[str]) -> str:
         prefix = prefix[:cut]
         if not prefix:
             return ""
-    head, sep, _tail = prefix.rpartition("/")
-    return head + sep if sep else ""
+    boundary = max(prefix.rfind(separator) for separator in _SEPARATORS)
+    return prefix[: boundary + 1] if boundary >= 0 else ""
 
 
-def _drop_extension(text: str) -> str:
-    """``diagram.py`` → ``diagram``. A dot inside a directory name is not an extension."""
+def _drop_extension(text: str, *, path_shaped: bool) -> str:
+    """``diagram.py`` → ``diagram``, but only for an id that is a PATH.
+
+    An extension is a fact about filenames. A dotted fqname's last segment is the symbol, and
+    ``path_shaped`` is judged on the ORIGINAL id, not on what trimming left of it — ``diagram.py``
+    is still a filename after its directories have been cut away.
+    """
+    if not path_shaped:
+        return text
     head, dot, tail = text.rpartition(".")
     if dot and head and "/" not in tail:
         return head
@@ -161,10 +178,12 @@ def _derive_label(node: GraphNode, mode: LabelMode, prefix: str) -> str:
         return node.label
     if mode == "id":
         return node.id
+    path_shaped = "/" in node.id
     if mode == "basename":
-        return _drop_extension(node.id.rpartition("/")[2] or node.id)
+        tail = node.id.rpartition("/" if path_shaped else ".")[2]
+        return _drop_extension(tail or node.id, path_shaped=path_shaped)
     trimmed = node.id.removeprefix(prefix)
-    return _drop_extension(trimmed or node.id)
+    return _drop_extension(trimmed or node.id, path_shaped=path_shaped)
 
 
 def _format_weight(weight: float) -> str:

@@ -267,6 +267,53 @@ def test_a_shared_prefix_is_never_cut_mid_segment() -> None:
     assert set(_labels(doc).values()) == {"diagram", "diagrams"}
 
 
+def test_dotted_fqname_ids_are_split_on_the_dot_not_read_as_a_file_extension() -> None:
+    # The other shape a code-graph producer emits: symbol ids, not file paths. Read as a path,
+    # `svg_mcp.ops.graph.add_diagram_graph` has the "extension" `.add_diagram_graph`, and every
+    # symbol in a module would end up captioned with the module's name.
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes(
+            {"id": "svg_mcp.ops.graph.add_diagram_graph", "kind": "function"},
+            {"id": "svg_mcp.ops.graph._shared_prefix", "kind": "function"},
+            {"id": "svg_mcp.model.errors.InvalidArgument", "kind": "class"},
+        ),
+        edges=_edges(
+            {"from": "svg_mcp.ops.graph.add_diagram_graph",
+             "to": "svg_mcp.ops.graph._shared_prefix"},
+            {"from": "svg_mcp.ops.graph.add_diagram_graph",
+             "to": "svg_mcp.model.errors.InvalidArgument"},
+        ),
+    )
+    # A symbol export's node kinds are a taxonomy too, and they default like an edge's does.
+    assert result.kinds_defaulted == ["class", "function"]
+    assert _labels(doc) == {
+        "svg_mcp.ops.graph.add_diagram_graph": "ops.graph.add_diagram_graph",
+        "svg_mcp.ops.graph._shared_prefix": "ops.graph._shared_prefix",
+        "svg_mcp.model.errors.InvalidArgument": "model.errors.InvalidArgument",
+    }
+
+
+def test_basename_of_a_dotted_fqname_is_the_symbol_itself() -> None:
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "svg_mcp.ops.graph.add_diagram_graph"}),
+        edges=[],
+        label_mode="basename",
+    )
+    assert _labels(doc)["svg_mcp.ops.graph.add_diagram_graph"] == "add_diagram_graph"
+
+
+def test_a_dot_in_a_directory_name_is_still_not_an_extension() -> None:
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc, nodes=_nodes({"id": "src/v1.2/alpha.py"}, {"id": "src/v1.2/beta.py"}), edges=[]
+    )
+    assert set(_labels(doc).values()) == {"alpha", "beta"}
+
+
 def test_an_explicit_label_wins_over_every_label_mode() -> None:
     doc = _doc()
     ops.add_diagram_graph(
