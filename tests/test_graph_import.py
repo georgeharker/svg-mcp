@@ -430,6 +430,43 @@ def test_a_layered_ingest_ranks_the_chain_and_reports_the_layout() -> None:
     assert xs == sorted(xs) and len(set(xs)) == 3  # LR: one rank per column
 
 
+def test_the_reported_bounds_enclose_everything_the_call_drew() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes(*[{"id": f"pkg/mod{index}.py"} for index in range(6)]),
+        edges=_edges({"from": "pkg/mod0.py", "to": "pkg/mod5.py"}),
+    )
+    assert result.bounds is not None
+    x, y, width, height = result.bounds
+    for node_id in result.mapping.values():
+        box = _box_of(doc, node_id)
+        assert box is not None
+        assert x <= box.x and y <= box.y
+        assert box.x + box.w <= x + width + 1e-6
+        assert box.y + box.h <= y + height + 1e-6
+
+
+def test_a_graph_too_big_for_its_canvas_says_so_in_the_bounds() -> None:
+    # The reason bounds exist: nothing here resizes the canvas, so the caller has to be told
+    # when the drawing has outgrown it (then `resize_document(mode="fit")`).
+    doc = DocumentStore().create(300, 200)[1]
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes(*[{"id": f"pkg/mod{index}.py"} for index in range(12)]),
+        edges=[],
+    )
+    assert result.bounds is not None
+    assert result.bounds[1] + result.bounds[3] > 200
+
+
+def test_a_graph_with_no_nodes_reports_no_bounds() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(doc, nodes=[], edges=[])
+    assert result.bounds is None
+    assert (result.nodes_created, result.ranks) == (0, None)
+
+
 # --- 6. refusals and atomicity -----------------------------------------------
 
 

@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..model.document import Document
 from ..model.errors import InvalidArgument
+from ..query.outline import _bbox_xywh
 from .diagram import _shape_for, add_diagram_edge, add_diagram_node
 from .diagram_layout import DiagramLayout, Direction, layout_diagram
 from .themes import resolve_dressing, serving_theme
@@ -113,6 +114,15 @@ class GraphImport(BaseModel):
     A producer's taxonomy ("calls", "imports") is not a design language, and the whole promise of
     this op is that an export pastes in — so an unservable kind is REPORTED, not raised on. Every
     substitution is listed here, so a real typo ("servcie") is visible rather than silent.
+    """
+    bounds: tuple[float, float, float, float] | None = None
+    """``(x, y, width, height)`` in world units enclosing everything this call drew; None if it
+    drew nothing.
+
+    Reported because a graph decides its own size: eight nodes fit a default canvas and forty do
+    not, and until now the only way to find that out was to render it and see the boxes fall off
+    the edge. Nothing is resized here — a canvas is the caller's decision — but
+    ``resize_document(mode="fit", margin=20)`` shrink-wraps to it in one call.
     """
     ranks: int | None = None
     """Layout results, absent when ``layout="none"``."""
@@ -262,6 +272,26 @@ def _merge_weights(first: float | None, second: float | None) -> float | None:
 
 
 # --- atomicity ---------------------------------------------------------------
+
+
+Box = tuple[float, float, float, float]
+
+
+def _content_bounds(doc: Document, created: Sequence[str]) -> Box | None:
+    """The world box enclosing every element ``created`` still names, or None if none has one."""
+    boxes: list[list[float]] = []
+    for node_id in created:
+        element = doc.svg.getElementById(node_id)
+        box = None if element is None else _bbox_xywh(element)
+        if box is not None:
+            boxes.append(box)
+    if not boxes:
+        return None
+    left = min(box[0] for box in boxes)
+    top = min(box[1] for box in boxes)
+    right = max(box[0] + box[2] for box in boxes)
+    bottom = max(box[1] + box[3] for box in boxes)
+    return (left, top, right - left, bottom - top)
 
 
 @contextmanager
@@ -483,6 +513,7 @@ def add_diagram_graph(
         nodes_filtered=len(nodes) - len(kept),
         mapping=mapping,
         kinds_defaulted=sorted({*node_defaulted, *edge_defaulted}),
+        bounds=_content_bounds(doc, created),
         ranks=None if laid is None else laid.ranks,
         cycles_broken=None if laid is None else laid.cycles_broken,
         edges_rerouted=None if laid is None else laid.edges_rerouted,

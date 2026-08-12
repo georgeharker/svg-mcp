@@ -3711,7 +3711,11 @@ def add_diagram_graph(
     Returns:
         {nodes_created, edges_created, self_edges_dropped, edges_dropped_filtered,
         edges_dropped_weight, nodes_filtered, mapping (graph id → node id), kinds_defaulted,
-        and ranks/cycles_broken/edges_rerouted when a layout ran}.
+        `bounds` = the (x, y, w, h) the drawing actually occupies, and
+        ranks/cycles_broken/edges_rerouted when a layout ran}.
+
+        A graph decides its own size, so CHECK `bounds` against the canvas — forty nodes will
+        not fit a default document. `resize_document(mode="fit", margin=20)` shrink-wraps to it.
     """
     return ops.add_diagram_graph(
         _doc(document_id),
