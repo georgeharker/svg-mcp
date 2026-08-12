@@ -98,7 +98,7 @@ from .diagram import (
 )
 from .diagram_layout import DiagramLayout, layout_diagram
 from .geometry import edit_path, edit_shape
-from .graph import GraphEdge, GraphImport, GraphNode, add_diagram_graph
+from .graph import GraphEdge, GraphGroup, GraphImport, GraphNode, add_diagram_graph
 from .layers import list_layers, move_to_layer, rename_layer, set_layer_state
 from .meta import resize_document, set_description, set_document_metadata, set_title
 from .modify import (
@@ -238,6 +238,7 @@ __all__ = [
     "DiagramLayout",
     "EdgeEdit",
     "GraphEdge",
+    "GraphGroup",
     "GraphImport",
     "GraphNode",
     "NodeEdit",

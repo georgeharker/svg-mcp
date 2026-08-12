@@ -66,6 +66,34 @@ class GraphNode(BaseModel):
     ``default_node_kind``."""
 
 
+class GraphGroup(BaseModel):
+    """Several nodes the CALLER has judged to be one thing, drawn as a single node.
+
+    This is the whole of this module's answer to "the graph is too big to read", and it is
+    deliberately not an algorithm. Which nodes are worth a box is a semantic question — a
+    judgement about what the picture is *for* — and no centrality score answers it: rank a
+    codebase by any of them and you get its exception module, not its architecture. So the
+    caller, who understands the domain, names the groups; this just does the mechanical part.
+
+    Collapsing REPLACES the members: edges to any of them re-point at the group, edges between
+    them become self-edges (dropped and counted), and parallel edges merge with their weights
+    summed. To keep members visible and draw a box around them instead, ingest them normally and
+    call ``add_diagram_container`` afterwards with the ids from ``mapping``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    """The group's identity — its friendly name once drawn, and a handle edges may name."""
+    members: list[str] = Field(min_length=1)
+    """The node ids this group swallows. Each must be declared in ``nodes``, and no node may
+    belong to two groups."""
+    label: str | None = None
+    """What the box says. Omit to derive it from the group's id via ``label_mode``."""
+    kind: str | None = None
+    """The group's diagram kind. None takes ``default_node_kind``."""
+
+
 class GraphEdge(BaseModel):
     """One edge of an incoming graph, accepted under the producer's spelling or ours.
 
@@ -93,21 +121,31 @@ class GraphImport(BaseModel):
     """What one ingestion built, and what it declined to build.
 
     Every drop is counted SEPARATELY, because "37 edges went in and 24 came out" is only useful
-    if the caller can tell a weight filter from a self-loop from a node it excluded itself.
+    if the caller can tell a self-loop from a collapse from a node it excluded itself.
     """
 
     nodes_created: int = 0
     edges_created: int = 0
+    groups_created: int = 0
+    """``collapse`` groups drawn, each standing in for its members."""
+    nodes_collapsed: int = 0
+    """Nodes swallowed by a group, and so not drawn in their own right."""
     self_edges_dropped: int = 0
-    """Edges whose two ends were the same node: a box-and-arrow diagram has nowhere to draw one."""
+    """Edges whose two ends were the same node: a box-and-arrow diagram has nowhere to draw one.
+
+    Collapsing feeds this: every edge BETWEEN two members of one group becomes a loop on that
+    group, which is the honest reading — the relation is now internal to the thing you drew.
+    """
     edges_dropped_filtered: int = 0
     """Edges left dangling by ``include``/``exclude`` taking one of their endpoints out."""
-    edges_dropped_weight: int = 0
-    """Edges below ``min_weight``."""
     nodes_filtered: int = 0
     """Nodes ``include``/``exclude`` kept out of the drawing."""
     mapping: dict[str, str] = Field(default_factory=dict)
-    """Graph id → the created node's SVG id. The handle to use for everything afterwards."""
+    """Every id the caller named → the SVG id of the node that REPRESENTS it.
+
+    A collapsed member maps to its group's node, so a handle taken from the input still finds
+    whatever ended up standing for it.
+    """
     kinds_defaulted: list[str] = Field(default_factory=list)
     """Kinds the export named that no resident theme dresses, drawn as the default kind instead.
 
@@ -246,11 +284,77 @@ def _format_weight(weight: float) -> str:
 # --- filtering and merging ---------------------------------------------------
 
 
+def _hit(node_id: str, patterns: Sequence[str]) -> bool:
+    """Whether ``node_id`` is named by ``patterns`` — as a literal id first, then as a glob.
+
+    Literal first because these lists are usually WRITTEN OUT rather than pattern-matched: the
+    caller has decided which nodes to leave out, one id at a time. An id may contain glob
+    metacharacters of its own (``operator[]``, ``Foo<T>::bar``, a file named ``[id].tsx``), and
+    such an id must name itself.
+    """
+    return any(node_id == pattern or fnmatch(node_id, pattern) for pattern in patterns)
+
+
 def _selected(node_id: str, include: Sequence[str] | None, exclude: Sequence[str] | None) -> bool:
-    """Whether a node survives the glob filters. ``exclude`` beats ``include``, always."""
-    if include is not None and not any(fnmatch(node_id, pattern) for pattern in include):
+    """Whether a node survives the filters. ``exclude`` beats ``include``, always."""
+    if include is not None and not _hit(node_id, include):
         return False
-    return not (exclude is not None and any(fnmatch(node_id, pattern) for pattern in exclude))
+    return not (exclude is not None and _hit(node_id, exclude))
+
+
+def _collapse(
+    nodes: Sequence[GraphNode], groups: Sequence[GraphGroup]
+) -> tuple[list[GraphNode], dict[str, str]]:
+    """Substitute each group for its members, returning the nodes to draw and member → group.
+
+    Every way this can be incoherent is refused up front and by name, because a collapse is an
+    assertion about what things ARE: a member nobody declared, a node claimed by two groups, or a
+    group id already spoken for are all statements that cannot be true at once.
+
+    A group takes the position of its FIRST member in document order, which is the tie-break
+    every layout algorithm falls back on — so collapsing part of a graph does not reshuffle the
+    rest of it.
+    """
+    declared = {node.id for node in nodes}
+    representative: dict[str, str] = {}
+    seen_groups: set[str] = set()
+    for group in groups:
+        if group.id in seen_groups:
+            raise InvalidArgument(f"collapse group {group.id!r} is declared twice")
+        seen_groups.add(group.id)
+        if group.id in declared and group.id not in group.members:
+            raise InvalidArgument(
+                f"collapse group {group.id!r} has the same id as a node it does not contain; "
+                "give the group its own id, or include that node in its members"
+            )
+        for member in group.members:
+            if member not in declared:
+                raise InvalidArgument(
+                    f"collapse group {group.id!r} names member {member!r}, which no node "
+                    "declares; a group gathers nodes, it cannot invent them"
+                )
+            held = representative.get(member)
+            if held is not None:
+                raise InvalidArgument(
+                    f"node {member!r} is claimed by both {held!r} and {group.id!r}; "
+                    "a node belongs to one group"
+                )
+            representative[member] = group.id
+
+    by_id = {group.id: group for group in groups}
+    drawn: list[GraphNode] = []
+    emitted: set[str] = set()
+    for node in nodes:
+        owner = representative.get(node.id)
+        if owner is None:
+            drawn.append(node)
+            continue
+        if owner in emitted:
+            continue
+        emitted.add(owner)
+        group = by_id[owner]
+        drawn.append(GraphNode(id=group.id, label=group.label, kind=group.kind))
+    return drawn, representative
 
 
 @dataclass(slots=True)
@@ -370,7 +474,7 @@ def add_diagram_graph(
     default_node_kind: str = "service",
     default_edge_kind: str = "data",
     label_mode: LabelMode = "trimmed",
-    min_weight: float | None = None,
+    collapse: Sequence[GraphGroup] | None = None,
     include: Sequence[str] | None = None,
     exclude: Sequence[str] | None = None,
     weight_labels: bool = False,
@@ -383,22 +487,33 @@ def add_diagram_graph(
 ) -> GraphImport:
     """Ingest a whole ``{nodes, edges}`` graph as one diagram: boxes, arrows, and a layout.
 
-    The same picture ``add_diagram_node`` × N + ``add_diagram_edge`` × M + ``layout_diagram``
-    would draw, in one call and with the bookkeeping done: nodes filtered by glob, dangling and
-    self edges dropped and COUNTED, parallel edges merged with their weights summed, and every
-    created node named after its graph id so the export's own vocabulary keeps working afterwards.
+    ANY graph that already knows what its nodes and edges are — a service map, a dependency
+    tree, a state machine, an org chart, a call graph — in one call instead of N. The same
+    picture ``add_diagram_node`` × N + ``add_diagram_edge`` × M + ``layout_diagram`` would draw,
+    with the bookkeeping done: self edges dropped and COUNTED, parallel edges merged with their
+    weights summed, and every node named after its graph id so the caller's own vocabulary keeps
+    working afterwards.
+
+    Nothing here decides what MATTERS. There is no ranking, no threshold, no importance score:
+    which nodes deserve a box, and which several are really one thing, is a semantic judgement
+    about what the picture is for, and it belongs to whoever understands the domain. Say it
+    outright — ``exclude`` to leave nodes out, ``collapse`` to fold several into one — and this
+    does the mechanical part, in full, and reports exactly what it did.
 
     The order of operations is fixed, because each step decides what the next one sees:
-    filter nodes → drop edges the filter orphaned → drop self edges → drop light edges → reject
-    unknown endpoints → resolve kinds → merge parallels → draw → lay out.
+    collapse groups → filter nodes → drop edges the filter orphaned → drop self edges (which is
+    where an edge INSIDE a collapsed group goes) → reject unknown endpoints → resolve kinds →
+    merge parallels → draw → lay out.
+
+    Collapsing runs FIRST so that ``include``/``exclude`` see the graph as drawn: a group is
+    filtered by its own id, and a member no longer exists as a separate thing to name.
 
     Kinds are resolved BEFORE the merge so that two parallel edges whose different producer kinds
     both fall back to the default collapse into ONE arrow rather than two identical ones.
 
-    Unknown endpoints are the one thing here that refuses rather than counts. A node the filter
-    removed is a decision the caller made, so its edges are dropped quietly; a node NOBODY
-    declared is a hole in the export, and auto-creating a box for it would draw a graph the
-    producer never described.
+    Unknown endpoints are the one thing here that refuses rather than counts. A node the caller
+    left out is a decision; a node NOBODY declared is a hole in the data, and auto-creating a box
+    for it would draw a graph the producer never described.
     """
     # Every id the export DECLARED. The filter narrows what gets DRAWN, not what counts as
     # declared — that difference is the whole of how an orphaned edge is told from a dangling one.
@@ -408,21 +523,25 @@ def add_diagram_graph(
             raise InvalidArgument(f"node id {node.id!r} appears twice in `nodes`; ids are identity")
         seen.add(node.id)
 
-    kept = [node for node in nodes if _selected(node.id, include, exclude)]
+    drawable, representative = _collapse(nodes, collapse or ())
+    # A group id is nameable by an edge too, and a member stays "declared" — it is still a thing
+    # the caller told us about, now standing for its group.
+    seen |= {node.id for node in drawable}
+
+    kept = [node for node in drawable if _selected(node.id, include, exclude)]
     kept_ids = {node.id for node in kept}
 
-    dropped_filtered = dropped_self = dropped_weight = 0
-    surviving: list[GraphEdge] = []
+    dropped_filtered = dropped_self = 0
+    surviving: list[tuple[GraphEdge, str, str]] = []
     for edge in edges:
-        endpoints = ((edge.source, "source"), (edge.target, "target"))
+        source = representative.get(edge.source, edge.source)
+        target = representative.get(edge.target, edge.target)
+        endpoints = ((source, "source"), (target, "target"))
         if any(end in seen and end not in kept_ids for end, _role in endpoints):
             dropped_filtered += 1
             continue
-        if edge.source == edge.target:
-            dropped_self += 1
-            continue
-        if min_weight is not None and edge.weight is not None and edge.weight < min_weight:
-            dropped_weight += 1
+        if source == target:
+            dropped_self += 1  # includes every edge that was internal to a collapsed group
             continue
         for end, role in endpoints:
             if end not in seen:
@@ -430,7 +549,7 @@ def add_diagram_graph(
                     f"edge {edge.source!r} -> {edge.target!r} names {end!r} as its {role}, but no "
                     "node declares that id; add it to `nodes` (nodes are never auto-created)"
                 )
-        surviving.append(edge)
+        surviving.append((edge, source, target))
 
     for node in kept:
         warning = doc.name_warning(node.id)
@@ -448,18 +567,18 @@ def add_diagram_graph(
     edge_kinds, edge_defaulted = _resolve_kinds(
         doc,
         category="connector",
-        kinds=[edge.kind for edge in surviving if edge.kind is not None],
+        kinds=[edge.kind for edge, _s, _t in surviving if edge.kind is not None],
         default=default_edge_kind,
         themed=themed,
     )
 
     merged: dict[tuple[str, str, str], _Merged] = {}
-    for edge in surviving:
+    for edge, source, target in surviving:
         kind = edge_kinds[edge.kind] if edge.kind is not None else default_edge_kind
-        key = (edge.source, edge.target, kind)
+        key = (source, target, kind)
         existing = merged.get(key)
         if existing is None:
-            merged[key] = _Merged(edge.source, edge.target, kind, edge.label, edge.weight)
+            merged[key] = _Merged(source, target, kind, edge.label, edge.weight)
         else:
             existing.weight = _merge_weights(existing.weight, edge.weight)
             if existing.label is None:
@@ -504,13 +623,19 @@ def add_diagram_graph(
                 spacing_main=spacing_main,
                 spacing_cross=spacing_cross,
             )
+    # A member resolves to whatever now stands for it, so a handle taken from the INPUT still
+    # finds something — that is the difference between collapsing a node and losing it.
+    for member, owner in representative.items():
+        if owner in mapping:
+            mapping[member] = mapping[owner]
     return GraphImport(
         nodes_created=len(kept),
         edges_created=len(merged),
+        groups_created=sum(1 for node in kept if node.id in {g.id for g in collapse or ()}),
+        nodes_collapsed=len(representative),
         self_edges_dropped=dropped_self,
         edges_dropped_filtered=dropped_filtered,
-        edges_dropped_weight=dropped_weight,
-        nodes_filtered=len(nodes) - len(kept),
+        nodes_filtered=len(drawable) - len(kept),
         mapping=mapping,
         kinds_defaulted=sorted({*node_defaulted, *edge_defaulted}),
         bounds=_content_bounds(doc, created),

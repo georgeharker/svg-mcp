@@ -12,7 +12,7 @@ from svg_mcp.model import Document
 from svg_mcp.model.errors import InvalidArgument
 from svg_mcp.ops import graph as graph_ops
 from svg_mcp.ops.diagram import _box_of, read_edge_spec, read_node_spec
-from svg_mcp.ops.graph import GraphEdge, GraphImport, GraphNode
+from svg_mcp.ops.graph import GraphEdge, GraphGroup, GraphImport, GraphNode
 from svg_mcp.render import get_renderer
 from svg_mcp.render.base import RenderRequest
 from svg_mcp.serialize import export_svg
@@ -44,6 +44,10 @@ def _nodes(*raw: Mapping[str, object]) -> list[GraphNode]:
 
 def _edges(*raw: Mapping[str, object]) -> list[GraphEdge]:
     return [GraphEdge.model_validate(entry) for entry in raw]
+
+
+def _groups(*raw: Mapping[str, object]) -> list[GraphGroup]:
+    return [GraphGroup.model_validate(entry) for entry in raw]
 
 
 def _ingest(doc: Document, **kwargs: object) -> GraphImport:
@@ -99,6 +103,16 @@ def test_a_real_export_round_trips_into_nodes_edges_and_a_mapping() -> None:
         (ids["src/svg_mcp/ops/annotate.py"], ids["src/svg_mcp/ops/diagram.py"], "data", ""),
         (ids["src/svg_mcp/ops/diagram.py"], ids["src/svg_mcp/ops/themes.py"], "data", ""),
     ]
+
+
+def test_an_ingested_graph_id_is_a_usable_handle_afterwards() -> None:
+    # The point of naming nodes after their graph ids: the export's vocabulary keeps working.
+    doc = _doc()
+    result = _ingest(doc)
+    graph_id = "src/svg_mcp/ops/diagram.py"
+    assert str(doc.resolve(graph_id).get_id()) == result.mapping[graph_id]
+    callout = ops.add_callout(doc, target=graph_id, text="the big one")
+    assert callout.ref.id
 
 
 def test_both_spellings_of_an_edge_s_endpoints_parse_to_the_same_edge() -> None:
@@ -165,19 +179,18 @@ def test_an_edge_naming_a_node_nobody_declared_is_rejected_by_name() -> None:
     assert not _node_names(doc)  # nothing was drawn, and no box was invented for the ghost
 
 
-def test_a_light_edge_is_dropped_by_min_weight_but_an_unweighted_one_survives() -> None:
+def test_an_id_containing_glob_characters_still_excludes_itself() -> None:
+    # Ids are written out one at a time by whoever judged them noise, and an id may contain glob
+    # metacharacters of its own (`operator[]`, `[id].tsx`). An exact id must name itself.
     doc = _doc()
     result = ops.add_diagram_graph(
         doc,
-        nodes=_nodes({"id": "a"}, {"id": "b"}, {"id": "c"}),
-        edges=_edges(
-            {"from": "a", "to": "b", "weight": 2},
-            {"from": "b", "to": "c", "weight": 40},
-            {"from": "a", "to": "c"},
-        ),
-        min_weight=10,
+        nodes=_nodes({"id": "app/[id].tsx"}, {"id": "app/page.tsx"}),
+        edges=[],
+        exclude=["app/[id].tsx"],
     )
-    assert (result.edges_dropped_weight, result.edges_created) == (1, 2)
+    assert result.nodes_created == 1
+    assert _node_names(doc) == ["app/page.tsx"]
 
 
 def test_duplicate_edges_merge_into_one_arrow_summing_their_weights() -> None:
@@ -228,6 +241,124 @@ def test_exclude_beats_include_for_a_node_both_patterns_match() -> None:
     )
     assert (result.nodes_created, result.nodes_filtered) == (1, 1)
     assert _node_names(doc) == ["src/a.py"]
+
+
+# --- 3b. collapse: the caller's judgement, mechanically applied ---------------
+
+
+def test_a_group_replaces_its_members_and_rewires_their_edges() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "web"}, {"id": "pg"}, {"id": "redis"}, {"id": "s3"}),
+        edges=_edges(
+            {"from": "web", "to": "pg", "weight": 3},
+            {"from": "web", "to": "redis", "weight": 4},
+            {"from": "web", "to": "s3"},
+        ),
+        collapse=_groups({"id": "storage", "label": "Storage", "members": ["pg", "redis", "s3"]}),
+        weight_labels=True,
+    )
+    assert (result.groups_created, result.nodes_collapsed) == (1, 3)
+    assert (result.nodes_created, result.edges_created) == (2, 1)
+    assert _node_names(doc) == ["web", "storage"]
+    assert _labels(doc)["storage"] == "Storage"
+    # The three edges re-point at the group and merge; their weights sum, 3 + 4 + (none).
+    assert _edge_specs(doc)[0][3] == "7"
+
+
+def test_an_edge_between_two_members_becomes_internal_and_is_counted() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "web"}, {"id": "pg"}, {"id": "redis"}),
+        edges=_edges({"from": "pg", "to": "redis"}, {"from": "web", "to": "pg"}),
+        collapse=_groups({"id": "storage", "members": ["pg", "redis"]}),
+    )
+    assert (result.self_edges_dropped, result.edges_created) == (1, 1)
+
+
+def test_a_collapsed_member_still_resolves_through_the_mapping() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "pg"}, {"id": "redis"}),
+        edges=[],
+        collapse=_groups({"id": "storage", "members": ["pg", "redis"]}),
+    )
+    assert result.mapping["pg"] == result.mapping["storage"] == result.mapping["redis"]
+
+
+def test_a_group_is_filtered_by_its_own_id_not_its_members() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "web"}, {"id": "pg"}, {"id": "redis"}),
+        edges=_edges({"from": "web", "to": "pg"}),
+        collapse=_groups({"id": "storage", "members": ["pg", "redis"]}),
+        exclude=["storage"],
+    )
+    assert _node_names(doc) == ["web"]
+    assert (result.nodes_filtered, result.edges_dropped_filtered) == (1, 1)
+
+
+def test_a_group_naming_an_undeclared_member_is_refused() -> None:
+    doc = _doc()
+    with pytest.raises(InvalidArgument, match="ghost"):
+        ops.add_diagram_graph(
+            doc,
+            nodes=_nodes({"id": "pg"}),
+            edges=[],
+            collapse=_groups({"id": "storage", "members": ["pg", "ghost"]}),
+        )
+    assert not _node_names(doc)
+
+
+def test_a_node_claimed_by_two_groups_is_refused() -> None:
+    doc = _doc()
+    with pytest.raises(InvalidArgument, match="one group"):
+        ops.add_diagram_graph(
+            doc,
+            nodes=_nodes({"id": "pg"}, {"id": "redis"}),
+            edges=[],
+            collapse=_groups(
+                {"id": "storage", "members": ["pg"]},
+                {"id": "caches", "members": ["pg", "redis"]},
+            ),
+        )
+    assert not _node_names(doc)
+
+
+def test_a_group_may_take_the_id_of_a_member_it_swallows_but_not_of_a_stranger() -> None:
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "pg"}, {"id": "redis"}),
+        edges=[],
+        collapse=_groups({"id": "pg", "members": ["pg", "redis"]}),
+    )
+    assert _node_names(doc) == ["pg"]
+
+    other = _doc()
+    with pytest.raises(InvalidArgument, match="does not contain"):
+        ops.add_diagram_graph(
+            other,
+            nodes=_nodes({"id": "web"}, {"id": "pg"}, {"id": "redis"}),
+            edges=[],
+            collapse=_groups({"id": "web", "members": ["pg", "redis"]}),
+        )
+
+
+def test_a_group_takes_its_first_member_s_place_in_document_order() -> None:
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "a"}, {"id": "b"}, {"id": "c"}, {"id": "d"}),
+        edges=[],
+        collapse=_groups({"id": "bc", "members": ["b", "c"]}),
+        layout="none",
+    )
+    assert _node_names(doc) == ["a", "bc", "d"]
 
 
 # --- 4. labels ---------------------------------------------------------------

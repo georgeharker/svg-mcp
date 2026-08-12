@@ -126,8 +126,12 @@ TARGETING NODES & NAMING
   `name`, and reason in terms of names via `find(name=…)` / `outline`. Names are stable and
   legible; random ids (`rect_8f3a`) are easy to lose track of across a long session.
 - **Keep names unique.** A name that matches more than one node is rejected (it won't silently
-  pick one) — e.g. don't name a gradient and a shape the same thing. Disambiguate with a hierarchy
-  path `ancestor/name` (each segment an id or name, matched down the ancestor chain) or the id.
+  pick one) — e.g. don't name a gradient and a shape the same thing.
+- **A handle says which namespace it means.** A bare `target` is an id, else an EXACT name —
+  never a hierarchy query, so a name containing `/` (graph imports name nodes `src/ops/x.py`)
+  just works. Be explicit when you must: `id:x`, `name:x` (verbatim, slashes and all), or
+  `path:ancestor/name` for the ancestor-chain query that disambiguates a duplicated name. The
+  prefix is stripped once, so any literal name is expressible (`name:name:foo`).
 - Omitting `parent` places a node at the document root. Pass a group/layer id to nest it.
 - **Stacking:** later siblings paint on top. To order a node relative to another, use
   `reparent(target, above=<node>)` / `below=<node>` instead of counting child indices.
@@ -181,10 +185,14 @@ DIAGRAMS (box-arrow)
 - Skip coordinates entirely: add nodes and edges, then `layout_diagram(algorithm="layered",
   direction="LR")` (or "tree"/"grid"). Fine-tune with `translate_node` + `reflow` afterwards —
   layout is opt-in and won't run again behind your back.
-- Have a graph already (call graph, imports, dependency tree)? One `add_diagram_graph` call
-  ingests `{nodes, edges}` — the producer's own shape, `from`/`to` and extra keys and all — and
-  lays it out. Don't hand-write N `add_diagram_node` calls. It filters by glob, drops self-edges,
-  merges parallel edges, and can filter or label by weight.
+- Have a graph already (service map, dependency tree, state machine, call graph)? One
+  `add_diagram_graph` call ingests `{nodes, edges}` — the producer's own shape, `from`/`to` and
+  extra keys and all — and lays it out. Don't hand-write N `add_diagram_node` calls.
+- **It never decides what matters — you do**, and a raw graph is usually too big to read as-is.
+  Say which of the three you mean: *graph it all* (then read `bounds` and `resize_document`);
+  *graph it all except* (`exclude=[ids or globs]`); or *group it this way*
+  (`collapse=[{id, members}]`, drawing several nodes as one). Judge that from what the diagram is
+  FOR — no score can. Everything dropped or folded is counted in the response.
 - Edit in place: `edit_diagram_node`/`edit_diagram_edge`/`edit_diagram_container` patch
   label/kind/route/members; `get_params` reads any facade's spec back.
 
@@ -3649,7 +3657,7 @@ def add_diagram_graph(
     default_node_kind: str = "service",
     default_edge_kind: str = "data",
     label_mode: Literal["id", "basename", "trimmed"] = "trimmed",
-    min_weight: float | None = None,
+    collapse: list[ops.GraphGroup] | None = None,
     include: list[str] | None = None,
     exclude: list[str] | None = None,
     weight_labels: bool = False,
@@ -3662,9 +3670,10 @@ def add_diagram_graph(
 ) -> ops.GraphImport:
     """Ingest a WHOLE graph — `{nodes, edges}` — as one laid-out diagram, in one call.
 
-    Already have the graph (a call graph, an import graph, a dependency tree, a service map)?
-    Paste it in. This is N `add_diagram_node` + M `add_diagram_edge` + `layout_diagram` done for
-    you, and the wire shape MIRRORS what such exports emit, so no transcription step:
+    Already have the graph? A service map, a dependency tree, a state machine, an org chart, a
+    call graph, anything that already knows its nodes and edges — paste it in. This is N
+    `add_diagram_node` + M `add_diagram_edge` + `layout_diagram` done for you, and the wire shape
+    MIRRORS what such exports emit, so there is no transcription step:
 
         nodes: [{"id": "src/ops/diagram.py", "file": "…", "symbols": 177}]
         edges: [{"from": "src/ops/annotate.py", "to": "src/ops/diagram.py",
@@ -3679,12 +3688,26 @@ def add_diagram_graph(
     export, not something to invent a box for. A `kind` your themes cannot dress ("calls") falls
     back to the default kind and is listed in `kinds_defaulted`.
 
-    Weight is DATA: it filters (`min_weight`) and can be written on the line (`weight_labels`).
-    It never restyles the edge — line weight belongs to the theme.
+    **YOU decide what the picture is about; this never guesses.** There is no importance score
+    and no threshold, because which nodes deserve a box is a semantic judgement about what the
+    diagram is FOR — rank a codebase by any centrality measure and you get its exception module,
+    not its architecture. Three ways to say it, and you are expected to say it:
 
-    Each node is NAMED after its graph id, so the ids stay the vocabulary. Note that a name
-    containing "/" cannot be passed to `target=`/`source=` elsewhere (a slash there means a
-    hierarchy path) — use the returned `mapping` for follow-up calls like `add_callout`.
+      - graph it all — pass everything, and read `bounds` to size the canvas.
+      - graph it all EXCEPT — `exclude=[…]`, ids or globs you have judged to be noise.
+      - group this way — `collapse=[{"id": "storage", "label": "Storage",
+        "members": ["pg", "redis", "s3"]}]`, several nodes drawn as ONE. Edges re-point at the
+        group, edges between members become internal (dropped, counted), parallels merge.
+
+    `collapse` REPLACES its members. To keep them visible with a box drawn round them, ingest
+    normally and call `add_diagram_container` afterwards with ids from `mapping`.
+
+    Weight is DATA: it can be written on the line (`weight_labels`) and it sums when parallel
+    edges merge. It never restyles the edge — line weight belongs to the theme.
+
+    Each node is NAMED after its graph id, so the ids stay the vocabulary: pass one straight to
+    `add_callout(target="src/ops/diagram.py")` afterwards. `mapping` gives the created node ids
+    if you prefer them, and `name:<graph id>` forces the name reading if an id ever collides.
 
     Args:
         nodes: [{id, label?, kind?}] — `label` omitted is derived via `label_mode`; `kind` is a
@@ -3693,11 +3716,14 @@ def add_diagram_graph(
         default_node_kind: Kind for nodes that name none.
         default_edge_kind: Kind for edges that name none.
         label_mode: How to caption a node with no explicit label — "id" (verbatim), "basename"
-            (after the last "/", extension dropped), "trimmed" (drop the prefix every id shares,
-            then the extension). Default "trimmed": full file paths are unreadable as box labels.
-        min_weight: Drop edges below this weight (edges carrying no weight are kept).
-        include: Glob patterns; a node is kept only if its id matches one. Omit for all.
-        exclude: Glob patterns; a matching node is dropped even if `include` matched it.
+            (the last segment, split on "/", "::", "." or "\\" as the id's own convention
+            dictates), "trimmed" (drop the prefix every id shares). A file extension is dropped
+            from a path-shaped id. Default "trimmed": full paths are unreadable as box labels.
+        collapse: [{id, members, label?, kind?}] — groups of nodes to draw as ONE node each.
+            Members must be declared in `nodes`, and no node may be in two groups.
+        include: Ids or glob patterns; a node is kept only if it matches one. Omit for all.
+        exclude: Ids or glob patterns; a match is dropped even if `include` matched it. An exact
+            id always matches itself, so ids containing glob characters are safe to write.
         weight_labels: Write each edge's weight on the line (an explicit `label` wins).
         layout: Finish with this layout, or "none" to leave the nodes stacked for hand placement.
         direction: "LR" or "TB", passed to the layout.
@@ -3709,8 +3735,9 @@ def add_diagram_graph(
         themed: false = skip the theme's automatic hooks on everything created.
 
     Returns:
-        {nodes_created, edges_created, self_edges_dropped, edges_dropped_filtered,
-        edges_dropped_weight, nodes_filtered, mapping (graph id → node id), kinds_defaulted,
+        {nodes_created, edges_created, groups_created, nodes_collapsed, self_edges_dropped,
+        edges_dropped_filtered, nodes_filtered, mapping (any id you named → the node that
+        REPRESENTS it, so a collapsed member finds its group), kinds_defaulted,
         `bounds` = the (x, y, w, h) the drawing actually occupies, and
         ranks/cycles_broken/edges_rerouted when a layout ran}.
 
@@ -3724,7 +3751,7 @@ def add_diagram_graph(
         default_node_kind=default_node_kind,
         default_edge_kind=default_edge_kind,
         label_mode=label_mode,
-        min_weight=min_weight,
+        collapse=collapse,
         include=include,
         exclude=exclude,
         weight_labels=weight_labels,

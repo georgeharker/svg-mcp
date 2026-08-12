@@ -167,33 +167,73 @@ class Document:
         return str(self.svg.get_unique_id(prefix))
 
     def resolve(self, target: str) -> BaseElement:
-        """Resolve a target to a single node by id or friendly name (``inkscape:label``).
+        """Resolve a target to a single node — an IDENTITY by default, a query only if asked.
 
-        A bare name that matches several nodes is rejected with :class:`AmbiguousReference`
-        (rather than silently picking one) — except when exactly one match is a *renderable* node
-        (not under ``<defs>``); that one is preferred, so a shape sharing a label with a gradient
-        or clip definition still resolves. Otherwise disambiguate with a hierarchy path
-        ``ancestor/.../name`` — each segment is an id or name, matched down the ancestor chain —
-        or by the node's unique id.
+        A handle carries three namespaces, and which one is meant is declared, never guessed:
+
+        - ``id:x`` — that exact id, and nothing else.
+        - ``name:x`` — that exact friendly name (``inkscape:label``), verbatim: slashes,
+          colons and all.
+        - ``path:a/b/c`` — the hierarchy QUERY: the node matching ``c`` whose ancestors match
+          ``b`` then ``a`` in order (gaps allowed). A disambiguator of last resort.
+        - anything else — a bare handle: the id if one matches, else the exact name. **Never a
+          path.** A name may contain ``/`` (a graph import names its nodes after ids like
+          ``src/ops/diagram.py``), and a name that looks like a query is still a name.
+
+        The prefixes are stripped ONCE, which is what makes this a grammar rather than a nicer
+        heuristic: every possible label has an unambiguous spelling. A node genuinely called
+        ``name:foo`` is ``name:name:foo``; one whose name collides with another node's id is
+        ``name:…`` while the other is ``id:…``.
+
+        A name matching several nodes is rejected with :class:`AmbiguousReference` rather than
+        silently picking one — except when exactly one match is *renderable* (not under
+        ``<defs>``); that one is preferred, so a shape sharing a label with a gradient or clip
+        definition still resolves.
         """
-        if "/" in target:
-            return self._resolve_path(target)
+        for prefix, resolver in (
+            ("id:", self._resolve_id),
+            ("name:", self._resolve_name),
+            ("path:", self._resolve_path),
+        ):
+            if target.startswith(prefix):
+                return resolver(target[len(prefix) :])
         element = self.svg.getElementById(target)
         if element is not None:
             return element
-        matches = [n for n in self.svg.descendants() if getattr(n, "label", None) == target]
+        return self._resolve_name(target, bare=True)
+
+    def _resolve_id(self, node_id: str) -> BaseElement:
+        element = self.svg.getElementById(node_id)
+        if element is None:
+            raise NodeNotFound(f"no node with id {node_id!r}")
+        return element
+
+    def _resolve_name(self, name: str, *, bare: bool = False) -> BaseElement:
+        """The node whose friendly name is exactly ``name`` — no path interpretation, ever."""
+        matches = [n for n in self.svg.descendants() if getattr(n, "label", None) == name]
         if len(matches) == 1:
             return matches[0]
         if not matches:
-            raise NodeNotFound(f"no node with id or name {target!r}")
+            raise NodeNotFound(self._nothing_named(name, bare=bare))
         renderable = [n for n in matches if not self._in_defs(n)]
         if len(renderable) == 1:
             return renderable[0]
-        hints = "; ".join(self._qualify(m, target) for m in matches)
+        hints = "; ".join(self._qualify(m, name) for m in matches)
         raise AmbiguousReference(
-            f"name {target!r} matches {len(matches)} nodes — qualify by hierarchy "
-            f"(e.g. {self._qualify(matches[0], target)}) or use the node id. Candidates: {hints}"
+            f"name {name!r} matches {len(matches)} nodes — qualify by hierarchy "
+            f"(e.g. {self._qualify(matches[0], name)}) or use the node id. Candidates: {hints}"
         )
+
+    @staticmethod
+    def _nothing_named(name: str, *, bare: bool) -> str:
+        """Say what was looked for — and teach the path form to whoever was relying on it."""
+        message = f"no node with {'id or name' if bare else 'name'} {name!r}"
+        if bare and "/" in name:
+            message += (
+                " — a bare handle is an id or an EXACT name, never a hierarchy path; write "
+                f"path:{name} to search the ancestor chain instead"
+            )
+        return message
 
     @staticmethod
     def _in_defs(node: BaseElement) -> bool:
@@ -210,12 +250,16 @@ class Document:
         return str(node.get_id()) == token or getattr(node, "label", None) == token
 
     def _qualify(self, node: BaseElement, name: str) -> str:
-        """A disambiguating reference for ``node``: ``parent/name`` (parent by name or id)."""
+        """A disambiguating reference for ``node``: ``path:parent/name`` (parent by name or id).
+
+        Spelled with its prefix because it is offered as something to PASS BACK, and a bare
+        ``parent/name`` no longer resolves as a query.
+        """
         parent = node.getparent()
         if parent is None or parent is self.svg:
             return f"{name} ({node.get_id()})"
         tag = getattr(parent, "label", None) or str(parent.get_id())
-        return f"{tag}/{name} ({node.get_id()})"
+        return f"path:{tag}/{name} ({node.get_id()})"
 
     def _resolve_path(self, target: str) -> BaseElement:
         """Resolve an ``a/b/c`` path: find ``c`` whose ancestors match ``b`` then ``a`` in order."""
