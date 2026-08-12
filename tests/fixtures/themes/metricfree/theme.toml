@@ -1,0 +1,11 @@
+# A chart theme whose --font names a family NO system has, so `measure_label` always falls through
+# to its metric-free guess (0.6 * size * len) and every margin this theme produces is the same
+# number on every machine. That is what makes a byte-for-byte golden of a chart's geometry a
+# portable test rather than a record of whichever fonts this laptop happens to have installed.
+name = "metricfree"
+
+[serves]
+categories = ["chart"]
+
+[variants]
+bigticks = "variants/bigticks.css"

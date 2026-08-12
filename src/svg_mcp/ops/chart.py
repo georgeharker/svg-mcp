@@ -6,10 +6,13 @@ a ``translate`` so everything inside it is authored in a local ``0..w`` × ``0..
 what makes :func:`edit_chart` honest: it throws the children away and re-derives them, and the
 group keeps its id, its classes and its position because none of those live in the children.
 
-The scales are deliberately small and pure — :func:`nice_ticks` and :func:`bar_bands` and
-:func:`donut_angles` take numbers and return numbers, so the arithmetic that decides whether a
-chart lies can be tested without a document in sight. Linear only: a log scale is a different
-promise about what the picture means, and this module does not make it.
+The scales are deliberately small and pure — :func:`nice_ticks`, :func:`log_ticks`,
+:func:`format_tick`, :func:`resolve_axis`, :func:`bar_bands` and :func:`donut_angles` take
+numbers and return numbers, so the arithmetic that decides whether a chart lies can be tested
+without a document in sight. An :class:`AxesSpec` on the chart's own spec is what turns those
+knobs — pinned limits, a tick count or an explicit tick list, a closed formatting vocabulary, a
+log scale — and its ABSENCE is a contract: a chart built without one draws exactly what this
+module drew before axes existed, down to the byte.
 
 Paint comes from the theme. Every part carries the class its role asks for (``-axis``,
 ``-gridline``, ``-tick-label``, ``-series-N`` …) and no colour is written inline, so a variant
@@ -18,6 +21,8 @@ here are structural — ``fill: none`` on a line, ``stroke: none`` on a mark tha
 area wash's opacity, text anchoring — with exactly one exception, called out where it happens: a
 sparkline in a document whose theme offers no series colour strokes itself with the ink token,
 because a sparkline is ONE element and an uninherited stroke would render it as nothing at all.
+A hatched mark is not a second exception: the ``fill: url(#…)`` it carries names a pattern, and
+the line INSIDE that pattern wears the series class, so the colour still comes from the theme.
 """
 
 from __future__ import annotations
@@ -48,6 +53,7 @@ from .diagram import (
     measure_label,
 )
 from .paint import resolve_paint_refs as _resolve_paint_refs
+from .resources import define_clip, define_pattern
 from .themes import ServingTheme, attach_dressing, resolve_dressing, serving_theme, worn_theme
 
 Style = dict[str, str]
@@ -60,9 +66,10 @@ _DEFAULT_W, _DEFAULT_H = 320.0, 200.0
 _SPARK_W, _SPARK_H = 120.0, 32.0
 _DEFAULT_GAP = 24.0
 
-# Type sizes the margin arithmetic assumes. They MUST match the sizes the bundled default gives
-# .tick-label / .axis-label / .chart-title, or the plot leaves the wrong amount of room; a theme
-# that re-sizes them trades a little slack for its own look, which is a fair trade to allow.
+# Type sizes the margin arithmetic assumes when the serving theme names none. The theme's own
+# --chart-*-size tokens override every one of them (see :func:`chart_sizes`), which is what keeps
+# the size the margins are MEASURED at and the size the CSS RENDERS at from drifting apart; these
+# are the no-theme fallbacks, and they match what the bundled default sets.
 _TICK_SIZE = 10.0
 _AXIS_LABEL_SIZE = 11.0
 _TITLE_SIZE = 13.0
@@ -71,8 +78,12 @@ _GAP = 8.0
 
 _MARKER_R = 2.5
 _SCATTER_R = 3.0
+_SPARK_DOT_R = 2.0
 _AREA_OPACITY = "0.15"
 _DONUT_HOLE = 0.6
+# The hatch tile: a 6-unit square of one stroke, turned 45° by the pattern's own transform.
+_HATCH_TILE = 6.0
+_HATCH_WIDTH = "2"
 # What a sparkline strokes itself with when no theme offers it a series colour.
 _DEFAULT_INK = "#1a1d21"
 # How much of a category's band the bars fill; the rest is the gap that separates the bands.
@@ -80,13 +91,35 @@ _BAND_FILL = 0.7
 
 # The 1/2/5 ladder every "nice" step is drawn from, plus the decade rollover.
 _LADDER: tuple[float, ...] = (1.0, 2.0, 5.0, 10.0)
+# The same ladder inside one decade, which is what a log axis subdivides by.
+_LOG_LADDER: tuple[float, ...] = (1.0, 2.0, 5.0)
 # Eight categorical series before the palette repeats — see the default theme's --series-N.
 _SERIES_COUNT = 8
+# How many ticks an axis aims for when the caller names no number.
+_TICK_TARGET = 5
+# A log axis subdivides its decades only while it spans few enough of them to have room.
+_LOG_SUBDIVIDE_DECADES = 2
+# The precision a "plain" label is written at before its trailing zeros are stripped.
+_PLAIN_DECIMALS = 6
 
 _EPS = 1e-9
+# The floor a log map clamps to, so a stray non-positive value is a squashed mark and not a crash.
+_TINY = 1e-300
+
+_CLIP_OWNER = "data-chart-owner"
+"""Stamped on every ``<defs>`` resource a chart builds, so a rebuild can collect its own litter.
+
+A chart's children are thrown away and re-derived on every edit, but a clipPath or a hatch pattern
+lives in ``<defs>`` where that sweep cannot reach it. Owning them by the chart's id is what stops
+ten edits leaving ten generations of orphaned resources behind.
+"""
 
 
 # --- data schemas ------------------------------------------------------------
+
+
+Marker = Literal["circle", "square", "diamond", "triangle", "none"]
+"""The mark a line or scatter puts at a point. Closed — a shape has to be one this module draws."""
 
 
 class Series(BaseModel):
@@ -123,6 +156,9 @@ class BarData(BaseModel):
 
     categories: list[str] = Field(min_length=1)
     series: list[Series] = Field(min_length=1)
+    hatch: bool = False
+    """Fill each series with diagonal hatching in its own colour, so print and greyscale keep
+    the series apart when the hues collapse into one another."""
 
     @model_validator(mode="after")
     def _values_match_categories(self) -> BarData:
@@ -143,6 +179,12 @@ class LineData(BaseModel):
     series: list[PointSeries] = Field(min_length=1)
     points: bool = False
     area: bool = False
+    marker: Marker = "circle"
+    """What ``points`` draws at each datum. ``none`` suppresses the marks however it is set."""
+    marker_size: float | None = Field(default=None, gt=0)
+    """Half the mark's extent, in px — the radius of a circle. Defaults to 2.5 on a line."""
+    hatch: bool = False
+    """Hatch the area wash instead of washing it flat. Ignored when ``area`` is false."""
 
 
 class ScatterData(BaseModel):
@@ -151,6 +193,10 @@ class ScatterData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     series: list[PointSeries] = Field(min_length=1)
+    marker: Marker = "circle"
+    """The mark each datum is drawn as. ``none`` leaves a scatter with nothing to show."""
+    marker_size: float | None = Field(default=None, gt=0)
+    """Half the mark's extent, in px. Defaults to 3 on a scatter — a mark is all it has."""
 
 
 class DonutData(BaseModel):
@@ -159,6 +205,8 @@ class DonutData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     slices: list[Slice] = Field(min_length=1)
+    hatch: bool = False
+    """Hatch each wedge in its own colour — the same print/greyscale insurance the bars take."""
 
 
 class SparklineData(BaseModel):
@@ -167,6 +215,12 @@ class SparklineData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     values: list[float] = Field(min_length=2)
+    last_point: bool = False
+    """Put a dot on the final value — where it ended up, which is what a sparkline is read for."""
+    extremes: bool = False
+    """Put a dot on the lowest and the highest value."""
+    baseline: float | None = None
+    """Draw a reference line across the line at this value — a target, a budget, last year."""
 
 
 ChartData = BarData | LineData | ScatterData | DonutData | SparklineData
@@ -202,6 +256,76 @@ def parse_chart_data(kind: ChartKind, data: ChartData) -> ChartData:
         raise InvalidArgument(
             f"this data does not fit a {kind} chart: {exc}"
         ) from exc
+
+
+# --- the axes model ----------------------------------------------------------
+
+
+class TickFormat(BaseModel):
+    """How a tick's number is written. A CLOSED vocabulary, deliberately.
+
+    An arbitrary format string is a footgun on an axis: it lets a caller write ``{:.0f}`` over
+    data that needed two decimals and produce an axis of five identical labels. These five styles
+    cover what a tick label is actually for, and each one knows what its own default precision is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    style: Literal["plain", "percent", "currency", "si", "fixed"] = "plain"
+    decimals: int | None = Field(default=None, ge=0, le=10)
+    """Precision. ``fixed`` is the style that exists for it (default 0) and ``si`` defaults to 1;
+    ``plain``, ``currency`` and ``percent`` default to "as many as the number needs, trailing
+    zeros stripped", and take a number here as the precision to round to."""
+    prefix: str = ""
+    """Written before the number. ``currency`` takes this as its symbol and falls back to ``$``."""
+    suffix: str = ""
+    """Written after the number — after ``%`` and after an SI unit, which are part of the number."""
+    thousands: bool = False
+    """Group the integer part: ``1204`` → ``1,204``."""
+
+
+class AxesSpec(BaseModel):
+    """Everything a caller can say about the axes, as one optional argument.
+
+    Absent (the default) means today's behaviour EXACTLY: limits from the data, five-ish ticks on
+    the 1/2/5 ladder, plain labels, horizontal gridlines, no tick marks. Every field below is a
+    departure from that, and each one is honoured on its own — pinning ``y_max`` leaves ``y_min``
+    derived from the data, naming ``ticks`` leaves the limits alone.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    y_min: float | None = None
+    """Pin the bottom of the value axis — what makes two charts comparable side by side."""
+    y_max: float | None = None
+    """Pin the top of the value axis. Data outside a pinned range is CLIPPED to the plot rect."""
+    x_min: float | None = None
+    """Pin the left of a NUMERIC x axis (line/scatter). A bar's x is categorical; ignored there."""
+    x_max: float | None = None
+    """Pin the right of a numeric x axis."""
+    scale: Literal["linear", "log"] = "linear"
+    """The value (y) axis's scale. ``log`` needs strictly positive data AND limits, and draws
+    bars from the axis minimum rather than from zero — there is no zero on a log axis."""
+    ticks: int | list[float] | None = None
+    """A target COUNT of value-axis ticks, or the exact values to tick at (those outside the
+    range are dropped rather than refused). Omit for the standard five-ish."""
+    x_ticks: int | list[float] | None = None
+    """The same for a numeric x axis."""
+    tick_format: TickFormat | None = None
+    """How the value axis's labels are written."""
+    x_tick_format: TickFormat | None = None
+    """How a numeric x axis's labels are written. A bar's category names are never reformatted."""
+    gridlines: Literal["x", "y", "both", "none"] = "y"
+    """Which sets of gridlines to draw. ``y`` (horizontal, at the value ticks) is the default."""
+    tick_marks: float | None = None
+    """Length in px of a tick mark outside the plot rect. ``0``/absent draws no marks at all."""
+    x_tick_rotate: float = 0.0
+    """Degrees to turn the x tick labels by, about their own anchor. Negative reads bottom-left
+    to top-right, which is the usual way to fit long category names."""
+
+
+_DEFAULT_AXES = AxesSpec()
+"""What every chart is laid out against when the caller named no axes — the compatibility path."""
 
 
 # --- scales ------------------------------------------------------------------
@@ -252,20 +376,274 @@ def include_zero(lo: float, hi: float) -> tuple[float, float]:
     return (min(lo, 0.0), max(hi, 0.0))
 
 
-def scale(lo: float, hi: float, *, zero: bool = False) -> tuple[list[float], int]:
-    """The ticks for a span and the precision to write them at, in one answer."""
-    if zero:
-        lo, hi = include_zero(lo, hi)
-    ticks = nice_ticks(lo, hi)
-    return ticks, tick_decimals(ticks[1] - ticks[0] if len(ticks) > 1 else 1.0)
-
-
 def tick_text(value: float, decimals: int) -> str:
     """A tick's label: fixed to the step's precision, then stripped of the zeros that adds."""
     text = f"{value:.{decimals}f}"
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return "0" if text in ("-0", "", "-") else text
+
+
+# --- log scale ---------------------------------------------------------------
+
+
+def log_ticks(lo: float, hi: float, target: int = _TICK_TARGET) -> list[float]:
+    """Decade ticks spanning ``[lo, hi]``, subdivided 1/2/5 while the span is short enough.
+
+    Under about two decades there is room for the 1/2/5 rungs inside each decade, and without them
+    a chart of 3..80 gets two ticks and no sense of where anything sits. Past that the decades are
+    the only readable ticking, and ``target`` thins them further (every second, every third …) so
+    a span of eight decades does not draw nine labels down a 200px axis.
+
+    Both ends must be strictly positive: a log axis has no zero to reach and no negative half to
+    reach into, so a non-positive limit is an error naming the value rather than a silent nudge.
+    """
+    if hi < lo:
+        lo, hi = hi, lo
+    for value in (lo, hi):
+        if not math.isfinite(value) or value <= 0:
+            raise InvalidArgument(
+                f"a log scale needs strictly positive limits; {value!r} is not one"
+            )
+    if hi / lo < 1.0 + 1e-9:  # a flat series: give it a decade either side to sit in
+        lo, hi = lo / 10.0, hi * 10.0
+    lo_exp = math.floor(math.log10(lo) + 1e-9)
+    hi_exp = math.ceil(math.log10(hi) - 1e-9)
+    if hi_exp - lo_exp <= _LOG_SUBDIVIDE_DECADES:
+        rungs = [
+            _round_decade(mantissa, exponent)
+            for exponent in range(lo_exp, hi_exp + 1)
+            for mantissa in _LOG_LADDER
+        ]
+        first = max((rung for rung in rungs if rung <= lo * (1.0 + 1e-9)), default=rungs[0])
+        last = min((rung for rung in rungs if rung >= hi * (1.0 - 1e-9)), default=rungs[-1])
+        return [rung for rung in rungs if first <= rung <= last]
+    step = max(1, math.ceil((hi_exp - lo_exp) / max(1, target - 1)))
+    # Round the top out to a whole number of steps, so the last gap is as wide as all the others.
+    hi_exp = lo_exp + step * math.ceil((hi_exp - lo_exp) / step)
+    return [_round_decade(1.0, exponent) for exponent in range(lo_exp, hi_exp + 1, step)]
+
+
+def _round_decade(mantissa: float, exponent: int) -> float:
+    """``mantissa × 10ᵉ``, rounded to the precision that exponent needs — no float dust."""
+    return round(mantissa * 10.0**exponent, max(0, -exponent + 1))
+
+
+# --- tick labels -------------------------------------------------------------
+
+_SI_STEPS: tuple[tuple[float, str], ...] = (
+    (1e12, "T"),
+    (1e9, "G"),
+    (1e6, "M"),
+    (1e3, "k"),
+    (1.0, ""),
+    (1e-3, "m"),
+    (1e-6, "µ"),
+    (1e-9, "n"),
+)
+
+
+def _trim(text: str) -> str:
+    """Drop the zeros a fixed-point render adds, and the minus sign a negative zero keeps."""
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    if text.startswith("-") and not any(digit in text for digit in "123456789"):
+        text = text[1:]
+    return text or "0"
+
+
+def _group_thousands(text: str) -> str:
+    """``-1204.5`` → ``-1,204.5``. Grouping is a property of the integer part alone."""
+    sign, body = ("-", text[1:]) if text.startswith("-") else ("", text)
+    whole, dot, fraction = body.partition(".")
+    if not whole.isdigit():
+        return text
+    return f"{sign}{int(whole):,}{dot}{fraction}"
+
+
+def _si_parts(value: float, decimals: int) -> tuple[str, str]:
+    """An SI-scaled number and its unit prefix. Zero has no magnitude, so it takes no prefix."""
+    if value == 0.0 or not math.isfinite(value):
+        return _trim(f"{value:.{decimals}f}"), ""
+    magnitude = abs(value)
+    for factor, unit in _SI_STEPS:
+        if magnitude >= factor * (1.0 - 1e-12):
+            return _trim(f"{value / factor:.{decimals}f}"), unit
+    factor, unit = _SI_STEPS[-1]
+    return _trim(f"{value / factor:.{decimals}f}"), unit
+
+
+def format_tick(value: float, fmt: TickFormat | None = None) -> str:
+    """Write one tick's number the way ``fmt`` asks. Pure, and the only formatter a chart uses.
+
+    With no ``fmt`` a value is written plainly: enough decimals to be itself, none of the zeros
+    that adds. The five styles then differ in what they do to the NUMBER — ``percent`` scales it
+    by 100 and owns the ``%``, ``si`` scales it by a decade and owns the k/M/G/T (m/µ/n below 1),
+    ``fixed`` pins the decimals, ``currency`` and ``plain`` leave it alone — and the caller's own
+    ``prefix``/``suffix`` wrap whatever came out. Only ``fixed`` and ``percent`` keep trailing
+    zeros: they were asked for a precision, where the rest were asked for a number.
+    """
+    if fmt is None:
+        return _trim(f"{value:.{_PLAIN_DECIMALS}f}")
+    unit = ""
+    if fmt.style == "percent":
+        text = f"{value * 100.0:.{_PLAIN_DECIMALS if fmt.decimals is None else fmt.decimals}f}"
+        text = _trim(text) if fmt.decimals is None else text
+        unit = "%"
+    elif fmt.style == "si":
+        text, unit = _si_parts(value, 1 if fmt.decimals is None else fmt.decimals)
+    elif fmt.style == "fixed":
+        text = f"{value:.{0 if fmt.decimals is None else fmt.decimals}f}"
+    else:  # plain and currency: the number as it is, to the precision it needs
+        text = _trim(f"{value:.{_PLAIN_DECIMALS if fmt.decimals is None else fmt.decimals}f}")
+    if fmt.thousands:
+        text = _group_thousands(text)
+    if text.startswith("-") and not any(digit in text for digit in "123456789"):
+        text = text[1:]  # a rounded-to-zero negative is zero
+    prefix = (fmt.prefix or "$") if fmt.style == "currency" else fmt.prefix
+    # Money is written -$5, never $-5: the sign belongs to the amount, outside its symbol.
+    sign, text = ("-", text[1:]) if fmt.style == "currency" and text.startswith("-") else ("", text)
+    return f"{sign}{prefix}{text}{unit}{fmt.suffix}"
+
+
+# --- the resolved axis -------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Scale:
+    """The span one direction maps through, and whether it does it logarithmically.
+
+    Deliberately unclamped: :meth:`unit` will happily answer 1.4 for a datum above a pinned top,
+    because the plot's job is to CLIP that mark to the rect, not to quietly move it inside.
+    """
+
+    lo: float
+    hi: float
+    log: bool = False
+
+    def unit(self, value: float) -> float:
+        """``value`` as a fraction of the span — 0 at ``lo``, 1 at ``hi``, outside for outside."""
+        if self.log:
+            low = math.log10(max(self.lo, _TINY))
+            high = math.log10(max(self.hi, _TINY))
+            at = math.log10(max(value, _TINY))
+        else:
+            low, high, at = self.lo, self.hi, value
+        span = high - low
+        return 0.0 if abs(span) <= _EPS else (at - low) / span
+
+
+@dataclass(frozen=True, slots=True)
+class Axis:
+    """One axis, fully resolved: the span to map through, where the ticks are, what they read.
+
+    ``pinned`` is the fact the DRAWING needs from it — a caller who fixed an end is asking for a
+    window onto the data, so whatever falls outside has to be clipped rather than drawn over the
+    axis it was supposed to be measured against.
+    """
+
+    scale: Scale
+    ticks: tuple[float, ...]
+    labels: tuple[str, ...]
+    pinned: bool = False
+
+    def pairs(self) -> list[tuple[float, str]]:
+        """The ticks and their labels together, which is how every drawing routine wants them."""
+        return list(zip(self.ticks, self.labels, strict=True))
+
+
+def _positive_or_die(values: Sequence[float], axis: str) -> None:
+    for value in values:
+        if not math.isfinite(value) or value <= 0:
+            raise InvalidArgument(
+                f"a log {axis} axis cannot plot {value!r}: a log scale has no zero and no "
+                "negative half, so every value and every pinned limit must be above zero"
+            )
+
+
+def _tick_target(ticks: int | Sequence[float] | None) -> int:
+    if not isinstance(ticks, int):
+        return _TICK_TARGET
+    if ticks < 1:
+        raise InvalidArgument(f"an axis needs at least one tick; {ticks} is not a count")
+    return ticks
+
+
+def resolve_axis(
+    values: Sequence[float],
+    *,
+    lo_pin: float | None = None,
+    hi_pin: float | None = None,
+    zero: bool = False,
+    log: bool = False,
+    ticks: int | Sequence[float] | None = None,
+    fmt: TickFormat | None = None,
+    axis: str = "y",
+) -> Axis:
+    """Turn data plus a caller's wishes into a span, a tick list and the labels for it. Pure.
+
+    The order matters and is the whole contract. The data sets the range; ``zero`` widens it to
+    touch zero, but only at an end the caller did NOT pin — pinning is the stronger statement, and
+    a bar chart asked to start at 20 must start at 20. The ticks are then chosen inside that range
+    (or taken verbatim, out-of-range values dropped), and finally an UNPINNED end is stretched out
+    to its nearest tick, which is what has always given a chart its round-numbered axis.
+    """
+    data_lo, data_hi = (min(values), max(values)) if values else (0.0, 1.0)
+    if log:
+        _positive_or_die([*values, *(pin for pin in (lo_pin, hi_pin) if pin is not None)], axis)
+    elif zero:
+        data_lo = data_lo if lo_pin is not None else min(data_lo, 0.0)
+        data_hi = data_hi if hi_pin is not None else max(data_hi, 0.0)
+    lo = data_lo if lo_pin is None else lo_pin
+    hi = data_hi if hi_pin is None else hi_pin
+    if hi <= lo:
+        if lo_pin is not None and hi_pin is not None:
+            raise InvalidArgument(
+                f"the {axis} axis was pinned to an empty range: {lo_pin} to {hi_pin}"
+            )
+        lo, hi = _widen(lo, hi, log=log, low_fixed=lo_pin is not None)
+
+    explicit = None if ticks is None or isinstance(ticks, int) else [float(t) for t in ticks]
+    if explicit is None:
+        target = _tick_target(ticks)
+        chosen = log_ticks(lo, hi, target) if log else nice_ticks(lo, hi, target)
+        lo = lo if lo_pin is not None else min(lo, chosen[0])
+        hi = hi if hi_pin is not None else max(hi, chosen[-1])
+    else:
+        chosen = sorted(set(explicit))
+    tolerance = max(abs(lo), abs(hi), 1.0) * 1e-9
+    kept = [tick for tick in chosen if lo - tolerance <= tick <= hi + tolerance]
+    labels = _tick_labels(kept, fmt=fmt, exact=explicit is None and not log)
+    return Axis(
+        scale=Scale(lo=lo, hi=hi, log=log),
+        ticks=tuple(kept),
+        labels=tuple(labels),
+        pinned=lo_pin is not None or hi_pin is not None,
+    )
+
+
+def _widen(lo: float, hi: float, *, log: bool, low_fixed: bool) -> tuple[float, float]:
+    """Open up a range that closed on itself, moving whichever end the caller did not pin."""
+    if log:
+        return (lo, lo * 10.0) if low_fixed else (hi / 10.0, hi)
+    pad = max(1.0, abs(lo if low_fixed else hi) * 0.1)
+    return (lo, lo + pad) if low_fixed else (hi - pad, hi)
+
+
+def _tick_labels(ticks: Sequence[float], *, fmt: TickFormat | None, exact: bool) -> list[str]:
+    """Label a tick list — at the STEP's precision for a ladder, at the value's for anything else.
+
+    A ladder of 1/2/5 steps has one precision that suits every rung, and writing them all at it is
+    what keeps ``0``/``0.5``/``1`` from reading as ``0``/``0.5``/``1.0``. An explicit list or a
+    log axis has no single step, so each value is written at whatever precision it needs.
+    """
+    if fmt is not None:
+        return [format_tick(tick, fmt) for tick in ticks]
+    if exact:
+        step = ticks[1] - ticks[0] if len(ticks) > 1 else 1.0
+        decimals = tick_decimals(step)
+        return [tick_text(tick, decimals) for tick in ticks]
+    return [format_tick(tick, None) for tick in ticks]
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +706,40 @@ class Margins:
     bottom: float
 
 
+@dataclass(frozen=True, slots=True)
+class Sizes:
+    """The type sizes and the gap a chart lays out against — the theme's numbers, not guesses.
+
+    These used to be module constants that ``plot_margins`` measured with while the CSS set the
+    sizes the text was actually DRAWN at, so a theme restyling ``.tick-label`` to 16px got either
+    clipped labels or a channel of slack. The theme's ``--chart-*`` tokens now feed both halves.
+    """
+
+    tick: float = _TICK_SIZE
+    axis_label: float = _AXIS_LABEL_SIZE
+    title: float = _TITLE_SIZE
+    gap: float = _GAP
+
+
+_DEFAULT_SIZES = Sizes()
+
+
+def chart_sizes(theme: ServingTheme) -> Sizes:
+    """Read a chart's layout sizes off the serving theme, falling back to the bundled values."""
+    return Sizes(
+        tick=_token(theme, "--chart-tick-size", _TICK_SIZE),
+        axis_label=_token(theme, "--chart-axis-label-size", _AXIS_LABEL_SIZE),
+        title=_token(theme, "--chart-title-size", _TITLE_SIZE),
+        gap=_token(theme, "--chart-gap", _GAP),
+    )
+
+
+def rotated_extent(width: float, height: float, degrees: float) -> float:
+    """How much vertical room a label of this size needs once it is turned by ``degrees``."""
+    radians = math.radians(degrees)
+    return abs(width * math.sin(radians)) + abs(height * math.cos(radians))
+
+
 def plot_margins(
     y_tick_labels: Sequence[str],
     *,
@@ -335,23 +747,34 @@ def plot_margins(
     title: bool,
     x_label: bool,
     y_label: bool,
+    sizes: Sizes = _DEFAULT_SIZES,
+    tick_marks: float = 0.0,
+    x_tick_labels: Sequence[str] = (),
+    x_tick_rotate: float = 0.0,
 ) -> Margins:
     """How much room the labels need — MEASURED, so a six-digit axis is not clipped or crowded.
 
     The left margin is the widest y tick label plus a gap, which is why a chart of thousands
-    indents further than a chart of tens. Axis titles add their own line on the side they sit.
+    indents further than a chart of tens. Axis titles add their own line on the side they sit,
+    tick marks push the labels out by their own length, and turned x labels claim the height
+    their turned bounding box actually occupies rather than one line's worth.
     """
     widest = max(
-        (measure_label(text, font, _TICK_SIZE)[0] for text in y_tick_labels),
+        (measure_label(text, font, sizes.tick)[0] for text in y_tick_labels),
         default=0.0,
     )
-    tick_height = measure_label("0", font, _TICK_SIZE)[1]
-    axis_allowance = _AXIS_LABEL_SIZE + 4.0
+    tick_height = measure_label("0", font, sizes.tick)[1]
+    if x_tick_rotate and x_tick_labels:
+        tick_height = max(
+            rotated_extent(*measure_label(text, font, sizes.tick), x_tick_rotate)
+            for text in x_tick_labels
+        )
+    axis_allowance = sizes.axis_label + 4.0
     return Margins(
-        left=widest + _GAP + (axis_allowance if y_label else 0.0),
-        top=(_TITLE_SIZE + _GAP) if title else 4.0,
-        right=_GAP,
-        bottom=tick_height + _GAP + (axis_allowance if x_label else 0.0),
+        left=widest + sizes.gap + tick_marks + (axis_allowance if y_label else 0.0),
+        top=(sizes.title + sizes.gap) if title else 4.0,
+        right=sizes.gap,
+        bottom=tick_height + sizes.gap + tick_marks + (axis_allowance if x_label else 0.0),
     )
 
 
@@ -364,15 +787,11 @@ class Plot:
     w: float
     h: float
 
-    def map_x(self, value: float, lo: float, hi: float) -> float:
-        span = hi - lo
-        return self.x if abs(span) <= _EPS else self.x + (value - lo) / span * self.w
+    def map_x(self, value: float, scale: Scale) -> float:
+        return self.x + scale.unit(value) * self.w
 
-    def map_y(self, value: float, lo: float, hi: float) -> float:
-        span = hi - lo
-        if abs(span) <= _EPS:
-            return self.y + self.h
-        return self.y + self.h - (value - lo) / span * self.h
+    def map_y(self, value: float, scale: Scale) -> float:
+        return self.y + self.h - scale.unit(value) * self.h
 
 
 def _plot_rect(w: float, h: float, margins: Margins) -> Plot:
@@ -400,6 +819,7 @@ class ChartSpec:
     w: float
     h: float
     auto: bool
+    axes: AxesSpec | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,6 +855,7 @@ def read_chart_spec(element: BaseElement) -> ChartSpec | None:
         kind = _kind_of(str(spec["kind"]))
         if kind is None:
             return None
+        axes = spec.get("axes")
         return ChartSpec(
             kind=kind,
             data=_MODELS[kind].model_validate(spec["data"]),
@@ -444,28 +865,28 @@ def read_chart_spec(element: BaseElement) -> ChartSpec | None:
             w=float(spec["w"]),
             h=float(spec["h"]),
             auto=bool(spec.get("auto", False)),
+            axes=None if axes is None else AxesSpec.model_validate(axes),
         )
     except (ValueError, TypeError, KeyError, ValidationError):
         return None
 
 
 def _write_chart_spec(element: BaseElement, spec: ChartSpec) -> None:
-    element.set(
-        _CHART_ATTR,
-        json.dumps(
-            {
-                "kind": spec.kind,
-                "data": spec.data.model_dump(),
-                "title": spec.title,
-                "x_label": spec.x_label,
-                "y_label": spec.y_label,
-                "w": spec.w,
-                "h": spec.h,
-                "auto": spec.auto,
-            },
-            separators=(",", ":"),
-        ),
-    )
+    """Store the spec. An absent ``axes`` writes no key at all — the compatibility contract is
+    that a chart nobody gave axes to is byte-for-byte the chart this module always wrote."""
+    stored: dict[str, object] = {
+        "kind": spec.kind,
+        "data": spec.data.model_dump(),
+        "title": spec.title,
+        "x_label": spec.x_label,
+        "y_label": spec.y_label,
+        "w": spec.w,
+        "h": spec.h,
+        "auto": spec.auto,
+    }
+    if spec.axes is not None:
+        stored["axes"] = spec.axes.model_dump()
+    element.set(_CHART_ATTR, json.dumps(stored, separators=(",", ":")))
 
 
 # --- part construction -------------------------------------------------------
@@ -576,6 +997,14 @@ def _series_class(doc: Document, theme: str | None, index: int) -> list[str]:
     return _hooks(doc, theme, f"series-{index % _SERIES_COUNT + 1}")
 
 
+def _rotated_anchor(degrees: float) -> tuple[str, str]:
+    """Where a turned x tick label hangs from its tick: by its end going up-left, start going up-
+    right. An unturned label is centred under the tick, which is the only case that reads level."""
+    if not degrees:
+        return "middle", "alphabetic"
+    return ("end" if degrees < 0 else "start"), "central"
+
+
 def _draw_frame(
     doc: Document,
     parent: str,
@@ -583,55 +1012,68 @@ def _draw_frame(
     *,
     plot: Plot,
     spec: ChartSpec,
-    y_ticks: Sequence[float],
-    y_decimals: int,
+    y_axis: Axis,
     x_ticks: Sequence[tuple[float, str]],
     font: str,
+    axes: AxesSpec,
+    sizes: Sizes,
 ) -> None:
-    """The scenery: gridlines, the two axes, the tick labels, and the axis titles.
+    """The scenery: gridlines, the two axes, the tick marks, the tick labels, the axis titles.
 
     Gridlines are drawn FIRST so the data is never hidden behind them, and the axes after, so
-    the baseline reads as a line rather than as the last gridline.
+    the baseline reads as a line rather than as the last gridline. Tick marks sit OUTSIDE the
+    rect, which is why they are the one part of the frame the margins had to make room for.
     """
     frame = _group(doc, parent)
     frame_id = str(frame.get_id())
-    lo, hi = y_ticks[0], y_ticks[-1]
-    for tick in y_ticks:
-        at = plot.map_y(tick, lo, hi)
-        _line(
-            doc,
-            frame_id,
-            (plot.x, at),
-            (plot.x + plot.w, at),
-            _hooks(doc, theme, "gridline"),
-        )
+    grid = _hooks(doc, theme, "gridline")
+    if axes.gridlines in ("y", "both"):
+        for tick in y_axis.ticks:
+            at = plot.map_y(tick, y_axis.scale)
+            _line(doc, frame_id, (plot.x, at), (plot.x + plot.w, at), grid)
+    if axes.gridlines in ("x", "both"):
+        for at, _ in x_ticks:
+            _line(doc, frame_id, (at, plot.y), (at, plot.y + plot.h), grid)
     axis = _hooks(doc, theme, "axis")
     _line(doc, frame_id, (plot.x, plot.y), (plot.x, plot.y + plot.h), axis)
     _line(
         doc, frame_id, (plot.x, plot.y + plot.h), (plot.x + plot.w, plot.y + plot.h), axis
     )
 
+    marks = max(0.0, axes.tick_marks or 0.0)
+    if marks > 0:
+        mark_class = _hooks(doc, theme, "tick")
+        base = plot.y + plot.h
+        for tick in y_axis.ticks:
+            at = plot.map_y(tick, y_axis.scale)
+            _line(doc, frame_id, (plot.x - marks, at), (plot.x, at), mark_class)
+        for at, _ in x_ticks:
+            _line(doc, frame_id, (at, base), (at, base + marks), mark_class)
+
     tick_class = _hooks(doc, theme, "tick-label")
-    for tick in y_ticks:
+    for tick, text in y_axis.pairs():
         _text(
             doc,
             frame_id,
-            tick_text(tick, y_decimals),
-            (plot.x - 4.0, plot.map_y(tick, lo, hi)),
+            text,
+            (plot.x - 4.0 - marks, plot.map_y(tick, y_axis.scale)),
             anchor="end",
             baseline="central",
             classes=tick_class,
         )
-    tick_height = measure_label("0", font, _TICK_SIZE)[1]
+    tick_height = measure_label("0", font, sizes.tick)[1]
+    anchor, baseline = _rotated_anchor(axes.x_tick_rotate)
+    drop = marks + (tick_height * 0.85 if not axes.x_tick_rotate else tick_height * 0.5)
     for at, text in x_ticks:
         _text(
             doc,
             frame_id,
             text,
-            (at, plot.y + plot.h + tick_height * 0.85),
-            anchor="middle",
-            baseline="alphabetic",
+            (at, plot.y + plot.h + drop),
+            anchor=anchor,
+            baseline=baseline,
             classes=tick_class,
+            rotate=axes.x_tick_rotate or None,
         )
 
     label_class = _hooks(doc, theme, "axis-label")
@@ -648,7 +1090,7 @@ def _draw_frame(
         doc,
         frame_id,
         spec.y_label,
-        (_AXIS_LABEL_SIZE, plot.y + plot.h / 2.0),
+        (sizes.axis_label, plot.y + plot.h / 2.0),
         anchor="middle",
         baseline="alphabetic",
         classes=label_class,
@@ -656,39 +1098,168 @@ def _draw_frame(
     )
 
 
-def _draw_title(doc: Document, parent: str, theme: str | None, plot: Plot, title: str) -> None:
+def _draw_title(
+    doc: Document,
+    parent: str,
+    theme: str | None,
+    plot: Plot,
+    title: str,
+    sizes: Sizes = _DEFAULT_SIZES,
+) -> None:
     _text(
         doc,
         parent,
         title,
-        (plot.x + plot.w / 2.0, _TITLE_SIZE),
+        (plot.x + plot.w / 2.0, sizes.title),
         anchor="middle",
         baseline="alphabetic",
         classes=_hooks(doc, theme, "chart-title"),
     )
 
 
+# --- marks, patterns, and the window the data is cut to ------------------------
+
+
+def marker_points(shape: Marker, cx: float, cy: float, size: float) -> list[Point]:
+    """The corners of a polygonal mark, from the top clockwise. Round and absent marks have none.
+
+    ``size`` is the half-extent — the radius of the circle the mark would replace — so swapping a
+    shape never changes how much ink a point carries.
+    """
+    if shape == "square":
+        return [
+            (cx - size, cy - size),
+            (cx + size, cy - size),
+            (cx + size, cy + size),
+            (cx - size, cy + size),
+        ]
+    if shape == "diamond":
+        return [(cx, cy - size), (cx + size, cy), (cx, cy + size), (cx - size, cy)]
+    if shape == "triangle":
+        return [
+            (cx + size * math.cos(angle), cy + size * math.sin(angle))
+            for angle in (-math.pi / 2.0, math.pi / 6.0, 5.0 * math.pi / 6.0)
+        ]
+    return []
+
+
+def _draw_mark(doc: Document, parent: str, shape: Marker, at: Point, size: float) -> None:
+    """One data point's mark. It carries no class: the series group above it paints it."""
+    cx, cy = at
+    if shape == "none":
+        return
+    if shape == "circle":
+        element: BaseElement = inkex.Circle.new((cx, cy), size)
+        prefix = "circle"
+    elif shape == "square":
+        element = inkex.Rectangle.new(cx - size, cy - size, size * 2.0, size * 2.0)
+        prefix = "rect"
+    else:
+        corners = marker_points(shape, cx, cy, size)
+        steps = " L ".join(f"{_num(x)} {_num(y)}" for x, y in corners)
+        element = inkex.PathElement.new(f"M {steps} Z")
+        prefix = "path"
+    _part(
+        doc,
+        element,
+        prefix=prefix,
+        category="shape",
+        parent=parent,
+        style={"stroke": "none"},  # a mark is a fill (see the bars)
+        classes=(),
+    )
+
+
+def _stage(doc: Document, parent: str, element: BaseElement, prefix: str) -> str:
+    """Put a node in the tree so a ``define_*`` can move it into ``<defs>``; returns its id."""
+    doc.resolve(parent).add(element)
+    element.set_id(doc.new_id(prefix))
+    return str(element.get_id())
+
+
+def _own(doc: Document, resource: str, owner: str) -> str:
+    """Stamp a ``<defs>`` resource with the chart that built it. See :data:`_CLIP_OWNER`."""
+    doc.resolve(resource).set(_CLIP_OWNER, owner)
+    return resource
+
+
+def _purge_owned_defs(doc: Document, owner: str) -> None:
+    """Delete the ``<defs>`` resources a previous build of this chart left behind."""
+    for node in list(doc.svg.iter()):
+        if isinstance(node.tag, str) and node.get(_CLIP_OWNER) == owner:
+            node.delete()
+
+
+def _clip_to_plot(doc: Document, group: str, plot: Plot) -> str:
+    """A clipPath the shape of the plot rect, in the chart's own local frame; returns its id.
+
+    Pinning a limit turns the plot into a WINDOW onto the data, and a window that lets a bar hang
+    past the axis it is measured against is worse than no window at all.
+    """
+    rect = inkex.Rectangle.new(plot.x, plot.y, plot.w, plot.h)
+    clip = define_clip(doc, content=[_stage(doc, group, rect, "chart-clip")])
+    return _own(doc, clip, group)
+
+
+def _hatch(doc: Document, group: str, classes: Sequence[str]) -> str | None:
+    """A diagonal hatch pattern painted in one series' colour; returns its id, or None.
+
+    The stroke is NOT written here: the line inside the pattern wears the series class and is
+    painted by the same rule that paints the bars, so a variant switch or an ``apply_theme``
+    moves the hatching with everything else. That also means a chart wearing no dressing has
+    nothing to hatch WITH — such a chart keeps its flat fill rather than turning invisible.
+    """
+    if not classes:
+        return None
+    line = inkex.Line.new((0.0, 0.0), (0.0, _HATCH_TILE))
+    line.set("class", " ".join(classes))
+    line.set("style", f"fill:none;stroke-width:{_HATCH_WIDTH}")
+    pattern = define_pattern(
+        doc,
+        content=[_stage(doc, group, line, "chart-hatch")],
+        width=_HATCH_TILE,
+        height=_HATCH_TILE,
+        units="userSpaceOnUse",
+        pattern_transform="rotate(45)",
+    )
+    return _own(doc, pattern, group)
+
+
+def _fill_of(pattern: str | None) -> Style:
+    return {"fill": f"url(#{pattern})"} if pattern is not None else {}
+
+
 # --- the five plots ----------------------------------------------------------
 
 
-def _y_span(values: Sequence[float], *, zero: bool) -> tuple[float, float]:
-    lo, hi = (min(values), max(values)) if values else (0.0, 1.0)
-    return include_zero(lo, hi) if zero else (lo, hi)
-
-
-def _draw_bar(doc: Document, group: str, theme: str | None, spec: ChartSpec, font: str) -> Plot:
+def _draw_bar(
+    doc: Document, group: str, theme: str | None, spec: ChartSpec, font: str, sizes: Sizes
+) -> Plot:
     data = spec.data
     if not isinstance(data, BarData):
         raise InvalidArgument("a bar chart needs bar data")
+    axes = spec.axes or _DEFAULT_AXES
+    log = axes.scale == "log"
     flat = [value for entry in data.series for value in entry.values]
-    lo, hi = _y_span(flat, zero=True)
-    ticks, decimals = scale(lo, hi)
+    y_axis = resolve_axis(
+        flat,
+        lo_pin=axes.y_min,
+        hi_pin=axes.y_max,
+        zero=not log,
+        log=log,
+        ticks=axes.ticks,
+        fmt=axes.tick_format,
+    )
     margins = plot_margins(
-        [tick_text(tick, decimals) for tick in ticks],
+        y_axis.labels,
         font=font,
         title=bool(spec.title),
         x_label=bool(spec.x_label),
         y_label=bool(spec.y_label),
+        sizes=sizes,
+        tick_marks=max(0.0, axes.tick_marks or 0.0),
+        x_tick_labels=data.categories,
+        x_tick_rotate=axes.x_tick_rotate,
     )
     plot = _plot_rect(spec.w, spec.h, margins)
     bands = bar_bands(plot.w, len(data.categories), len(data.series))
@@ -702,22 +1273,29 @@ def _draw_bar(doc: Document, group: str, theme: str | None, spec: ChartSpec, fon
         theme,
         plot=plot,
         spec=spec,
-        y_ticks=ticks,
-        y_decimals=decimals,
+        y_axis=y_axis,
         x_ticks=x_ticks,
         font=font,
+        axes=axes,
+        sizes=sizes,
     )
 
-    top, bottom = ticks[-1], ticks[0]
-    base = plot.map_y(0.0, bottom, top)
+    # A bar measures from zero, because that is what makes its LENGTH the number. On a log axis
+    # there is no zero to measure from, so it measures from the bottom of the axis instead.
+    base = plot.map_y(y_axis.scale.lo if log else 0.0, y_axis.scale)
+    clip = _clip_to_plot(doc, group, plot) if y_axis.pinned else None
     for index, entry in enumerate(data.series):
         series = _group(doc, group)
         series_id = str(series.get_id())
-        for class_name in _series_class(doc, theme, index):
+        classes = _series_class(doc, theme, index)
+        for class_name in classes:
             series.set("class", class_name)
+        if clip is not None:
+            series.set("clip-path", f"url(#{clip})")
+        fill = _fill_of(_hatch(doc, group, classes) if data.hatch else None)
         for category, value in enumerate(entry.values):
             band = bands[category][index]
-            at = plot.map_y(value, bottom, top)
+            at = plot.map_y(value, y_axis.scale)
             _part(
                 doc,
                 inkex.Rectangle.new(plot.x + band.x, min(at, base), band.w, abs(base - at)),
@@ -726,7 +1304,7 @@ def _draw_bar(doc: Document, group: str, theme: str | None, spec: ChartSpec, fon
                 parent=series_id,
                 # A mark that is a FILL takes no stroke: the series class sets both, and the
                 # stroke would make every bar a hairline wider than the number it stands for.
-                style={"stroke": "none"},
+                style={"stroke": "none", **fill},
                 classes=(),
             )
     return plot
@@ -741,54 +1319,86 @@ def _point_span(series: Sequence[PointSeries]) -> tuple[tuple[float, float], tup
 
 
 def _draw_points(
-    doc: Document, group: str, theme: str | None, spec: ChartSpec, font: str
+    doc: Document, group: str, theme: str | None, spec: ChartSpec, font: str, sizes: Sizes
 ) -> Plot:
     """Line and scatter — the same axes, differing only in what each series draws."""
     data = spec.data
     if not isinstance(data, LineData | ScatterData):
         raise InvalidArgument("a line or scatter chart needs point-series data")
+    axes = spec.axes or _DEFAULT_AXES
+    log = axes.scale == "log"
     area = isinstance(data, LineData) and data.area
-    markers = isinstance(data, ScatterData) or data.points
+    hatch = isinstance(data, LineData) and data.hatch
+    markers = (isinstance(data, ScatterData) or data.points) and data.marker != "none"
     (x_lo, x_hi), (y_lo, y_hi) = _point_span(data.series)
-    y_ticks, y_decimals = scale(y_lo, y_hi, zero=area)
-    x_ticks_at, x_decimals = scale(x_lo, x_hi)
+    y_axis = resolve_axis(
+        [y_lo, y_hi],
+        lo_pin=axes.y_min,
+        hi_pin=axes.y_max,
+        zero=area and not log,
+        log=log,
+        ticks=axes.ticks,
+        fmt=axes.tick_format,
+    )
+    x_axis = resolve_axis(
+        [x_lo, x_hi],
+        lo_pin=axes.x_min,
+        hi_pin=axes.x_max,
+        ticks=axes.x_ticks,
+        fmt=axes.x_tick_format,
+        axis="x",
+    )
     margins = plot_margins(
-        [tick_text(tick, y_decimals) for tick in y_ticks],
+        y_axis.labels,
         font=font,
         title=bool(spec.title),
         x_label=bool(spec.x_label),
         y_label=bool(spec.y_label),
+        sizes=sizes,
+        tick_marks=max(0.0, axes.tick_marks or 0.0),
+        x_tick_labels=x_axis.labels,
+        x_tick_rotate=axes.x_tick_rotate,
     )
     plot = _plot_rect(spec.w, spec.h, margins)
-    x_left, x_right = x_ticks_at[0], x_ticks_at[-1]
-    y_bottom, y_top = y_ticks[0], y_ticks[-1]
+    x_ticks = [
+        (plot.map_x(tick, x_axis.scale), text) for tick, text in x_axis.pairs()
+    ]
     _draw_frame(
         doc,
         group,
         theme,
         plot=plot,
         spec=spec,
-        y_ticks=y_ticks,
-        y_decimals=y_decimals,
-        x_ticks=[
-            (plot.map_x(tick, x_left, x_right), tick_text(tick, x_decimals))
-            for tick in x_ticks_at
-        ],
+        y_axis=y_axis,
+        x_ticks=x_ticks,
         font=font,
+        axes=axes,
+        sizes=sizes,
     )
 
+    clip = _clip_to_plot(doc, group, plot) if y_axis.pinned or x_axis.pinned else None
+    size = data.marker_size or (
+        _SCATTER_R if isinstance(data, ScatterData) else _MARKER_R
+    )
     for index, entry in enumerate(data.series):
         series = _group(doc, group)
         series_id = str(series.get_id())
-        for class_name in _series_class(doc, theme, index):
+        classes = _series_class(doc, theme, index)
+        for class_name in classes:
             series.set("class", class_name)
+        if clip is not None:
+            series.set("clip-path", f"url(#{clip})")
         placed = [
-            (plot.map_x(px, x_left, x_right), plot.map_y(py, y_bottom, y_top))
-            for px, py in entry.points
+            (plot.map_x(px, x_axis.scale), plot.map_y(py, y_axis.scale)) for px, py in entry.points
         ]
         if area and placed:
-            base = plot.map_y(0.0, y_bottom, y_top)
+            # The wash runs down to zero — or, on a log axis, to the bottom of the axis.
+            base = plot.map_y(y_axis.scale.lo if log else 0.0, y_axis.scale)
             steps = " ".join(f"L {_num(px)} {_num(py)}" for px, py in placed)
+            fill = _fill_of(_hatch(doc, group, classes) if hatch else None)
+            # Hatching IS the texture, so it keeps its full opacity; a flat wash is diluted to
+            # stay behind the line it belongs to.
+            wash: Style = {} if fill else {"fill-opacity": _AREA_OPACITY}
             _part(
                 doc,
                 inkex.PathElement.new(
@@ -798,23 +1408,14 @@ def _draw_points(
                 prefix="path",
                 category="shape",
                 parent=series_id,
-                style={"stroke": "none", "fill-opacity": _AREA_OPACITY},
+                style={"stroke": "none", **wash, **fill},
                 classes=(),
             )
         if isinstance(data, LineData) and len(placed) > 1:
             _polyline(doc, series_id, placed, ())
         if markers:
-            radius = _SCATTER_R if isinstance(data, ScatterData) else _MARKER_R
-            for px, py in placed:
-                _part(
-                    doc,
-                    inkex.Circle.new((px, py), radius),
-                    prefix="circle",
-                    category="shape",
-                    parent=series_id,
-                    style={"stroke": "none"},  # a dot is a fill (see the bars)
-                    classes=(),
-                )
+            for at in placed:
+                _draw_mark(doc, series_id, data.marker, at, size)
     return plot
 
 
@@ -856,11 +1457,12 @@ def _draw_donut(
     theme: str | None,
     spec: ChartSpec,
     hole: float,
+    sizes: Sizes,
 ) -> None:
     data = spec.data
     if not isinstance(data, DonutData):
         raise InvalidArgument("a donut chart needs slice data")
-    top = (_TITLE_SIZE + _GAP) if spec.title else 4.0
+    top = (sizes.title + sizes.gap) if spec.title else 4.0
     plot = Plot(x=0.0, y=top, w=spec.w, h=max(1.0, spec.h - top - 4.0))
     outer = min(plot.w, plot.h) / 2.0
     inner = outer * hole
@@ -870,19 +1472,30 @@ def _draw_donut(
     ):
         wedge = _group(doc, group)
         wedge_id = str(wedge.get_id())
-        for class_name in _series_class(doc, theme, index):
+        classes = _series_class(doc, theme, index)
+        for class_name in classes:
             wedge.set("class", class_name)
         wedge.set("data-slice", piece.label)
+        fill = _fill_of(_hatch(doc, group, classes) if data.hatch else None)
         _part(
             doc,
             inkex.PathElement.new(annular_sector(cx, cy, outer, inner, start, end)),
             prefix="path",
             category="shape",
             parent=wedge_id,
-            style={"stroke": "none"},
+            style={"stroke": "none", **fill},
             classes=(),
         )
-    _draw_title(doc, group, theme, plot, spec.title)
+    _draw_title(doc, group, theme, plot, spec.title, sizes)
+
+
+def sparkline_y(value: float, lo: float, hi: float, height: float, inset: float = 1.0) -> float:
+    """Where one value sits down a sparkline's box — pure, so the line and its dots agree."""
+    span = hi - lo
+    usable = max(1.0, height - 2 * inset)
+    if abs(span) <= _EPS:
+        return height / 2.0
+    return inset + usable - (value - lo) / span * usable
 
 
 def _draw_sparkline(
@@ -892,21 +1505,20 @@ def _draw_sparkline(
     if not isinstance(data, SparklineData):
         raise InvalidArgument("a sparkline needs a plain list of values")
     lo, hi = min(data.values), max(data.values)
-    inset = 1.0
-    span = hi - lo
-    height = max(1.0, spec.h - 2 * inset)
     step = spec.w / max(1, len(data.values) - 1)
     points = [
-        (
-            index * step,
-            spec.h / 2.0 if abs(span) <= _EPS else inset + height - (value - lo) / span * height,
-        )
+        (index * step, sparkline_y(value, lo, hi, spec.h))
         for index, value in enumerate(data.values)
     ]
     classes = _series_class(doc, theme, 0)
     # A sparkline is one line: if the theme offers no series colour there is nothing above it to
     # inherit a stroke from, so it takes the ink rather than rendering as nothing at all.
     style: Style = {"fill": "none"} if classes else {"fill": "none", "stroke": ink}
+    if data.baseline is not None:
+        # Drawn FIRST, and as a gridline rather than a series mark: it is the thing the trend is
+        # being read against, so it has to sit behind the trend and read as scenery.
+        at = sparkline_y(data.baseline, lo, hi, spec.h)
+        _line(doc, group, (0.0, at), (spec.w, at), _hooks(doc, theme, "gridline"))
     _part(
         doc,
         inkex.Polyline.new(_points_str(points)),
@@ -916,6 +1528,27 @@ def _draw_sparkline(
         style=style,
         classes=classes,
     )
+    for index in _flourishes(data):
+        dot: Style = {"stroke": "none"} if classes else {"stroke": "none", "fill": ink}
+        _part(
+            doc,
+            inkex.Circle.new(points[index], _SPARK_DOT_R),
+            prefix="circle",
+            category="shape",
+            parent=group,
+            style=dot,
+            classes=classes,
+        )
+
+
+def _flourishes(data: SparklineData) -> list[int]:
+    """Which points get a dot, in drawing order and each one only once."""
+    marked: list[int] = []
+    if data.extremes:
+        marked.extend((data.values.index(min(data.values)), data.values.index(max(data.values))))
+    if data.last_point:
+        marked.append(len(data.values) - 1)
+    return sorted(dict.fromkeys(marked))
 
 
 # --- the facade --------------------------------------------------------------
@@ -937,8 +1570,10 @@ def _build(doc: Document, group: BaseElement, spec: ChartSpec) -> None:
     for child in list(group):
         if isinstance(child.tag, str):
             child.delete()
+    _purge_owned_defs(doc, str(group.get_id()))
     theme = serving_theme(doc, "chart")
     font = _label_font(theme)
+    sizes = chart_sizes(theme)
     # Both hooks a chart can be wearing, most specific first: a theme is free to define only
     # `.chart--bar` (a look for one plot and nothing for the rest), and reading just the bare
     # `.chart` would call such a chart undressed and rebuild every axis and series unstyled.
@@ -950,14 +1585,14 @@ def _build(doc: Document, group: BaseElement, spec: ChartSpec) -> None:
         return
     if spec.kind == "donut":
         # The donut lays out its own title, sized around the ring rather than above a plot.
-        _draw_donut(doc, group_id, dressing, spec, _hole(theme))
+        _draw_donut(doc, group_id, dressing, spec, _hole(theme), sizes)
         return
     plot = (
-        _draw_bar(doc, group_id, dressing, spec, font)
+        _draw_bar(doc, group_id, dressing, spec, font, sizes)
         if spec.kind == "bar"
-        else _draw_points(doc, group_id, dressing, spec, font)
+        else _draw_points(doc, group_id, dressing, spec, font, sizes)
     )
-    _draw_title(doc, group_id, dressing, plot, spec.title)
+    _draw_title(doc, group_id, dressing, plot, spec.title, sizes)
 
 
 @names_node
@@ -1011,6 +1646,7 @@ def add_chart(
     title: str | None = None,
     x_label: str | None = None,
     y_label: str | None = None,
+    axes: AxesSpec | None = None,
     parent: str | None = None,
     name: str | None = None,
     style: Style | None = None,
@@ -1024,8 +1660,12 @@ def add_chart(
     ``--series-N`` palette in series order. Omit x/y to stack the chart under the last chart or
     diagram node in the same parent.
 
-    A ``sparkline`` ignores ``title``/``x_label``/``y_label`` and a ``donut`` ignores the two axis
-    labels — they have no axes for them to name, and drawing them anyway would be a lie about
+    ``axes`` is how a caller overrules any of that — pinned limits, a tick count or an explicit
+    tick list, a formatting style, gridlines, tick marks, a log scale. Omitting it draws exactly
+    what this module drew before axes existed; see :class:`AxesSpec`.
+
+    A ``sparkline`` ignores ``title``/``x_label``/``y_label``/``axes`` and a ``donut`` ignores
+    those too — they have no axes for them to name, and drawing them anyway would be a lie about
     what the picture shows.
     """
     parsed = parse_chart_data(kind, data)
@@ -1067,6 +1707,7 @@ def add_chart(
         w=w,
         h=h,
         auto=auto,
+        axes=axes,
     )
     with _facade_body(doc, ref):
         _write_chart_spec(group, spec)
@@ -1084,8 +1725,9 @@ def edit_chart(
     y_label: str | None = None,
     width: float | None = None,
     height: float | None = None,
+    axes: AxesSpec | None = None,
 ) -> ChartEdit:
-    """Edit a chart by its SPEC — new data, new labels, a new box — and re-derive the picture.
+    """Edit a chart by its SPEC — new data, new labels, new axes, a new box — and re-derive it.
 
     The children are thrown away and rebuilt rather than patched: a chart's geometry is a pure
     function of its data and its box, deriving it costs nothing, and nothing outside a chart may
@@ -1093,6 +1735,8 @@ def edit_chart(
     untouched, so its id, its classes and its position all mean what they meant before.
 
     ``data`` is re-validated against the chart's own kind: an edit cannot turn a bar into a donut.
+    ``axes`` REPLACES the chart's axes wholesale (it is one settled description of the frame, not
+    a bag of independent knobs); omitting it keeps whatever the chart already had.
     """
     group = doc.resolve(target)
     current = read_chart_spec(group)
@@ -1109,6 +1753,7 @@ def edit_chart(
         w=width if width is not None else current.w,
         h=height if height is not None else current.h,
         auto=current.auto and width is None and height is None,
+        axes=axes if axes is not None else current.axes,
     )
     _write_chart_spec(group, spec)
     _build(doc, group, spec)

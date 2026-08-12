@@ -113,6 +113,17 @@
   --chart-grid: #dde1e6;
   /* The donut's hole, as a fraction of its outer radius. A ratio, so it carries no unit. */
   --donut-hole: 0.6;
+
+  /* The chart's type sizes and its breathing room. These are read TWICE — the rules below set
+   * the text with them, and the facade MEASURES its margins with them — which is the whole
+   * point of their being tokens: a theme that wants 16px tick labels changes one number and the
+   * plot indents to match, instead of getting labels clipped by margins cut for 10px. They carry
+   * their unit because `font-size: var(--chart-tick-size)` has to be a valid declaration; the
+   * facade strips the `px` back off when it measures. */
+  --chart-tick-size: 10px;
+  --chart-axis-label-size: 11px;
+  --chart-title-size: 13px;
+  --chart-gap: 8px;
 }
 
 /* --- diagram node kinds ------------------------------------------------
@@ -539,12 +550,21 @@
   fill: none;
 }
 
+/** A tick mark: the short rule OUTSIDE the plot that says where a tick actually falls. Drawn in
+ * the axis's own ink, because a tick mark is part of the ruler and not part of the grid — the
+ * gridline crossing the plot at the same value is the lighter half of the same statement. */
+.tick {
+  stroke: var(--ink);
+  stroke-width: var(--stroke-width-hairline);
+  fill: none;
+}
+
 /** A tick label: the number on the y axis, the category on the x. Small and muted. */
 .tick-label {
   fill: var(--ink-muted);
   stroke: none;
   font-family: var(--font);
-  font-size: 10px;
+  font-size: var(--chart-tick-size);
 }
 
 /** An axis title: what the axis MEASURES. One step up from the ticks it names. */
@@ -552,7 +572,7 @@
   fill: var(--ink-muted);
   stroke: none;
   font-family: var(--font);
-  font-size: 11px;
+  font-size: var(--chart-axis-label-size);
 }
 
 /** A chart's title, centered above its plot. The one piece of a chart set in full ink. */
@@ -560,7 +580,7 @@
   fill: var(--ink);
   stroke: none;
   font-family: var(--font);
-  font-size: 13px;
+  font-size: var(--chart-title-size);
   font-weight: 600;
 }
 

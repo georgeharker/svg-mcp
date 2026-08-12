@@ -26,6 +26,7 @@ from .annotate import (
     edit_table,
 )
 from .chart import (
+    AxesSpec,
     BarData,
     ChartData,
     ChartEdit,
@@ -38,6 +39,7 @@ from .chart import (
     Series,
     Slice,
     SparklineData,
+    TickFormat,
     add_chart,
     edit_chart,
 )
@@ -246,6 +248,7 @@ __all__ = [
     "layout_diagram",
     "reflow",
     # chart facades
+    "AxesSpec",
     "BarData",
     "ChartData",
     "ChartEdit",
@@ -258,6 +261,7 @@ __all__ = [
     "Series",
     "Slice",
     "SparklineData",
+    "TickFormat",
     "add_chart",
     "edit_chart",
     # annotation facades

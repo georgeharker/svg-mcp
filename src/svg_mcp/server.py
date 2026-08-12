@@ -190,8 +190,15 @@ CHARTS
   the tick labels so nothing is clipped, and paints each series from the theme's palette in
   series order. It works with no theme loaded: charts are the one category the bundled default
   styles outright.
-- Scales are linear; x is categorical (`bar`) or numeric (`line`/`scatter`). No log scales, no
-  stacking, no error bars — if you need one, the answer is a different picture, not a hack.
+- `axes=` frames the plot when the defaults won't do: `y_min`/`y_max` (and `x_min`/`x_max` on a
+  numeric x) pin the scale so two charts compare honestly — data outside a pinned range is
+  clipped to the plot, never drawn over the axis; `ticks`/`x_ticks` take a target count or an
+  explicit list; `tick_format` writes the labels as plain/percent/currency/si/fixed (a closed
+  vocabulary, no format strings); `gridlines` and `tick_marks` and `x_tick_rotate` do the rest.
+- `scale="log"` is available on the value axis, for strictly positive data. Bars on it measure
+  from the axis minimum rather than from zero, because a log axis has no zero to measure from.
+- Still out of scope: statistical transforms, a second y axis, colormaps. If you need one, the
+  answer is a different picture, not a hack.
 - `edit_chart(target, data=…)` re-derives the whole plot in place, keeping the group's id,
   classes and position. `get_params` hands the data back exactly as it went in.
 
@@ -3665,6 +3672,7 @@ def add_chart(
     title: str | None = None,
     x_label: str | None = None,
     y_label: str | None = None,
+    axes: ops.AxesSpec | None = None,
     parent: str | None = None,
     name: str | None = None,
     style: ShapeStyle | None = None,
@@ -3679,15 +3687,18 @@ def add_chart(
     charts are the one category the bundled default styles outright.
 
     The shape of `data` depends on `kind`:
-      - bar: {categories: [str], series: [{name, values: [float]}]} — one value per category
-        per series; more than one series draws them side by side within each category.
-      - line: {series: [{name, points: [[x, y]]}], points: bool, area: bool}
-      - scatter: {series: [{name, points: [[x, y]]}]}
-      - donut: {slices: [{label, value}]} — values must be positive.
-      - sparkline: {values: [float]} — a bare trend line, no axes/ticks/title, 120x32 by default.
+      - bar: {categories: [str], series: [{name, values: [float]}], hatch: bool} — one value per
+        category per series; more than one series draws them side by side within each category.
+      - line: {series: [{name, points: [[x, y]]}], points: bool, area: bool, hatch: bool,
+        marker: "circle"|"square"|"diamond"|"triangle"|"none", marker_size: float}
+      - scatter: {series: [{name, points: [[x, y]]}], marker, marker_size}
+      - donut: {slices: [{label, value}], hatch: bool} — values must be positive.
+      - sparkline: {values: [float], last_point: bool, extremes: bool, baseline: float} — a bare
+        trend line, no axes/ticks/title, 120x32 by default.
 
-    Scales are linear and x is categorical (bar) or numeric (line/scatter). No log scales, no
-    stacking, no error bars. Edit it later with `edit_chart`, which re-derives the whole picture.
+    `hatch` fills each series with diagonal lines in its own colour, so the series stay apart in
+    print and in greyscale. x is categorical (bar) or numeric (line/scatter). No statistical
+    transforms, no second y axis, no colormaps. Edit it later with `edit_chart`.
 
     Args:
         kind: Which plot to draw.
@@ -3699,6 +3710,16 @@ def add_chart(
         title: Centered above the plot. Ignored by `sparkline`.
         x_label: What the x axis measures. Ignored by `donut` and `sparkline`.
         y_label: What the y axis measures; drawn rotated. Ignored by `donut` and `sparkline`.
+        axes: How to frame the plot; omit for limits from the data, five-ish 1/2/5 ticks, plain
+            labels, horizontal gridlines and no tick marks. Fields: `y_min`/`y_max` pin the value
+            axis (either alone works; data outside a pinned range is CLIPPED to the plot),
+            `x_min`/`x_max` the same for a numeric x; `scale: "log"` (strictly positive data
+            only — bars then measure from the axis minimum, not zero); `ticks`/`x_ticks` as a
+            target COUNT or an explicit list of values (out-of-range ones are dropped);
+            `tick_format`/`x_tick_format` = {style: "plain"|"percent"|"currency"|"si"|"fixed",
+            decimals, prefix, suffix, thousands}; `gridlines: "x"|"y"|"both"|"none"`;
+            `tick_marks` in px; `x_tick_rotate` in degrees (negative reads bottom-left up).
+            Ignored by `donut` and `sparkline`.
         parent: Group/layer id (or name); omit for the document root.
         name: Friendly label for the group.
         style: Inline style on the group (wins over the theme).
@@ -3720,6 +3741,7 @@ def add_chart(
         title=title,
         x_label=x_label,
         y_label=y_label,
+        axes=axes,
         parent=parent,
         name=name,
         style=_style(style),
@@ -3741,8 +3763,9 @@ def edit_chart(
     y_label: str | None = None,
     width: float | None = None,
     height: float | None = None,
+    axes: ops.AxesSpec | None = None,
 ) -> dict[str, str | int | None]:
-    """Edit a chart by its SPEC — new data, new labels, a new box — and re-derive the picture.
+    """Edit a chart by its SPEC — new data, new labels, new axes, a new box — and re-derive it.
 
     The chart's contents are rebuilt from scratch, not patched: ticks, margins and marks are a
     pure function of the data and the box, so re-deriving them is both cheap and the only way to
@@ -3759,6 +3782,8 @@ def edit_chart(
         y_label: New y axis title ("" removes it).
         width: New width.
         height: New height.
+        axes: Replacement axes description (see `add_chart`); omit to keep the current one. It
+            is replaced whole, not merged — pass every field you still want.
 
     Returns:
         {id, tag, name, children} — `children` is how many top-level pieces the rebuild produced.
@@ -3772,6 +3797,7 @@ def edit_chart(
         y_label=y_label,
         width=width,
         height=height,
+        axes=axes,
     )
     return {**result.ref.as_dict(), "children": result.children}
 

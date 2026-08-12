@@ -1,0 +1,58 @@
+/* A stand-in for the bundled default's chart rules, differing in exactly one thing that matters:
+ * --font names a family nothing has installed, so text measurement is deterministic everywhere.
+ * The chart size tokens are stated at the default's own values, so a chart dressed by this theme
+ * lays out identically to one dressed by the default. */
+
+:root {
+  --font: ZzMetricFreeSans;
+  --chart-grid: #dde1e6;
+  --donut-hole: 0.6;
+  --chart-tick-size: 10px;
+  --chart-axis-label-size: 11px;
+  --chart-title-size: 13px;
+  --chart-gap: 8px;
+}
+
+/** A chart facade. */
+.chart { font-family: var(--font) }
+
+/** Bars, snapped to the pixel grid like the default's. */
+.chart--bar { shape-rendering: crispEdges }
+
+/** A sparkline. */
+.chart--sparkline { stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round }
+
+/** The two axis lines. */
+.axis { stroke: #1a1d21; stroke-width: 1; fill: none }
+
+/** A gridline at a tick. */
+.gridline { stroke: var(--chart-grid); stroke-width: 1; fill: none }
+
+/** A tick mark: the short rule outside the plot at each tick. */
+.tick { stroke: #1a1d21; stroke-width: 1; fill: none }
+
+/** A tick label. */
+.tick-label { fill: #6b7280; stroke: none; font-family: var(--font); font-size: var(--chart-tick-size) }
+
+/** An axis title. */
+.axis-label { fill: #6b7280; stroke: none; font-family: var(--font); font-size: var(--chart-axis-label-size) }
+
+/** A chart title. */
+.chart-title { fill: #1a1d21; stroke: none; font-family: var(--font); font-size: var(--chart-title-size) }
+
+/** Series 1. */
+.series-1 { fill: #4477aa; stroke: #4477aa }
+/** Series 2. */
+.series-2 { fill: #ee6677; stroke: #ee6677 }
+/** Series 3. */
+.series-3 { fill: #228833; stroke: #228833 }
+/** Series 4. */
+.series-4 { fill: #ccbb44; stroke: #ccbb44 }
+/** Series 5. */
+.series-5 { fill: #66ccee; stroke: #66ccee }
+/** Series 6. */
+.series-6 { fill: #aa3377; stroke: #aa3377 }
+/** Series 7. */
+.series-7 { fill: #bbbbbb; stroke: #bbbbbb }
+/** Series 8. */
+.series-8 { fill: #44aa99; stroke: #44aa99 }

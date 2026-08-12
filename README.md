@@ -221,9 +221,11 @@ facade families (diagrams, charts, annotations), with ruff/mypy clean and the te
   after moves, and `layout_diagram` (layered/tree/grid) for zero-coordinate authoring. See
   [`docs/diagrams.md`](./docs/diagrams.md).
 - **Charts** — data-parametric bar/line/donut/scatter/sparkline with nice-number ticks and
-  margins measured from the actual tick labels; `edit_chart` re-derives the picture from new
-  data. Deliberately not a plotting library (no log scales/stacking/subplots — `import_svg`
-  matplotlib output for that).
+  margins measured from the actual tick labels; an `axes=` spec for pinned (and clipped) limits,
+  tick counts or explicit ticks, percent/currency/SI labels, gridlines, tick marks and log
+  scales; `edit_chart` re-derives the picture from new data. Deliberately not a plotting library
+  (no statistical transforms, secondary axes or colormaps — `import_svg` matplotlib output for
+  that).
 - **Annotations** — `add_legend()` generated from what the document uses (swatches wear the
   real theme classes), `add_callout` cards whose leader lines point at node **ids** and
   survive `reflow`, `add_table` with measured columns, `add_callout_card` with kind-colored

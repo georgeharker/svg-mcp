@@ -77,9 +77,13 @@ repeats — so two charts of the same series in the same document agree on colou
 saying so. Order the series meaningfully and that agreement is free; shuffle them between charts
 and you have quietly told the reader they are looking at different things.
 
-Scales are linear and the x axis is either categorical (`bar`) or numeric (`line`, `scatter`).
-There is no log scale, no stacking, no error bar: those are different promises about what the
-picture means, and a facade that faked them would be worse than not having them.
+The x axis is either categorical (`bar`) or numeric (`line`, `scatter`). Pass `axes=` to frame
+the plot yourself: pinned limits (`y_min`/`y_max`, which is what makes two charts comparable and
+which CLIPS anything outside the window rather than letting it spill over the axis), a tick count
+or an explicit tick list, a tick format from a closed vocabulary, gridlines, tick marks, and
+`scale="log"` for strictly positive data. There is still no error bar and no second axis: those
+are different promises about what the picture means, and a facade that faked them would be worse
+than not having them.
 
 A `sparkline` is deliberately bare — no axes, no ticks, no title, just the shape of the trend,
 height-normalized. It is meant to sit inline next to the number it qualifies, and it will pair

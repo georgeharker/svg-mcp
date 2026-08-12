@@ -1,0 +1,7 @@
+/* One token, changed: the tick type goes up half again. Nothing else moves, so anything that
+ * differs between the base and this variant is the size token doing its job — the plot indenting
+ * further because the labels it measured are wider. */
+
+:root {
+  --chart-tick-size: 16px;
+}

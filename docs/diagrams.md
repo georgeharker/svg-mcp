@@ -68,15 +68,36 @@ calling it, never by exempting individual nodes.
 ## Charts
 
 `add_chart(kind, data, ...)` — data-parametric presentation charts: `bar` (plain/grouped),
-`line` (points/area options), `donut`, `scatter`, `sparkline`. Scales are linear with
-nice-number ticks; margins are **measured from the actual tick labels**; series take the
-theme's `--series-1..8` palette in order. `edit_chart` replaces the data and re-derives
-the whole picture while the group keeps its id, classes, and position.
+`line` (points/area options), `donut`, `scatter`, `sparkline`. Ticks land on the 1/2/5
+ladder; margins are **measured from the actual tick labels**; series take the theme's
+`--series-1..8` palette in order. `edit_chart` replaces the data and re-derives the whole
+picture while the group keeps its id, classes, and position.
 
 ![chart sheet](./img/facade-charts.png)
 
-Deliberately out of scope: log scales, stacking, subplots, statistical transforms — data
-that doesn't fit a tool-call argument belongs to a plotting library; `import_svg` its
+### Axes
+
+`axes=` is one optional argument carrying everything about the frame. Omit it and a chart
+draws exactly what it always drew.
+
+| field | what it does |
+| --- | --- |
+| `y_min` / `y_max` | Pin the value axis — the way two charts are made comparable. Either alone works; the other end stays derived. Data outside a pinned range is **clipped** to the plot rect (a `clipPath` on the series groups), so a bar can't spill past the axis it's measured against. Pinning an end also suppresses the automatic zero-inclusion at that end. |
+| `x_min` / `x_max` | The same for a numeric x (`line`/`scatter`). Ignored where x is categorical. |
+| `scale` | `"linear"` (default) or `"log"`. A log axis needs strictly positive data *and* limits — a non-positive value is an error naming it. Ticks fall on decade boundaries, subdivided 1/2/5 while the span is under about two decades. **Bars on a log scale measure from the axis minimum, not from zero**, because there is no zero to measure from. |
+| `ticks` / `x_ticks` | A target count, or the exact values to tick at. Values outside the range are dropped, not refused. |
+| `tick_format` / `x_tick_format` | `{style, decimals, prefix, suffix, thousands}` with `style` one of `plain`, `percent` (×100, owns the `%`), `currency` (`prefix` or `$`), `si` (k/M/G/T, m/µ/n below 1), `fixed`. A **closed vocabulary** — an arbitrary format string is how an axis ends up with five identical labels. |
+| `gridlines` | `"y"` (default), `"x"`, `"both"`, `"none"`. |
+| `tick_marks` | Length in px of a mark outside the plot at each tick; they participate in the measured margins. |
+| `x_tick_rotate` | Degrees; negative reads bottom-left to top-right. The bottom margin grows to the turned label's real extent. |
+
+Per-kind extras: `marker`/`marker_size` on `line`/`scatter` (circle, square, diamond,
+triangle, none), `hatch` on `bar`/`donut`/`line` areas (diagonal fill in each series'
+own colour, so print and greyscale keep them apart), and `last_point`/`extremes`/`baseline`
+on a `sparkline`.
+
+Deliberately out of scope: statistical transforms, multiple/secondary axes, colormaps —
+data that doesn't fit a tool-call argument belongs to a plotting library; `import_svg` its
 output instead.
 
 ## Annotations
