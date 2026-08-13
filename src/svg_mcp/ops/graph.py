@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from ..model.document import Document
 from ..model.errors import InvalidArgument
@@ -55,6 +55,34 @@ GraphLayout = Literal["layered", "tree", "grid", "none"]
 
 
 # --- the producer's wire shape -----------------------------------------------
+
+
+def _numeric(value: JsonValue) -> float | None:
+    """The magnitude ``value`` carries, or None if it carries none.
+
+    A bool is an ``int`` in Python and "True symbols" is not a quantity. A numeric STRING is one:
+    a producer that spells its numbers as text ("12") still means twelve, and a JSON export that
+    quoted its counts is not a different graph.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            number = float(value)
+        except ValueError:
+            return None
+        return number if math.isfinite(number) else None
+    return None
+
+
+_CARRIED_SIZE = "\x00size"
+"""Where an unreadable ``size`` waits between :class:`GraphNode`'s two validators.
+
+A NUL is not a key any producer can send, so parking the value here cannot collide with one of
+the extras the export genuinely carries.
+"""
 
 
 class GraphNode(BaseModel):
@@ -81,7 +109,35 @@ class GraphNode(BaseModel):
 
     Wins over whatever ``size_field`` names, on the same principle that an explicit ``label``
     beats ``label_mode``: a value stated per node beats a rule stated once.
+
+    An explicit size must be NUMERIC (a number, or a string spelling one). ``size`` is a common
+    enough word that some producers use it for something else — ``"12kB"``, ``"large"`` — and such
+    a value is CARRIED, not interpreted and not rejected: the field stays unset, the original
+    stays among the extra keys, and ``size_field="size"`` can still name it (and be told, in those
+    words, that it holds no numbers).
     """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _park_an_unreadable_size(cls, data: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        """Take a non-numeric ``size`` off the field, parking it where the after-validator finds it.
+
+        The whole promise of this module is that a producer's export PASTES IN, and one key of one
+        node spelling its bytes rather than its extent must not fail the validation of the entire
+        graph. It must not vanish either — hence the park rather than a drop.
+        """
+        raw = data.get("size")
+        if raw is None or _numeric(raw) is not None:
+            return data
+        return {key: value for key, value in data.items() if key != "size"} | {_CARRIED_SIZE: raw}
+
+    @model_validator(mode="after")
+    def _carry_an_unreadable_size(self) -> GraphNode:
+        """Put the parked value back under its own name, now the field can no longer claim it."""
+        extra = self.__pydantic_extra__
+        if extra is not None and _CARRIED_SIZE in extra:
+            extra["size"] = extra.pop(_CARRIED_SIZE)
+        return self
 
 
 class GraphGroup(BaseModel):
@@ -221,7 +277,17 @@ _EXTENSIONS = frozenset({
 
 
 def _names_a_file(text: str) -> bool:
-    return any(separator in text for separator in _PATH_SEPARATORS)
+    """Whether this id names a FILE: it has a path separator, or a recognised extension.
+
+    The second limb is what a FLAT export needs. ``diagram.py`` carries no directories at all, so
+    on the first limb alone the dot would be read as a hierarchy step and the box captioned
+    ``py`` — every Python file in the graph captioned ``py``, every Go file ``go``. A dot-tail the
+    closed list recognises settles it: this is a filename, and its extension is not its name.
+    """
+    if any(separator in text for separator in _PATH_SEPARATORS):
+        return True
+    head, dot, tail = text.rpartition(".")
+    return bool(dot and head) and tail.lower() in _EXTENSIONS
 
 
 def _separators(file_shaped: bool) -> tuple[str, ...]:
@@ -317,12 +383,7 @@ def _magnitude(node: GraphNode, size_field: str | None) -> float | None:
         return node.size
     if size_field is None:
         return None
-    raw = (node.model_extra or {}).get(size_field)
-    if isinstance(raw, bool):  # bool is an int, and "True symbols" is not a magnitude
-        return None
-    if isinstance(raw, int | float):
-        return float(raw)
-    return None  # a key that is there but holds no number is not a magnitude
+    return _numeric((node.model_extra or {}).get(size_field))
 
 
 def _scale(value: float, low: float, high: float, span: tuple[float, float], power: float) -> float:
@@ -334,7 +395,13 @@ def _scale(value: float, low: float, high: float, span: tuple[float, float], pow
     def lift(number: float) -> float:
         return math.pow(max(number, 0.0), power)
 
-    reach = (lift(value) - lift(smallest)) / (lift(largest) - lift(smallest))
+    floor, ceiling = lift(smallest), lift(largest)
+    if ceiling <= floor:
+        # The lift collapsed the span: every drawn magnitude is <= 0, so the data varies but
+        # not in any quantity a box can carry. That is the all-equal case in disguise, and it
+        # takes the all-equal answer rather than dividing by the zero it just produced.
+        return low
+    reach = (lift(value) - floor) / (ceiling - floor)
     return low + (high - low) * min(max(reach, 0.0), 1.0)
 
 
@@ -486,7 +553,6 @@ def _resolve_kinds(
     category: Literal["shape", "connector"],
     kinds: Sequence[str],
     default: str,
-    themed: bool,
 ) -> tuple[dict[str, str], list[str]]:
     """Map every named kind to one the theme can dress, falling back to ``default`` where it can't.
 
@@ -500,11 +566,18 @@ def _resolve_kinds(
     whole export over vocabulary would defeat the point of pasting one in. The CALLER's own
     ``default_node_kind``/``default_edge_kind`` is different — that one is a choice, not data, so
     an unservable default still raises.
+
+    The question is asked with ``themed=True`` no matter how the ingest was called, because what
+    it decides is BOOKKEEPING, not dressing: which kind each node's spec records, and therefore
+    which parallel edges are the same edge. An unthemed ingest skips the class attachment — that
+    is all ``themed=False`` ever meant — but it must not skip the substitution, or an unthemed
+    document would silently store "calls" where a themed one stores "data": two arrows where there
+    should be one, an unreported kind, and a spec that the first themed edit of it chokes on.
     """
 
     def dress(kind: str) -> None:
         prim = "edge" if category == "connector" else _shape_for(serving_theme(doc, kind), kind)
-        resolve_dressing(doc, category=category, prim=prim, role=kind, themed=themed)
+        resolve_dressing(doc, category=category, prim=prim, role=kind, themed=True)
 
     dress(default)
     mapped: dict[str, str] = {}
@@ -562,9 +635,12 @@ def add_diagram_graph(
     does the mechanical part, in full, and reports exactly what it did.
 
     The order of operations is fixed, because each step decides what the next one sees:
-    collapse groups → filter nodes → drop edges the filter orphaned → drop self edges (which is
-    where an edge INSIDE a collapsed group goes) → reject unknown endpoints → resolve kinds →
+    collapse groups → filter nodes → reject unknown endpoints → drop edges the filter orphaned →
+    drop self edges (which is where an edge INSIDE a collapsed group goes) → resolve kinds →
     merge parallels → draw → lay out.
+
+    Unknown endpoints are rejected BEFORE either drop, against every id the export declared: an
+    edge that is both a hole in the data and a casualty of the filter is a hole first.
 
     Collapsing runs FIRST so that ``include``/``exclude`` see the graph as drawn: a group is
     filtered by its own id, and a member no longer exists as a separate thing to name.
@@ -597,12 +673,27 @@ def add_diagram_graph(
         value = _magnitude(node, size_field)
         if value is not None:
             magnitude[node.id] = value
-    if size_field is not None and not magnitude:
-        offered = sorted({key for node in nodes for key in (node.model_extra or {})})
-        raise InvalidArgument(
-            f"size_field={size_field!r} names a key no node carries; the nodes offer: "
-            f"{', '.join(offered) or '(no extra keys at all)'}"
-        )
+    if size_field is not None:
+        # Asked of the KEY, not of the result: a graph whose nodes also state explicit sizes would
+        # otherwise have a mistyped size_field pass unmentioned, quietly sizing the boxes by
+        # something the caller never asked for. And a key that IS there but holds no numbers is a
+        # different mistake from one nobody carries — told apart, since the fix differs.
+        carried: list[JsonValue] = []
+        for node in nodes:
+            extra = node.model_extra or {}
+            if size_field in extra:
+                carried.append(extra[size_field])
+        if not carried:
+            offered = sorted({key for node in nodes for key in (node.model_extra or {})})
+            raise InvalidArgument(
+                f"size_field={size_field!r} names a key no node carries; the nodes offer: "
+                f"{', '.join(offered) or '(no extra keys at all)'}"
+            )
+        if not any(_numeric(value) is not None for value in carried):
+            raise InvalidArgument(
+                f"size_field={size_field!r} names a key that carries no numeric values "
+                f"(e.g. {carried[0]!r}); a size is a magnitude, so it must be a number"
+            )
 
     drawable, representative = _collapse(nodes, collapse or ())
     for group in collapse or ():
@@ -624,18 +715,23 @@ def add_diagram_graph(
         source = representative.get(edge.source, edge.source)
         target = representative.get(edge.target, edge.target)
         endpoints = ((source, "source"), (target, "target"))
-        if any(end in seen and end not in kept_ids for end, _role in endpoints):
-            dropped_filtered += 1
-            continue
-        if source == target:
-            dropped_self += 1  # includes every edge that was internal to a collapsed group
-            continue
+        # FIRST, and against what the export DECLARED rather than what survived the filters: a
+        # hole in the data is a hole whatever else would have become of the edge. Checked later,
+        # a ghost that happened to name itself at both ends read as a self-edge, and a ghost
+        # opposite an excluded node read as collateral of the filter — a typo silently absorbed
+        # into a count, which is exactly the reading these counters exist to make impossible.
         for end, role in endpoints:
             if end not in seen:
                 raise InvalidArgument(
                     f"edge {edge.source!r} -> {edge.target!r} names {end!r} as its {role}, but no "
                     "node declares that id; add it to `nodes` (nodes are never auto-created)"
                 )
+        if any(end not in kept_ids for end, _role in endpoints):
+            dropped_filtered += 1  # declared, then filtered out: the caller's own decision
+            continue
+        if source == target:
+            dropped_self += 1  # includes every edge that was internal to a collapsed group
+            continue
         surviving.append((edge, source, target))
 
     for node in kept:
@@ -649,14 +745,12 @@ def add_diagram_graph(
         category="shape",
         kinds=[node.kind for node in kept if node.kind is not None],
         default=default_node_kind,
-        themed=themed,
     )
     edge_kinds, edge_defaulted = _resolve_kinds(
         doc,
         category="connector",
         kinds=[edge.kind for edge, _s, _t in surviving if edge.kind is not None],
         default=default_edge_kind,
-        themed=themed,
     )
 
     merged: dict[tuple[str, str, str], _Merged] = {}
@@ -671,7 +765,12 @@ def add_diagram_graph(
             if existing.label is None:
                 existing.label = edge.label
 
-    prefix = _shared_prefix([node.id for node in kept])
+    # A collapse group's id is the CALLER's word ("storage", "ab"), not the producer's, and it
+    # shares no hierarchy with the ids around it. Left in, it drives the common prefix to nothing
+    # and every remaining box is captioned with the full path that `trimmed` exists to remove —
+    # collapsing part of a graph would silently re-caption the part it did not touch.
+    group_ids = {group.id for group in collapse or ()}
+    prefix = _shared_prefix([node.id for node in kept if node.id not in group_ids])
     dims = [span for span in (scale_width, scale_height) if span is not None]
     # One scaled dimension carries the quantity on its own; two share it, so each takes the root.
     power = 1.0 / len(dims) if dims else 1.0
@@ -684,7 +783,10 @@ def add_diagram_graph(
     with _rollback(doc, created):
         for node in kept:
             kind = node_kinds[node.kind] if node.kind is not None else default_node_kind
-            caption = _derive_label(node, label_mode, prefix)
+            # A group says its own name: it was never one of the producer's ids, so there is no
+            # prefix to trim off it and no extension to shave.
+            mode: LabelMode = "id" if node.id in group_ids else label_mode
+            caption = _derive_label(node, mode, prefix)
             value = magnitude.get(node.id)
             if size_labels and value is not None:
                 caption = f"{caption} ({_format_weight(value)})"
@@ -740,7 +842,7 @@ def add_diagram_graph(
     return GraphImport(
         nodes_created=len(kept),
         edges_created=len(merged),
-        groups_created=sum(1 for node in kept if node.id in {g.id for g in collapse or ()}),
+        groups_created=sum(1 for node in kept if node.id in group_ids),
         nodes_collapsed=len(representative),
         self_edges_dropped=dropped_self,
         edges_dropped_filtered=dropped_filtered,

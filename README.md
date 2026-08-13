@@ -594,10 +594,14 @@ export_svg()                    # final SVG source string
   `set_active_document`. Call `current_context()` to re-anchor (active id, open docs, outline).
 - **Targets by id or name.** Every `target`/`parent`/`content` arg takes a node's returned id
   **or** the friendly `name` you gave it. Name things you'll revisit; reason via `find(name=…)`
-  and `outline`. **Names should be unique** — a name matching several nodes is rejected (no silent
-  guess); disambiguate with a hierarchy path `ancestor/name` (each segment an id or name) or the
-  id. Each chat/connection has its own isolated set of documents (`current_context` reports the
-  `session_id`).
+  and `outline`. A bare handle is an **id**, else an **exact name** — never a hierarchy query, so
+  a name containing `/` (graph imports name nodes `src/ops/x.py`) just works. Be explicit when you
+  must: `id:x`, `name:x` (verbatim, slashes and all), or `path:ancestor/name` for the
+  ancestor-chain query (each segment an id or name, gaps allowed) that disambiguates a duplicated
+  name; the prefix is stripped once, so any literal name is expressible (`name:name:foo`).
+  **Names should be unique** — a name matching several nodes is rejected (no silent guess), and
+  the error lists a handle per candidate. Each chat/connection has its own isolated set of
+  documents (`current_context` reports the `session_id`).
 - **Stacking.** Later siblings paint on top. Restack relative to a sibling with
   `reparent(target, above=<node>)` / `below=<node>` instead of counting child indices.
 - **Coordinates.** User units, origin top-left, y increases downward.

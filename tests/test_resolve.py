@@ -115,3 +115,40 @@ def test_reparent_above_places_on_top() -> None:
     ops.reparent(doc, "bezel", None, above="gloss")
     svg = export_svg(doc)
     assert svg.index(gloss.id) < svg.index(bezel.id)  # bezel moved after gloss → on top
+
+
+# --- review fixes ------------------------------------------------------------
+
+
+def _candidates(message: str) -> list[str]:
+    """The pasteable handle out of each candidate an ambiguity error listed."""
+    listed = message.split("Candidates: ")[1]
+    return [entry.split(" (")[0] for entry in listed.split("; ")]
+
+
+def test_ambiguity_hints_resolve_when_the_name_itself_contains_a_slash() -> None:
+    # A graph import names its nodes after ids like `src/ops/x.py`. Suggesting
+    # `path:<parent>/src/ops/x.py` answers "which one?" with a handle that resolves to neither:
+    # the query splits the name into segments no node ever had.
+    _, doc = DocumentStore().create(100, 100)
+    grp = ops.create_group(doc, name="bezel")
+    inner = ops.add_rect(doc, x=0, y=0, width=10, height=10, name="src/ops/x.py", parent=grp.id)
+    outer = ops.add_rect(doc, x=20, y=0, width=10, height=10, name="src/ops/x.py")
+    with pytest.raises(AmbiguousReference) as exc:
+        doc.resolve("src/ops/x.py")
+    handles = _candidates(str(exc.value))
+    assert len(handles) == 2
+    assert {str(doc.resolve(handle).get_id()) for handle in handles} == {inner.id, outer.id}
+
+
+def test_ambiguity_hints_resolve_for_two_duplicates_at_the_document_root() -> None:
+    # Neither has an ancestor to qualify it, and the bare name it used to suggest is the very
+    # thing that was just rejected as ambiguous.
+    _, doc = DocumentStore().create(100, 100)
+    first = ops.add_rect(doc, x=0, y=0, width=10, height=10, name="sheen")
+    second = ops.add_rect(doc, x=20, y=0, width=10, height=10, name="sheen")
+    with pytest.raises(AmbiguousReference) as exc:
+        doc.resolve("sheen")
+    handles = _candidates(str(exc.value))
+    assert len(handles) == 2
+    assert {str(doc.resolve(handle).get_id()) for handle in handles} == {first.id, second.id}

@@ -220,8 +220,8 @@ class Document:
             return renderable[0]
         hints = "; ".join(self._qualify(m, name) for m in matches)
         raise AmbiguousReference(
-            f"name {name!r} matches {len(matches)} nodes — qualify by hierarchy "
-            f"(e.g. {self._qualify(matches[0], name)}) or use the node id. Candidates: {hints}"
+            f"name {name!r} matches {len(matches)} nodes — name one of them exactly "
+            f"(e.g. {self._qualify(matches[0], name)}). Candidates: {hints}"
         )
 
     @staticmethod
@@ -250,16 +250,29 @@ class Document:
         return str(node.get_id()) == token or getattr(node, "label", None) == token
 
     def _qualify(self, node: BaseElement, name: str) -> str:
-        """A disambiguating reference for ``node``: ``path:parent/name`` (parent by name or id).
+        """A handle that RESOLVES to ``node``: ``id:…``, plus a ``path:`` form where one holds.
 
-        Spelled with its prefix because it is offered as something to PASS BACK, and a bare
-        ``parent/name`` no longer resolves as a query.
+        Every hint here is offered to be PASTED BACK, so it is spelled with its prefix and,
+        crucially, only offered once it has been tried. ``id:`` always works and is always
+        unambiguous, so it is the one thing every candidate carries. The path form is an extra —
+        more legible when it holds, and quietly dropped when it does not: a name or a parent
+        containing ``/`` does not survive being split on ``/``, a root-level node has no ancestor
+        to name, and two candidates under identically-named parents stay ambiguous however the
+        query is spelled. Suggesting any of those would answer "which one did you mean?" with a
+        handle that asks the same question again.
         """
+        handle = f"id:{node.get_id()}"
         parent = node.getparent()
-        if parent is None or parent is self.svg:
-            return f"{name} ({node.get_id()})"
+        if parent is None or parent is self.svg or "/" in name:
+            return handle
         tag = getattr(parent, "label", None) or str(parent.get_id())
-        return f"path:{tag}/{name} ({node.get_id()})"
+        if "/" in tag:
+            return handle
+        try:
+            resolved = self._resolve_path(f"{tag}/{name}")
+        except (NodeNotFound, AmbiguousReference):
+            return handle
+        return f"path:{tag}/{name} ({handle})" if resolved is node else handle
 
     def _resolve_path(self, target: str) -> BaseElement:
         """Resolve an ``a/b/c`` path: find ``c`` whose ancestors match ``b`` then ``a`` in order."""

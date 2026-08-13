@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from collections.abc import Mapping
+from typing import TypedDict, Unpack
 
 import pytest
 
@@ -12,21 +13,24 @@ from svg_mcp.model import Document
 from svg_mcp.model.errors import InvalidArgument
 from svg_mcp.ops import graph as graph_ops
 from svg_mcp.ops.diagram import _box_of, read_edge_spec, read_node_spec
-from svg_mcp.ops.graph import GraphEdge, GraphGroup, GraphImport, GraphNode
+from svg_mcp.ops.graph import GraphEdge, GraphGroup, GraphImport, GraphNode, LabelMode
 from svg_mcp.render import get_renderer
 from svg_mcp.render.base import RenderRequest
 from svg_mcp.serialize import export_svg
 from svg_mcp.session import DocumentStore
 
+Wire = Mapping[str, str | int | float | list[str]]
+"""One node, edge or group exactly as a producer wires it — the value types an export can hold."""
+
 # A real code-graph export, verbatim in shape: `from`/`to`, and per-object keys we never asked
 # for. Everything in this module is fed through model_validate so the test exercises the same
 # parse an MCP call would.
-EXPORT_NODES: list[Mapping[str, object]] = [
+EXPORT_NODES: list[Wire] = [
     {"id": "src/svg_mcp/ops/diagram.py", "file": "src/svg_mcp/ops/diagram.py", "symbols": 177},
     {"id": "src/svg_mcp/ops/annotate.py", "file": "src/svg_mcp/ops/annotate.py", "symbols": 46},
     {"id": "src/svg_mcp/ops/themes.py", "file": "src/svg_mcp/ops/themes.py", "symbols": 92},
 ]
-EXPORT_EDGES: list[Mapping[str, object]] = [
+EXPORT_EDGES: list[Wire] = [
     {"from": "src/svg_mcp/ops/annotate.py", "to": "src/svg_mcp/ops/diagram.py",
      "kind": "calls", "weight": 49},
     {"from": "src/svg_mcp/ops/diagram.py", "to": "src/svg_mcp/ops/themes.py",
@@ -34,29 +38,38 @@ EXPORT_EDGES: list[Mapping[str, object]] = [
 ]
 
 
+class IngestOptions(TypedDict, total=False):
+    """The ingest knobs `_ingest` forwards — spelled out so the forwarding is type-checked."""
+
+    label_mode: LabelMode
+    size_field: str | None
+    size_labels: bool
+    themed: bool
+
+
 def _doc() -> Document:
     return DocumentStore().create(900, 600)[1]
 
 
-def _nodes(*raw: Mapping[str, object]) -> list[GraphNode]:
+def _nodes(*raw: Wire) -> list[GraphNode]:
     return [GraphNode.model_validate(entry) for entry in raw]
 
 
-def _edges(*raw: Mapping[str, object]) -> list[GraphEdge]:
+def _edges(*raw: Wire) -> list[GraphEdge]:
     return [GraphEdge.model_validate(entry) for entry in raw]
 
 
-def _groups(*raw: Mapping[str, object]) -> list[GraphGroup]:
+def _groups(*raw: Wire) -> list[GraphGroup]:
     return [GraphGroup.model_validate(entry) for entry in raw]
 
 
-def _ingest(doc: Document, **kwargs: object) -> GraphImport:
+def _ingest(doc: Document, **kwargs: Unpack[IngestOptions]) -> GraphImport:
     """The realistic export, ingested — every test that does not care about the data uses this."""
     return ops.add_diagram_graph(
         doc,
         nodes=_nodes(*EXPORT_NODES),
         edges=_edges(*EXPORT_EDGES),
-        **kwargs,  # type: ignore[arg-type]
+        **kwargs,
     )
 
 
@@ -766,11 +779,28 @@ def test_a_failure_part_way_through_creation_leaves_the_document_untouched(
     real = ops.add_diagram_edge
     calls = {"n": 0}
 
-    def failing(*args: object, **kwargs: object) -> ops.PlacedEdge:
+    def failing(
+        doc: Document,
+        *,
+        source: str,
+        target: str,
+        kind: str = "data",
+        label: str | None = None,
+        parent: str | None = None,
+        themed: bool = True,
+    ) -> ops.PlacedEdge:
         calls["n"] += 1
         if calls["n"] == 2:
             raise InvalidArgument("boom, half way through the edges")
-        return real(*args, **kwargs)  # type: ignore[arg-type]
+        return real(
+            doc,
+            source=source,
+            target=target,
+            kind=kind,
+            label=label,
+            parent=parent,
+            themed=themed,
+        )
 
     monkeypatch.setattr(graph_ops, "add_diagram_edge", failing)
     with pytest.raises(InvalidArgument, match="boom"):
@@ -816,3 +846,187 @@ def test_an_eight_node_graph_renders_with_its_boxes_in_the_theme_s_paint() -> No
     pixel = image.getpixel((int(box.x + box.w / 2), int(box.y + 4)))
     assert isinstance(pixel, tuple)
     assert pixel[:3] == (236, 238, 241)  # the default theme's service fill
+
+
+# --- 8. review fixes ---------------------------------------------------------
+#
+# One test per execution-confirmed finding from the review of the graph-ingest work. Each
+# reproduces the exact input that misbehaved, so a regression names the reading that was wrong
+# rather than just a number that changed.
+
+
+def test_magnitudes_that_are_all_at_or_below_zero_scale_uniformly() -> None:
+    # The compression exponent lifts every magnitude through `max(n, 0)`, so a span that varies
+    # only below zero collapses to a single point AFTER the lift — and the span it was checked
+    # against, before it, looked perfectly healthy. That divided by zero.
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "a", "size": -5}, {"id": "b", "size": 0}),
+        edges=[],
+        scale_width=(80.0, 240.0),
+    )
+    boxes = _boxes(doc, result)
+    # No variation a box can carry is no reason to draw a difference: the all-equal answer.
+    assert boxes["a"][0] == pytest.approx(80.0)
+    assert boxes["b"][0] == pytest.approx(80.0)
+
+
+def test_an_unthemed_ingest_still_resolves_its_kinds_and_merges_on_the_resolved_one() -> None:
+    # `themed=False` withholds the CLASS, not the bookkeeping. Skipping the resolution left the
+    # producer's own vocabulary in the specs: two arrows where a themed ingest draws one, and
+    # nothing reported about the substitution that silently did not happen.
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "a"}, {"id": "b"}),
+        edges=_edges(
+            {"from": "a", "to": "b", "kind": "calls"},
+            {"from": "a", "to": "b", "kind": "imports"},
+        ),
+        themed=False,
+    )
+    assert result.edges_created == 1
+    assert result.kinds_defaulted == ["calls", "imports"]
+    assert {spec[2] for spec in _edge_specs(doc)} == {"data"}
+
+
+def test_a_ghost_naming_itself_at_both_ends_is_a_hole_not_a_self_edge() -> None:
+    doc = _doc()
+    with pytest.raises(InvalidArgument) as raised:
+        ops.add_diagram_graph(
+            doc,
+            nodes=_nodes({"id": "a"}),
+            edges=_edges({"from": "ghost", "to": "ghost"}),
+        )
+    assert "'ghost'" in str(raised.value)
+    assert not _node_names(doc)
+
+
+def test_a_ghost_opposite_a_filtered_node_is_a_hole_not_a_dangling_edge() -> None:
+    # The endpoint the caller excluded is a decision; the typo beside it is still a hole, and
+    # counting the edge as filtered absorbed the typo into a number nobody reads as an error.
+    doc = _doc()
+    with pytest.raises(InvalidArgument) as raised:
+        ops.add_diagram_graph(
+            doc,
+            nodes=_nodes({"id": "a"}, {"id": "b"}),
+            edges=_edges({"from": "b", "to": "typoo"}),
+            exclude=["b"],
+        )
+    message = str(raised.value)
+    assert "'typoo'" in message and "target" in message
+    assert not _node_names(doc)
+
+
+def test_an_endpoint_that_was_declared_then_filtered_out_is_still_a_silent_drop() -> None:
+    # The other half of the same rule: a node that WAS declared and then filtered away leaves a
+    # legitimately dangling edge, which is counted rather than raised on.
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "a"}, {"id": "b"}),
+        edges=_edges({"from": "a", "to": "b"}),
+        exclude=["b"],
+    )
+    assert (result.edges_dropped_filtered, result.edges_created) == (1, 0)
+
+
+def test_a_mistyped_size_field_is_not_masked_by_a_node_that_states_its_own_size() -> None:
+    # The guard asked whether any magnitude came out, and an explicit `size` answers yes — so a
+    # size_field naming nothing at all sized the boxes by something the caller never asked for.
+    doc = _doc()
+    with pytest.raises(InvalidArgument) as raised:
+        ops.add_diagram_graph(
+            doc,
+            nodes=_nodes({"id": "a", "symbols": 10, "size": 3}),
+            edges=[],
+            size_field="symbol",
+        )
+    message = str(raised.value)
+    assert "no node carries" in message and "symbols" in message
+    assert not _node_names(doc)
+
+
+def test_a_size_field_whose_key_holds_no_numbers_says_that_rather_than_that_it_is_absent() -> None:
+    doc = _doc()
+    with pytest.raises(InvalidArgument) as raised:
+        ops.add_diagram_graph(
+            doc,
+            nodes=_nodes({"id": "a", "symbols": "many"}),
+            edges=[],
+            size_field="symbols",
+        )
+    message = str(raised.value)
+    assert "carries no numeric values" in message and "'many'" in message
+    assert "no node carries" not in message  # the contradictory reading it used to give
+    assert not _node_names(doc)
+
+
+def test_a_flat_filename_id_is_a_filename_not_a_dotted_name() -> None:
+    # An export with no directories at all: without a path separator to settle it, the dot read
+    # as a hierarchy step and captioned every Python file `py` and every Go file `go`.
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "diagram.py"}, {"id": "themes.py"}, {"id": "main.go"}),
+        edges=[],
+        label_mode="basename",
+    )
+    assert list(_labels(doc).values()) == ["diagram", "themes", "main"]
+
+    trimmed = _doc()
+    ops.add_diagram_graph(
+        trimmed,
+        nodes=_nodes({"id": "diagram.py"}, {"id": "themes.py"}, {"id": "main.go"}),
+        edges=[],
+    )
+    assert list(_labels(trimmed).values()) == ["diagram", "themes", "main"]
+
+
+def test_a_collapse_group_does_not_defeat_the_prefix_the_other_labels_trim() -> None:
+    # A group id is the caller's word, sharing no hierarchy with the producer's ids: left in the
+    # prefix computation it drove the common prefix to nothing, and collapsing part of a graph
+    # silently re-captioned the part it did not touch with its full path.
+    doc = _doc()
+    ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "pkg/a.py"}, {"id": "pkg/b.py"}, {"id": "pkg/c.py"}),
+        edges=[],
+        collapse=_groups({"id": "ab", "members": ["pkg/a.py", "pkg/b.py"]}),
+    )
+    assert _labels(doc) == {"ab": "ab", "pkg/c.py": "c"}
+
+
+def test_a_producer_size_key_that_is_not_a_number_is_carried_rather_than_rejected() -> None:
+    # `size` is a common enough word that an export means bytes by it. That must not fail the
+    # validation of the whole graph — nor vanish: size_field can still name it afterwards.
+    node = GraphNode.model_validate({"id": "img.png", "size": "12kB"})
+    assert node.size is None
+    assert (node.model_extra or {})["size"] == "12kB"
+
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc, nodes=[node], edges=[], scale_width=(200.0, 300.0), label_mode="id"
+    )
+    assert result.nodes_created == 1
+    assert _boxes(doc, result)["img.png"][0] < 200.0  # measured from the label, not scaled
+
+    named = _doc()
+    with pytest.raises(InvalidArgument, match="carries no numeric values"):
+        ops.add_diagram_graph(named, nodes=[node], edges=[], size_field="size")
+
+
+def test_a_size_spelled_as_a_numeric_string_is_still_a_magnitude() -> None:
+    doc = _doc()
+    result = ops.add_diagram_graph(
+        doc,
+        nodes=_nodes({"id": "a", "size": "12"}, {"id": "b", "size": 24}),
+        edges=[],
+        scale_width=(100.0, 200.0),
+        size_labels=True,
+    )
+    assert _labels(doc)["a"] == "a (12)"
+    boxes = _boxes(doc, result)
+    assert boxes["a"][0] == pytest.approx(100.0)
+    assert boxes["b"][0] == pytest.approx(200.0)
