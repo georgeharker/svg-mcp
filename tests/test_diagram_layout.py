@@ -755,3 +755,22 @@ def test_a_fitted_container_never_overflows_the_layout_origin() -> None:
         # The padded, label-headroomed box must sit inside the origin, not just the nodes.
         assert box[0] >= 20 - 1e-6
         assert box[1] >= 20 - 1e-6
+
+
+def test_lanes_charge_the_lane_pitch_not_the_node_gap() -> None:
+    # A rank threading many lanes must not blow its cross extent out to a multiple of the
+    # drawing: dummies are lines, not boxes, so the gap on either side of one is the small
+    # lane pitch. Observed before the fix: 3752u wide where 792u was right.
+    nodes = _nodes("a", "b", "c", "d", "e", "f", w=60.0, h=30.0)
+    # a fans out to everything two ranks down: four rank-spanning edges thread rank 1.
+    edges = [("a", "b"), ("b", "c"), ("a", "d"), ("a", "e"), ("a", "f"),
+             ("b", "d"), ("b", "e"), ("b", "f")]
+    placement = layout_layered(
+        nodes, edges, {}, direction="TB",
+        spacing_main=90.0, spacing_cross=40.0, origin_x=0.0, origin_y=0.0,
+    )
+    xs = [at[0] for at in placement.positions.values()]
+    spread = max(xs) - min(xs)
+    # 4 real nodes in the widest rank at 60u + node gaps + 4 thin lanes: generous ceiling of
+    # 600u; the node-gap-per-lane bug put this over 800.
+    assert spread < 600.0

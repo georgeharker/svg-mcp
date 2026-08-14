@@ -503,11 +503,14 @@ def layout_layered(
         for offset, band in zip(offsets, bands, strict=True)
     ]
 
+    dummy_ids = set(dummy_rank)
     cross_at: dict[str, float] = {}
     for index, layer in enumerate(layers):
         floor = -math.inf
+        previous_was_lane = False
         for position, slot in enumerate(layer):
             extent = sizes[slot][1]
+            is_lane = slot in dummy_ids
             anchors = [
                 cross_at[other] + sizes[other][1] / 2.0
                 for other in neighbours[slot]
@@ -518,7 +521,12 @@ def layout_layered(
             else:
                 wanted = cross_origin if position == 0 else floor
             cross_at[slot] = max(wanted, floor)
-            floor = cross_at[slot] + extent + spacing_cross
+            # A lane is a line, not a box: charge the small lane pitch on either side of a
+            # dummy rather than the full node gap, or a rank threading many lanes blows its
+            # cross extent out to several times the drawing (observed: 3752u wide vs 792).
+            gap = _DUMMY_EXTENT if is_lane or previous_was_lane else spacing_cross
+            floor = cross_at[slot] + extent + gap
+            previous_was_lane = is_lane
     # Normalized on the REAL nodes: the origin is a statement about where the drawing starts, and
     # a lane is not part of the drawing's extent. A lane above the first node simply runs there.
     shift = cross_origin - min(cross_at[node_id] for node_id in order)
