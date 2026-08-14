@@ -61,8 +61,8 @@ from .themes import ServingTheme, attach_dressing, resolve_dressing, serving_the
 Style = dict[str, str]
 Point = tuple[float, float]
 
-ChartKind = Literal["bar", "line", "donut", "scatter", "histogram", "sparkline"]
-"""The six plots this module draws. Closed — each one is a layout, not a configuration."""
+ChartKind = Literal["bar", "line", "donut", "scatter", "histogram", "sparkline", "radar"]
+"""The seven plots this module draws. Closed — each one is a layout, not a configuration."""
 
 _DEFAULT_W, _DEFAULT_H = 320.0, 200.0
 _SPARK_W, _SPARK_H = 120.0, 32.0
@@ -89,6 +89,11 @@ _AREA_OPACITY = "0.15"
 _DONUT_HOLE = 0.6
 # The smallest ring slice labels are allowed to squeeze a donut down to.
 _MIN_DONUT_R = 20.0
+# A radar's ring count when nobody names one, and the smallest wheel its labels may squeeze it to.
+_RADAR_RINGS = 4
+_MIN_RADAR_R = 20.0
+# How far a ring's value sits to the left of the 12 o'clock spoke it is written on.
+_RING_LABEL_PAD = 3.0
 # The hatch tile: a 6-unit square of one stroke, turned 45° by the pattern's own transform.
 _HATCH_TILE = 6.0
 _HATCH_WIDTH = "2"
@@ -144,7 +149,7 @@ class TickFormat(BaseModel):
     keeps the two from disagreeing.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     style: Literal["plain", "percent", "currency", "si", "fixed"] = "plain"
     decimals: int | None = Field(default=None, ge=0, le=10)
@@ -184,7 +189,7 @@ _STAR_INNER = 0.382
 class Series(BaseModel):
     """One bar series: a name and one value per category."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     name: str
     values: list[float]
@@ -193,7 +198,7 @@ class Series(BaseModel):
 class PointSeries(BaseModel):
     """One line/scatter series: a name and its (x, y) points, in the order they are drawn."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     name: str
     points: list[tuple[float, float]]
@@ -228,7 +233,7 @@ class PointSeries(BaseModel):
 class Slice(BaseModel):
     """One donut slice. A non-positive slice has no angle to occupy, so it is rejected."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     label: str
     value: float = Field(gt=0)
@@ -248,7 +253,7 @@ Orientation = Literal["vertical", "horizontal"]
 class BarData(BaseModel):
     """Categorical bars. More than one series draws them side by side within each category."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     categories: list[str] = Field(min_length=1)
     series: list[Series] = Field(min_length=1)
@@ -327,7 +332,7 @@ class SeriesBand(BaseModel):
     and an interpolation a caller did not ask for is a lie about what was measured.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     between: tuple[str, str]
     label: str | None = None
@@ -337,7 +342,7 @@ class SeriesBand(BaseModel):
 class LineData(BaseModel):
     """Numeric-x lines, optionally with a marker at every point and a wash down to zero."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     series: list[PointSeries] = Field(min_length=1)
     points: bool = False
@@ -384,7 +389,7 @@ class LineData(BaseModel):
 class ScatterData(BaseModel):
     """Numeric-x points, one mark per datum and no line joining them."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     series: list[PointSeries] = Field(min_length=1)
     marker: Marker = "circle"
@@ -429,7 +434,7 @@ def _validate_bands(bands: Sequence[SeriesBand] | None, series: Sequence[PointSe
 class DonutData(BaseModel):
     """Parts of a whole, as an annulus. The hole is ``--donut-hole`` × the outer radius."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     slices: list[Slice] = Field(min_length=1)
     hatch: bool = False
@@ -458,7 +463,7 @@ class HistogramData(BaseModel):
     shape of the picture. Density, cumulative counts and KDE stay out.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     values: list[float] = Field(min_length=1)
     """The observations themselves — not counts. The chart does the counting."""
@@ -492,7 +497,7 @@ class HistogramData(BaseModel):
 class SparklineData(BaseModel):
     """A bare shape-of-the-trend line: no axes, no ticks, no title, height-normalized."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     values: list[float] = Field(min_length=2)
     last_point: bool = False
@@ -503,7 +508,74 @@ class SparklineData(BaseModel):
     """Draw a reference line across the line at this value — a target, a budget, last year."""
 
 
-ChartData = BarData | LineData | ScatterData | DonutData | HistogramData | SparklineData
+class RadarData(BaseModel):
+    """A profile per series around a wheel of named axes — a SHAPE, compared to other shapes.
+
+    The polar frame is what the radar buys and what it costs. It buys a closed outline the eye
+    reads as one thing, which is why a radar answers "how are these two profiles different"
+    better than six bar charts side by side. It costs the zero-crossing story: a radius runs from
+    the centre outward and there is no other direction for it to run, so a NEGATIVE value has
+    nowhere to be drawn and is refused rather than folded, mirrored or clamped into a lie. Data
+    that crosses zero wants a bar chart, where zero is a line and both sides of it exist.
+
+    Every axis is drawn at the SAME radial scale, so the spokes have to be commensurable — the
+    reader is being invited to compare across them by eye. Five scores out of ten radar honestly;
+    a revenue, a headcount and a latency on one wheel do not, whatever the picture suggests.
+    """
+
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
+
+    axes: list[str] = Field(min_length=3)
+    """The spokes, in clock order from 12 o'clock. Three is the floor: two spokes are a line, and
+    a "polygon" of two vertices is a picture of nothing."""
+    series: list[Series] = Field(min_length=1)
+    """One value per axis per series — the same :class:`Series` a bar chart carries, because a
+    profile IS a row of values against named columns."""
+    fill: bool = True
+    """Wash each polygon in its own colour under all the outlines, so a profile reads as an area
+    rather than as a loop of line. Structural opacity, so two overlapping profiles stay legible."""
+    marker: Marker = "none"
+    """A mark at each vertex — the full vocabulary. ``none`` by default: the vertices are already
+    the polygon's corners, and a mark on each is only worth its ink when the spokes are crowded
+    or two profiles run close enough to need telling apart at a reading rather than by hue."""
+    open: bool = False
+    """Draw those marks hollow — see :attr:`LineData.open`."""
+    rings: int | None = Field(default=None, ge=1)
+    """How many concentric rings to aim for, as a TARGET the 1/2/5 ladder rounds off (exactly
+    like an axis's ``ticks``), not an exact count. None asks for about four."""
+    r_max: float | None = Field(default=None, gt=0)
+    """Pin the rim's value, so two radars can be laid side by side and compared. None takes the
+    largest value on the chart. A reading BEYOND a pinned rim is drawn beyond the rim rather than
+    clipped to it: on a cartesian plot the axis line is a boundary a reader knows means "off the
+    scale", but a radar's rim is its outermost gridline, so a clipped polygon would read as a
+    datum sitting exactly at the maximum — a silent lie where an overflow is an obvious one."""
+    ring_labels: bool = True
+    """Write each ring's value on the 12 o'clock spoke — the one place a radial ruler can be read
+    without a second set of numbers cluttering every other spoke."""
+    value_format: TickFormat | None = None
+    """How those ring values are written. Omit for the plain number."""
+
+    @model_validator(mode="after")
+    def _one_value_per_axis_and_never_a_negative_radius(self) -> RadarData:
+        for entry in self.series:
+            if len(entry.values) != len(self.axes):
+                raise ValueError(
+                    f"series {entry.name!r} has {len(entry.values)} values but there are "
+                    f"{len(self.axes)} axes — a radar needs one value per axis"
+                )
+            for position, value in enumerate(entry.values):
+                if value < 0:
+                    raise ValueError(
+                        f"series {entry.name!r} carries {value!r} on axis "
+                        f"{self.axes[position]!r}; a radius cannot be negative, and a radar has "
+                        "no zero line to cross — plot data that goes below zero as bars"
+                    )
+        return self
+
+
+ChartData = (
+    BarData | LineData | ScatterData | DonutData | HistogramData | SparklineData | RadarData
+)
 """What a chart is drawn FROM. Which member is valid is decided by the chart's ``kind``."""
 
 ChartDataModel = (
@@ -513,6 +585,7 @@ ChartDataModel = (
     | type[DonutData]
     | type[HistogramData]
     | type[SparklineData]
+    | type[RadarData]
 )
 
 _MODELS: dict[ChartKind, ChartDataModel] = {
@@ -522,6 +595,7 @@ _MODELS: dict[ChartKind, ChartDataModel] = {
     "donut": DonutData,
     "histogram": HistogramData,
     "sparkline": SparklineData,
+    "radar": RadarData,
 }
 
 
@@ -532,6 +606,12 @@ def parse_chart_data(kind: ChartKind, data: ChartData) -> ChartData:
     hand over the wrong one of the two in perfect good faith. Re-validating from the fields that
     were explicitly SET — defaults excluded — moves a bare series list between them silently and
     rejects a genuine mismatch (a scatter carrying ``area=True``) loudly.
+
+    A bar and a radar share their ``series`` and nothing else, and that is exactly what keeps
+    them apart in BOTH directions: a bar names its columns with ``categories`` and a radar names
+    its spokes with ``axes``, so a bar payload offered as radar data has no ``axes`` (and carries
+    a ``categories`` this model forbids), and a radar payload offered as bar data has no
+    ``categories`` (and carries an ``axes``). Neither can be mistaken for the other in silence.
     """
     model = _MODELS[kind]
     if isinstance(data, model):
@@ -558,7 +638,7 @@ class ReferenceLine(BaseModel):
     value falls on the scale, which every plot drawn against that scale can carry.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     value: float
     axis: Literal["y", "x"] = "y"
@@ -581,7 +661,7 @@ class AxesSpec(BaseModel):
     derived from the data, naming ``ticks`` leaves the limits alone.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     y_min: float | None = None
     """Pin the bottom of the value axis — what makes two charts comparable side by side."""
@@ -1084,6 +1164,63 @@ def donut_angles(
     return angles
 
 
+# --- the radar's wheel, pure --------------------------------------------------
+
+
+def radar_angle(index: int, count: int) -> float:
+    """Which way spoke ``index`` of ``count`` points, in radians. Pure.
+
+    12 o'clock first and then CLOCKWISE, which is the order a reader takes a list of axis names
+    in — the same convention the donut's default ``start_angle`` picks, for the same reason.
+    """
+    return -math.pi / 2.0 + index * math.tau / max(1, count)
+
+
+def radar_points(
+    values: Sequence[float], r_max: float, center: Point, radius: float, n: int
+) -> list[Point]:
+    """Where one series' values land on an ``n``-spoke wheel. Pure — the whole radial mapping.
+
+    A value is mapped LINEARLY: 0 at the centre, ``r_max`` at the rim. Not by area, however
+    tempting a polygon whose size should carry the quantity sounds — a reader takes a radar's
+    vertex off the ruler written up the 12 o'clock spoke, and a vertex that did not sit where
+    that ruler says it does would make the picture disagree with its own axis.
+    """
+    cx, cy = center
+    scale = radius / r_max if r_max > 0 else 0.0
+    placed: list[Point] = []
+    for index, value in enumerate(values):
+        angle = radar_angle(index, n)
+        reach = value * scale
+        placed.append((cx + reach * math.cos(angle), cy + reach * math.sin(angle)))
+    return placed
+
+
+def radar_rings(r_max: float, count: int = _RADAR_RINGS) -> list[float]:
+    """The values the concentric rings sit at, innermost first, the rim last. Pure.
+
+    The interior rings come off the same 1/2/5 ladder every axis is ticked on, so the numbers up
+    the spoke are round ones — and the RIM is always a ring whatever the ladder says, because it
+    is the frame's own boundary and a wheel drawn without one has no edge for the eye to close
+    the profiles against. A ladder step landing on (or past) the rim is the rim, not a second
+    ring a hairline inside it.
+    """
+    ladder = [tick for tick in nice_ticks(0.0, r_max, count) if _EPS < tick < r_max - _EPS]
+    return [*ladder, r_max]
+
+
+def radar_anchor(angle: float) -> str:
+    """Which end of a spoke label sits on its spoke, by the octant the spoke points into. Pure.
+
+    A label at the top or the bottom is centred over its spoke; one out to either side hangs off
+    the near end of itself, so no label ever reaches back across the wheel it names.
+    """
+    cos = math.cos(angle)
+    if abs(cos) < math.cos(math.radians(67.5)):
+        return "middle"
+    return "start" if cos > 0 else "end"
+
+
 # --- ordering, stacking, steps and the furniture ------------------------------
 
 
@@ -1459,7 +1596,7 @@ class ChartDatum(BaseModel):
     A donut has one series, so only ``index`` means anything there.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
 
     series: str | int = 0
     index: int = 0
@@ -2524,6 +2661,85 @@ def _slice_text(label: str, value: float, fmt: TickFormat | None) -> str:
     return f"{label} {format_tick(value, fmt)}".strip()
 
 
+@dataclass(frozen=True, slots=True)
+class RadarLayout:
+    """A radar's wheel: where it is, how far it reaches, and where every profile's corners fell."""
+
+    plot: Plot
+    cx: float
+    cy: float
+    radius: float
+    r_max: float
+    rings: tuple[float, ...]
+    labels: tuple[str, ...]
+    placed: tuple[tuple[Point, ...], ...]
+
+    @property
+    def spokes(self) -> int:
+        return len(self.labels)
+
+    def ring(self, value: float) -> list[Point]:
+        """One gridline ring, as the n-gon through that value on every spoke.
+
+        A CIRCLE would be the other reading of "concentric ring", and it is the wrong one: the
+        data's own polygon has straight edges between spokes, so a circular gridline sits inside
+        the profile between the spokes and outside it at them, and the eye reads the gap as a
+        reading. An n-gon is parallel to what it is measuring everywhere.
+        """
+        return radar_points(
+            [value] * self.spokes, self.r_max, (self.cx, self.cy), self.radius, self.spokes
+        )
+
+    def spoke_end(self, index: int) -> Point:
+        """Where one spoke meets the rim."""
+        angle = radar_angle(index, self.spokes)
+        return (self.cx + self.radius * math.cos(angle), self.cy + self.radius * math.sin(angle))
+
+    def datum_point(self, series: int, index: int) -> Point:
+        """Where a leader lands on one reading: that profile's own vertex on that spoke."""
+        return self.placed[series][index]
+
+
+def _radar_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> RadarLayout:
+    """Resolve a radar's wheel: its box, its radius, its radial scale and every vertex.
+
+    The radius is MEASURED down, exactly as the cartesian margins are: the spoke labels live
+    outside the rim, so the widest of them (and one line of type, for the ones at the top and
+    the bottom) is what the wheel gives up rather than a guessed inset.
+    """
+    data = spec.data
+    if not isinstance(data, RadarData):
+        raise InvalidArgument("a radar chart needs one value per named axis")
+    top = (sizes.title + sizes.gap) if spec.title else 4.0
+    plot = Plot(x=0.0, y=top, w=spec.w, h=max(1.0, spec.h - top - 4.0))
+    observed = max((max(entry.values) for entry in data.series), default=0.0)
+    r_max = data.r_max if data.r_max is not None else observed
+    if r_max <= 0:
+        # Every reading zero. A wheel of nothing is still a wheel, and dividing by the nothing
+        # would be the only way to fail at drawing it.
+        r_max = 1.0
+    widest = max((measure_label(text, font, sizes.tick)[0] for text in data.axes), default=0.0)
+    line = measure_label("0", font, sizes.tick)[1]
+    radius = max(
+        _MIN_RADAR_R,
+        min(plot.w / 2.0 - (widest + sizes.gap), plot.h / 2.0 - (line + sizes.gap)),
+    )
+    cx, cy = plot.x + plot.w / 2.0, plot.y + plot.h / 2.0
+    return RadarLayout(
+        plot=plot,
+        cx=cx,
+        cy=cy,
+        radius=radius,
+        r_max=r_max,
+        rings=tuple(radar_rings(r_max, data.rings or _RADAR_RINGS)),
+        labels=tuple(data.axes),
+        placed=tuple(
+            tuple(radar_points(entry.values, r_max, (cx, cy), radius, len(data.axes)))
+            for entry in data.series
+        ),
+    )
+
+
 # --- value labels and reference furniture -------------------------------------
 
 
@@ -3380,6 +3596,128 @@ def _draw_donut_centre(
     )
 
 
+def _draw_radar_frame(
+    doc: Document,
+    group: str,
+    theme: str | None,
+    layout: RadarLayout,
+    data: RadarData,
+    *,
+    font: str,
+    sizes: Sizes,
+) -> None:
+    """The wheel: the rings, the spokes, the ruler up the 12 o'clock spoke, the spoke names.
+
+    Rings first and spokes over them, for the reason ``_draw_frame`` draws its gridlines before
+    its axes: a spoke is the axis a reading is taken along, and it has to read as a line rather
+    than as wherever the rings happen to cross.
+    """
+    frame = _group(doc, group)
+    frame_id = str(frame.get_id())
+    grid = _hooks(doc, theme, "gridline")
+    for value in layout.rings:
+        _part(
+            doc,
+            inkex.Polygon.new(_points_str(layout.ring(value))),
+            prefix="polygon",
+            category="shape",
+            parent=frame_id,
+            style={"fill": "none"},
+            classes=grid,
+        )
+    axis = _hooks(doc, theme, "axis")
+    for index in range(layout.spokes):
+        _line(doc, frame_id, (layout.cx, layout.cy), layout.spoke_end(index), axis)
+
+    tick_class = _hooks(doc, theme, "tick-label")
+    line = measure_label("0", font, sizes.tick)[1]
+    if data.ring_labels:
+        # One ruler, on one spoke. A value at every ring on every spoke would be n copies of the
+        # same ladder, and the wheel would be unreadable through its own numbers.
+        for value in layout.rings:
+            _text(
+                doc,
+                frame_id,
+                format_tick(value, data.value_format),
+                (layout.cx - _RING_LABEL_PAD, layout.cy - layout.radius * value / layout.r_max),
+                anchor="end",
+                baseline="central",
+                classes=tick_class,
+            )
+    for index, name in enumerate(layout.labels):
+        angle = radar_angle(index, layout.spokes)
+        cos, sin = math.cos(angle), math.sin(angle)
+        # Half a line further out where the spoke points up or down: the text is centred on its
+        # own middle, so that is what keeps a label at 12 o'clock off the rim it labels.
+        reach = layout.radius + sizes.gap + abs(sin) * line / 2.0
+        _text(
+            doc,
+            frame_id,
+            name,
+            (layout.cx + cos * reach, layout.cy + sin * reach),
+            anchor=radar_anchor(angle),
+            baseline="central",
+            classes=tick_class,
+        )
+
+
+def _draw_radar(
+    doc: Document, group: str, theme: str | None, spec: ChartSpec, font: str, sizes: Sizes
+) -> Plot:
+    """One closed polygon per series on a wheel of named axes.
+
+    The three passes are the whole of the drawing order and they are not interchangeable: every
+    wash first, then every outline, then every mark. A wash drawn with its own outline would sit
+    over the profile drawn before it — translucent, so not hiding it, but tinting it into a
+    colour neither series wears, which is exactly the reading a radar is there to support going
+    wrong. Marks last for the same reason a level up: a vertex is a reading, and no other
+    series' area may wash over it.
+    """
+    data = spec.data
+    if not isinstance(data, RadarData):
+        raise InvalidArgument("a radar chart needs one value per named axis")
+    layout = _radar_layout(spec, font=font, sizes=sizes)
+    _draw_radar_frame(doc, group, theme, layout, data, font=font, sizes=sizes)
+
+    def _profile(index: int, style: Style) -> None:
+        holder = _group(doc, group)
+        classes = _series_class(doc, theme, index)
+        for class_name in classes:
+            holder.set("class", class_name)
+        _part(
+            doc,
+            inkex.Polygon.new(_points_str(list(layout.placed[index]))),
+            prefix="polygon",
+            category="shape",
+            parent=str(holder.get_id()),
+            style=style,
+            classes=(),
+        )
+
+    if data.fill:
+        for index in range(len(layout.placed)):
+            _profile(index, {"stroke": "none", "fill-opacity": _AREA_OPACITY})
+    for index in range(len(layout.placed)):
+        _profile(index, {"fill": "none"})
+    if data.marker != "none":
+        for index, points in enumerate(layout.placed):
+            marks = _group(doc, group)
+            classes = _series_class(doc, theme, index)
+            for class_name in classes:
+                marks.set("class", class_name)
+            for at in points:
+                _draw_mark(
+                    doc,
+                    str(marks.get_id()),
+                    data.marker,
+                    at,
+                    _MARKER_R,
+                    unfilled=data.open,
+                    classes=classes,
+                )
+    return layout.plot
+
+
 def sparkline_y(value: float, lo: float, hi: float, height: float, inset: float = 1.0) -> float:
     """Where one value sits down a sparkline's box — pure, so the line and its dots agree."""
     span = hi - lo
@@ -3453,7 +3791,7 @@ def _hole(theme: ServingTheme) -> float:
 def _series_slot(spec: ChartSpec, datum: ChartDatum) -> int | None:
     """Which series a datum names — by index, or by the name that series carries."""
     data = spec.data
-    if isinstance(data, BarData | LineData | ScatterData):
+    if isinstance(data, BarData | LineData | ScatterData | RadarData):
         names = [entry.name for entry in data.series]
     else:  # a donut and a sparkline are one series by construction
         names = [""]
@@ -3486,6 +3824,13 @@ def _datum_local(
         if not 0 <= datum.index < len(ring.labels):
             return None
         return ring.datum_point(ring.order.index(datum.index))
+    if isinstance(data, RadarData):
+        web = _radar_layout(spec, font=font, sizes=sizes)
+        # `index` names the AXIS, and the axes are drawn in the order they were given — a radar
+        # has no `order` to look through, because the shape IS the order.
+        if not 0 <= datum.index < web.spokes:
+            return None
+        return web.datum_point(slot, datum.index)
     if isinstance(data, HistogramData):
         bins = _histogram_layout(spec, font=font, sizes=sizes)
         # `index` names the BIN, which is the only thing a histogram has to point at — the
@@ -3550,6 +3895,9 @@ def _build(doc: Document, group: BaseElement, spec: ChartSpec) -> None:
         plot = _draw_bar(doc, group_id, dressing, spec, font, sizes)
     elif spec.kind == "histogram":
         plot = _draw_histogram(doc, group_id, dressing, spec, font, sizes)
+    elif spec.kind == "radar":
+        # A radar has no cartesian frame, but it does hang a title over its box like the rest.
+        plot = _draw_radar(doc, group_id, dressing, spec, font, sizes)
     else:
         plot = _draw_points(doc, group_id, dressing, spec, font, sizes)
     _draw_title(doc, group_id, dressing, plot, spec.title, sizes)
@@ -3626,7 +3974,10 @@ def add_chart(
 
     A ``sparkline`` ignores ``title``/``x_label``/``y_label``/``axes`` and a ``donut`` ignores
     those too — they have no axes for them to name, and drawing them anyway would be a lie about
-    what the picture shows.
+    what the picture shows. A ``radar`` keeps its ``title`` and ignores the rest for the same
+    reason: its frame is polar, and the two controls it does have (``rings``, ``r_max``) live on
+    its own data model, where the donut's hole and the histogram's bins live — a per-chart frame
+    choice, not a cartesian axis anyone could pin.
     """
     parsed = parse_chart_data(kind, data)
     spark = kind == "sparkline"

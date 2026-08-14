@@ -59,6 +59,7 @@ from .chart import (
     ChartSpec,
     DonutData,
     LineData,
+    RadarData,
     ScatterData,
     _part,
     datum_anchor,
@@ -287,7 +288,7 @@ def _chart_series(spec: ChartSpec) -> list[str]:
     count. A sparkline names nothing: it is one line, and a key entry for it would be a caption.
     """
     data = spec.data
-    if isinstance(data, BarData | LineData | ScatterData):
+    if isinstance(data, BarData | LineData | ScatterData | RadarData):
         return [entry.name for entry in data.series]
     if isinstance(data, DonutData):
         return [piece.label for piece in data.slices]

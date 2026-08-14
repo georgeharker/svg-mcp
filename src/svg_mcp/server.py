@@ -197,7 +197,7 @@ DIAGRAMS (box-arrow)
   label/kind/route/members; `get_params` reads any facade's spec back.
 
 CHARTS
-- For ANY plot of numbers — bar, line, donut, scatter, histogram, sparkline — use
+- For ANY plot of numbers — bar, line, donut, scatter, histogram, sparkline, radar — use
   `add_chart(kind, data)`,
   NOT hand-placed rects and polylines. It picks round tick values, MEASURES the margins from
   the tick labels so nothing is clipped, and paints each series from the theme's palette in
@@ -229,6 +229,11 @@ CHARTS
   `waterfall` (+ `total_label`) walks a running total with dashed connectors and `normalized`
   turns a stack into shares of 100; `kind="histogram"` takes RAW values and bins them itself
   (`bins` = a count or explicit edges) into contiguous bars.
+- `kind="radar"` compares PROFILES over three or more named `axes` (clockwise from 12 o'clock,
+  one shared radial scale, so only commensurable spokes belong on one wheel): `fill` washes each
+  polygon, `rings`/`r_max` are the ruler (`r_max` pins it so two radars compare), `ring_labels`
+  writes it up the 12 o'clock spoke. Negative values are REFUSED — a radius has no other
+  direction to run in; that data is a bar chart. `axes=` (the cartesian frame) is ignored here.
 - Still out of scope: statistical transforms, a second y axis, colormaps. If you need one, the
   answer is a different picture, not a hack.
 - `edit_chart(target, data=…)` re-derives the whole plot in place, keeping the group's id,
@@ -3879,7 +3884,7 @@ def reflow(
 def add_chart(
     *,
     document_id: str | None = None,
-    kind: Literal["bar", "line", "donut", "scatter", "histogram", "sparkline"],
+    kind: Literal["bar", "line", "donut", "scatter", "histogram", "sparkline", "radar"],
     data: ops.ChartData,
     x: float | None = None,
     y: float | None = None,
@@ -3921,6 +3926,10 @@ def add_chart(
         value_format: {...}} — the RAW observations; it bins and counts them itself.
       - sparkline: {values: [float], last_point: bool, extremes: bool, baseline: float} — a bare
         trend line, no axes/ticks/title, 120x32 by default.
+      - radar: {axes: [str], series: [{name, values: [float]}], fill: bool, marker, open: bool,
+        rings: int, r_max: float, ring_labels: bool, value_format: {...}} — one value per named
+        axis per series, at least three axes, and NO negative values (a radius cannot be
+        negative and a radar has no zero line to cross; plot such data as bars).
 
     `hatch` fills each series with diagonal lines in its own colour, so the series stay apart in
     print and in greyscale. `value_labels` writes each number on its mark, formatted like the
@@ -3928,8 +3937,10 @@ def add_chart(
     close, and no label is ever clipped. `stacked` stacks negatives DOWNWARD from zero and scales
     the axis to the totals. `orientation="horizontal"` swaps the axes, so long category names get
     the left margin and the margin is measured from them. x is categorical (bar) or numeric
-    (line/scatter). No statistical transforms, no second y axis, no colormaps. Edit it later with
-    `edit_chart`.
+    (line/scatter). A `radar` compares PROFILES: spokes run clockwise from 12 o'clock, every axis
+    shares one radial scale (so the spokes have to be commensurable), the rings are the ruler and
+    their values are written up the 12 o'clock spoke. No statistical transforms, no second y
+    axis, no colormaps. Edit it later with `edit_chart`.
 
     Args:
         kind: Which plot to draw.
@@ -3939,8 +3950,9 @@ def add_chart(
         width: Chart width including its margins (default 320; 120 for a sparkline).
         height: Chart height including its margins (default 200; 32 for a sparkline).
         title: Centered above the plot. Ignored by `sparkline`.
-        x_label: What the x axis measures. Ignored by `donut` and `sparkline`.
-        y_label: What the y axis measures; drawn rotated. Ignored by `donut` and `sparkline`.
+        x_label: What the x axis measures. Ignored by `donut`, `sparkline` and `radar`.
+        y_label: What the y axis measures; drawn rotated. Ignored by `donut`, `sparkline`
+            and `radar`.
         axes: How to frame the plot; omit for limits from the data, five-ish 1/2/5 ticks, plain
             labels, horizontal gridlines and no tick marks. Fields: `y_min`/`y_max` pin the value
             axis (either alone works; data outside a pinned range is CLIPPED to the plot),
@@ -3956,7 +3968,8 @@ def add_chart(
             a scale backwards; `zero_spine` to stand the category axis LINE at value 0 (the tick
             labels stay at the plot's edge); `reference_lines` = [{value, label, axis, to, kind}]
             for thresholds (drawn over the data) and bands (`to` set, drawn behind it).
-            Ignored by `donut` and `sparkline`.
+            Ignored by `donut`, `sparkline` and `radar` — a radar's frame is polar, and its two
+            frame controls (`rings`, `r_max`) live in `data`, where the donut's hole does.
         parent: Group/layer id (or name); omit for the document root.
         name: Friendly label for the group.
         style: Inline style on the group (wins over the theme).

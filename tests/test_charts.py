@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from inkex import BaseElement
 from lxml import etree
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from svg_mcp import ops
 from svg_mcp.model import Document
@@ -24,6 +24,7 @@ from svg_mcp.ops.chart import (
     LineData,
     Marker,
     PointSeries,
+    RadarData,
     ReferenceLine,
     Scale,
     ScatterData,
@@ -35,6 +36,7 @@ from svg_mcp.ops.chart import (
     SparklineData,
     TickFormat,
     bar_bands,
+    datum_anchor,
     donut_angles,
     format_tick,
     histogram_counts,
@@ -51,6 +53,10 @@ from svg_mcp.ops.chart import (
     normalize_stacks,
     order_indices,
     plot_margins,
+    radar_anchor,
+    radar_angle,
+    radar_points,
+    radar_rings,
     read_chart_spec,
     reference_extent,
     resolve_axis,
@@ -212,6 +218,26 @@ def test_an_unknown_key_is_rejected_rather_than_dropped() -> None:
         )
     with pytest.raises(ValidationError, match="colour"):
         SparklineData.model_validate({"values": [1, 2], "colour": "red"})
+
+
+def _described(model: type[BaseModel]) -> int:
+    """How many of a model's fields carry a description into the JSON schema."""
+    properties = model.model_json_schema()["properties"]
+    assert isinstance(properties, dict)
+    return sum(1 for spec in properties.values() if "description" in spec)
+
+
+def test_the_field_docs_reach_the_schema_a_caller_actually_reads() -> None:
+    """These models ARE the tool's argument documentation, and pydantic drops attribute
+    docstrings unless ``use_attribute_docstrings`` is set — a flag that falls off a model
+    silently, taking twenty fields' worth of explanation off the wire with it."""
+    minor = AxesSpec.model_json_schema()["properties"]["minor"]
+    assert isinstance(minor, dict) and "description" in minor
+    assert _described(AxesSpec) >= 15
+    # ...and the radar's own frame controls describe themselves too
+    radar = RadarData.model_json_schema()["properties"]
+    assert all("description" in radar[field] for field in ("axes", "rings", "r_max"))
+    assert _described(RadarData) == len(radar)
 
 
 def test_an_empty_chart_has_nothing_to_draw_and_says_so() -> None:
@@ -2872,3 +2898,399 @@ def test_a_histogram_is_not_a_sparkline_however_alike_the_payloads_look() -> Non
     placed = ops.add_chart(doc, kind="histogram", data=HistogramData(values=[1.0, 2.0, 3.0]))
     spec = read_chart_spec(doc.resolve(placed.ref.id))
     assert spec is not None and isinstance(spec.data, HistogramData)
+
+
+# --- 26. radar ----------------------------------------------------------------
+
+
+def test_the_spokes_start_at_twelve_o_clock_and_turn_clockwise() -> None:
+    quarters = [radar_angle(index, 4) for index in range(4)]
+    assert quarters == pytest.approx([-math.pi / 2.0, 0.0, math.pi / 2.0, math.pi])
+    # ...and whatever the count, the spokes are evenly spaced round the whole turn
+    fifths = [radar_angle(index, 5) for index in range(5)]
+    gaps = [b - a for a, b in zip(fifths, fifths[1:], strict=False)]
+    assert gaps == pytest.approx([math.tau / 5.0] * 4)
+    assert math.cos(fifths[0]) == pytest.approx(0.0, abs=1e-9) and math.sin(fifths[0]) < 0
+
+
+def test_a_radar_maps_its_values_linearly_from_the_centre_to_the_rim() -> None:
+    points = radar_points([0.0, 5.0, 10.0, 2.5], 10.0, (100.0, 100.0), 80.0, 4)
+    reach = [math.dist((100.0, 100.0), point) for point in points]
+    assert reach == pytest.approx([0.0, 40.0, 80.0, 20.0])  # 0, half, the rim, a quarter
+    assert points[0] == pytest.approx((100.0, 100.0))
+    assert points[2] == pytest.approx((100.0, 180.0))  # the third of four spokes points down
+
+
+def test_pinning_the_rim_is_what_moves_the_same_number_up_the_spoke() -> None:
+    at_data_max = radar_points([5.0], 5.0, (0.0, 0.0), 100.0, 4)
+    pinned = radar_points([5.0], 10.0, (0.0, 0.0), 100.0, 4)
+    assert math.dist((0.0, 0.0), at_data_max[0]) == pytest.approx(100.0)  # the data max IS the rim
+    assert math.dist((0.0, 0.0), pinned[0]) == pytest.approx(50.0)  # half of a rim pinned at ten
+
+
+def test_the_rings_are_round_steps_and_the_rim_is_always_one_of_them() -> None:
+    assert radar_rings(73.0, 4) == pytest.approx([20.0, 40.0, 60.0, 73.0])
+    # a rim that lands ON the ladder is not drawn twice, a hair inside itself
+    assert radar_rings(100.0, 4) == pytest.approx([50.0, 100.0])
+    # ...and the count is a TARGET the ladder rounds off, exactly as an axis's `ticks` is: ask
+    # for more rings over the same span and the ladder drops to a step that can supply them
+    assert radar_rings(100.0, 5) == pytest.approx([20.0, 40.0, 60.0, 80.0, 100.0])
+    assert radar_rings(10.0, 5) == pytest.approx([2.0, 4.0, 6.0, 8.0, 10.0])
+
+
+def test_a_spoke_label_hangs_off_the_end_of_itself_that_faces_the_wheel() -> None:
+    assert radar_anchor(radar_angle(0, 4)) == "middle"  # 12 o'clock
+    assert radar_anchor(radar_angle(1, 4)) == "start"  # 3 o'clock, reading outward
+    assert radar_anchor(radar_angle(2, 4)) == "middle"  # 6 o'clock
+    assert radar_anchor(radar_angle(3, 4)) == "end"  # 9 o'clock, reading back to the rim
+
+
+def test_a_radar_needs_three_axes_before_it_is_a_shape_at_all() -> None:
+    with pytest.raises(ValidationError):
+        RadarData(axes=["a", "b"], series=[Series(name="s", values=[1.0, 2.0])])
+
+
+def test_a_radar_series_carries_one_value_per_axis() -> None:
+    with pytest.raises(ValidationError) as caught:
+        RadarData(axes=["a", "b", "c"], series=[Series(name="s", values=[1.0, 2.0])])
+    assert "one value per axis" in str(caught.value)
+
+
+def test_a_negative_radius_is_refused_and_the_axis_it_is_on_is_named() -> None:
+    with pytest.raises(ValidationError) as caught:
+        RadarData(axes=["a", "b", "c"], series=[Series(name="s", values=[1.0, -2.0, 3.0])])
+    message = str(caught.value)
+    assert "'b'" in message and "cannot be negative" in message
+
+
+def _radar(
+    doc: Document, axes: list[str] | None = None, **kwargs: object
+) -> ops.PlacedChart:
+    names = axes if axes is not None else ["n", "e", "s", "w"]
+    return ops.add_chart(
+        doc,
+        kind="radar",
+        data=RadarData(
+            axes=names,
+            series=[
+                Series(name="a", values=[10.0] * len(names)),
+                Series(name="b", values=[2.0] * len(names)),
+            ],
+            **kwargs,  # type: ignore[arg-type]
+        ),
+        x=0,
+        y=0,
+        width=240,
+        height=240,
+    )
+
+
+def _wheel(doc: Document, chart_id: str) -> tuple[tuple[float, float], float]:
+    """The centre and the radius, read back off the spokes the chart drew."""
+    spokes = _wearing(doc, chart_id, "default-axis")
+    centre = (float(str(spokes[0].get("x1"))), float(str(spokes[0].get("y1"))))
+    return centre, max(
+        math.dist(centre, (float(str(spoke.get("x2"))), float(str(spoke.get("y2")))))
+        for spoke in spokes
+    )
+
+
+def _polygons(doc: Document, chart_id: str, class_name: str) -> list[BaseElement]:
+    return [
+        node
+        for node in _wearing(doc, chart_id, class_name)
+        if str(node.tag).endswith("polygon")
+    ]
+
+
+def _corners(node: BaseElement) -> list[tuple[float, float]]:
+    pairs = str(node.get("points") or "").split()
+    return [(float(pair.split(",")[0]), float(pair.split(",")[1])) for pair in pairs]
+
+
+def test_a_radar_draws_a_spoke_per_axis_and_an_n_gon_per_ring() -> None:
+    doc = _doc()
+    placed = _radar(doc, axes=["a", "b", "c", "d", "e"])
+    assert len(_wearing(doc, placed.ref.id, "default-axis")) == 5
+    rings = _polygons(doc, placed.ref.id, "default-gridline")
+    assert len(rings) == 2  # 0..10 off the 1/2/5 ladder is 5, plus the rim
+    centre, radius = _wheel(doc, placed.ref.id)
+    for ring in rings:
+        corners = _corners(ring)
+        assert len(corners) == 5  # an n-gon through the ring, not a circle
+        reach = [math.dist(centre, corner) for corner in corners]
+        assert reach == pytest.approx([reach[0]] * 5, abs=0.01)
+    assert max(math.dist(centre, corner) for corner in _corners(rings[-1])) == pytest.approx(
+        radius, abs=0.01
+    )
+
+
+def _passes(doc: Document, chart_id: str) -> list[str]:
+    """What each series group of a radar is, in the order the chart drew them."""
+    order: list[str] = []
+    for child in _children(doc, chart_id):
+        if not str(child.get("class") or "").startswith("default-series"):
+            continue
+        polygons = [node for node in child if str(node.tag).endswith("polygon")]
+        if not polygons:
+            order.append("mark")
+        elif "fill-opacity" in str(polygons[0].get("style")):
+            order.append("wash")
+        else:
+            order.append("outline")
+    return order
+
+
+def test_every_wash_is_drawn_before_every_outline_and_the_marks_come_last() -> None:
+    doc = _doc()
+    placed = _radar(doc, marker="circle")
+    assert _passes(doc, placed.ref.id) == [
+        "wash",
+        "wash",
+        "outline",
+        "outline",
+        "mark",
+        "mark",
+    ]
+
+
+def test_a_radar_that_asks_for_no_wash_draws_only_the_outlines() -> None:
+    doc = _doc()
+    placed = _radar(doc, fill=False)
+    assert _passes(doc, placed.ref.id) == ["outline", "outline"]
+    outlines = _polygons(doc, placed.ref.id, "default-series-1")
+    assert len(outlines) == 0  # the GROUP wears the series class; the polygon is fill:none
+
+
+def test_a_profile_is_a_closed_polygon_of_one_corner_per_axis() -> None:
+    doc = _doc()
+    placed = _radar(doc, axes=["a", "b", "c", "d", "e", "f"])
+    outlines = [
+        node
+        for child in _children(doc, placed.ref.id)
+        if str(child.get("class") or "").startswith("default-series")
+        for node in child
+        if str(node.tag).endswith("polygon") and "fill:none" in str(node.get("style"))
+    ]
+    assert len(outlines) == 2
+    centre, radius = _wheel(doc, placed.ref.id)
+    first = _corners(outlines[0])
+    assert len(first) == 6
+    assert [math.dist(centre, corner) for corner in first] == pytest.approx(
+        [radius] * 6, abs=0.01
+    )
+    # the second series is a fifth of the first, so its polygon is a fifth of the way out
+    assert [math.dist(centre, corner) for corner in _corners(outlines[1])] == pytest.approx(
+        [radius / 5.0] * 6, abs=0.01
+    )
+
+
+@pytest.mark.parametrize(("shape", "tag"), [("square", "rect"), ("star", "path")])
+def test_a_vertex_mark_is_the_glyph_it_was_asked_for(shape: str, tag: str) -> None:
+    doc = _doc()
+    placed = _radar(doc, marker=shape)
+    assert _tags_under(doc, placed.ref.id).count(tag) == 8  # two series, four axes
+
+
+def test_open_vertex_marks_are_hollow_and_wear_their_own_series() -> None:
+    doc = _doc()
+    placed = _radar(doc, marker="circle", open=True)
+    marks = _circles(doc, placed.ref.id)
+    assert len(marks) == 8
+    for node in marks:
+        assert "fill:none" in str(node.get("style"))
+    assert {str(node.get("class")) for node in marks} == {
+        "default-series-1",
+        "default-series-2",
+    }
+
+
+def test_the_ruler_is_written_once_up_the_twelve_o_clock_spoke() -> None:
+    doc = _doc()
+    placed = _radar(doc)
+    centre, radius = _wheel(doc, placed.ref.id)
+    ticks = _wearing(doc, placed.ref.id, "default-tick-label")
+    ruler = {
+        str(node.text): float(str(node.get("y")))
+        for node in ticks
+        if float(str(node.get("x"))) < centre[0] and str(node.get("y")) is not None
+        and abs(float(str(node.get("x"))) - centre[0]) < 5.0
+    }
+    assert sorted(ruler) == ["10", "5"]
+    assert ruler["10"] == pytest.approx(centre[1] - radius, abs=0.01)  # the rim's own value
+    assert ruler["5"] == pytest.approx(centre[1] - radius / 2.0, abs=0.01)  # half of ten
+    assert all(str(node.get("text-anchor") or "") == "" for node in ticks)
+
+
+def test_ring_labels_can_be_turned_off_and_the_frame_stays() -> None:
+    doc = _doc()
+    placed = _radar(doc, ring_labels=False)
+    assert sorted(_texts(doc, placed.ref.id, "default-tick-label")) == ["e", "n", "s", "w"]
+    assert len(_polygons(doc, placed.ref.id, "default-gridline")) == 2
+
+
+def test_a_spoke_label_sits_outside_the_rim_anchored_by_its_octant() -> None:
+    doc = _doc()
+    placed = _radar(doc)
+    centre, radius = _wheel(doc, placed.ref.id)
+    placed_labels = {
+        str(node.text): node for node in _wearing(doc, placed.ref.id, "default-tick-label")
+    }
+    for name in ("n", "e", "s", "w"):
+        node = placed_labels[name]
+        at = (float(str(node.get("x"))), float(str(node.get("y"))))
+        assert math.dist(centre, at) > radius  # outside the rim it names
+    assert "text-anchor:middle" in str(placed_labels["n"].get("style"))
+    assert "text-anchor:middle" in str(placed_labels["s"].get("style"))
+    assert "text-anchor:start" in str(placed_labels["e"].get("style"))
+    assert "text-anchor:end" in str(placed_labels["w"].get("style"))
+
+
+def test_the_widest_spoke_label_is_what_the_wheel_gives_up_room_for() -> None:
+    doc = _doc()
+    narrow = _radar(doc, axes=["n", "e", "s", "w"])
+    wide = _radar(doc, axes=["n", "e", "s", "a very long axis name indeed"])
+    assert _wheel(doc, wide.ref.id)[1] < _wheel(doc, narrow.ref.id)[1]
+
+
+def test_pinning_the_rim_of_a_drawn_radar_shrinks_what_the_data_reaches() -> None:
+    doc = _doc()
+    loose = _radar(doc)
+    pinned = _radar(doc, r_max=20.0)
+    centre, radius = _wheel(doc, pinned.ref.id)
+    outline = next(
+        node
+        for child in _children(doc, pinned.ref.id)
+        if str(child.get("class") or "") == "default-series-1"
+        for node in child
+        if str(node.tag).endswith("polygon") and "fill:none" in str(node.get("style"))
+    )
+    assert [math.dist(centre, corner) for corner in _corners(outline)] == pytest.approx(
+        [radius / 2.0] * 4, abs=0.01  # ten of a rim pinned at twenty
+    )
+    assert _wheel(doc, loose.ref.id)[1] == pytest.approx(radius)  # the same wheel, either way
+
+
+def test_a_bar_and_a_radar_are_told_apart_by_what_they_name_their_columns() -> None:
+    doc = _doc()
+    bars = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(categories=["a", "b"], series=[Series(name="s", values=[1.0, 2.0])]),
+    )
+    spec = read_chart_spec(doc.resolve(bars.ref.id))
+    assert spec is not None and isinstance(spec.data, BarData)
+    # ...and neither payload can be pushed through the other's kind in silence
+    with pytest.raises(InvalidArgument):
+        ops.add_chart(
+            doc,
+            kind="radar",
+            data=BarData(
+                categories=["a", "b", "c"], series=[Series(name="s", values=[1.0, 2.0, 3.0])]
+            ),
+        )
+    with pytest.raises(InvalidArgument):
+        ops.add_chart(
+            doc,
+            kind="bar",
+            data=RadarData(
+                axes=["a", "b", "c"], series=[Series(name="s", values=[1.0, 2.0, 3.0])]
+            ),
+        )
+
+
+def test_a_radar_payload_stays_a_radar_through_the_fence() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="radar",
+        data=RadarData(axes=["a", "b", "c"], series=[Series(name="s", values=[1.0, 2.0, 3.0])]),
+    )
+    spec = read_chart_spec(doc.resolve(placed.ref.id))
+    assert spec is not None and isinstance(spec.data, RadarData)
+
+
+def test_a_datum_callout_lands_on_the_vertex_it_names() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="radar",
+        data=RadarData(
+            axes=["a", "b", "c", "d"],
+            series=[
+                Series(name="one", values=[10.0, 4.0, 6.0, 2.0]),
+                Series(name="two", values=[3.0, 9.0, 1.0, 7.0]),
+            ],
+        ),
+        x=40,
+        y=30,
+        width=240,
+        height=240,
+    )
+    outline = next(
+        node
+        for child in _children(doc, placed.ref.id)
+        if str(child.get("class") or "") == "default-series-2"
+        for node in child
+        if str(node.tag).endswith("polygon") and "fill:none" in str(node.get("style"))
+    )
+    corner = _corners(outline)[1]  # series "two", axis "b"
+    anchor = datum_anchor(doc, doc.resolve(placed.ref.id), ops.ChartDatum(series="two", index=1))
+    assert anchor is not None
+    assert anchor == pytest.approx((corner[0] + 40.0, corner[1] + 30.0), abs=1.0)
+    assert datum_anchor(doc, doc.resolve(placed.ref.id), ops.ChartDatum(index=9)) is None
+
+
+def test_get_params_hands_back_the_radar_a_chart_was_built_from() -> None:
+    doc = _doc()
+    data = RadarData(
+        axes=["a", "b", "c"],
+        series=[Series(name="s", values=[1.0, 2.0, 3.0])],
+        fill=False,
+        marker="diamond",
+        open=True,
+        rings=3,
+        r_max=4.0,
+        ring_labels=False,
+        value_format=TickFormat(style="fixed", decimals=1),
+    )
+    placed = ops.add_chart(doc, kind="radar", data=data, x=0, y=0, title="R")
+    params = get_params(doc, placed.ref.id)["params"]
+    assert isinstance(params, dict)
+    assert params["kind"] == "radar"
+    assert params["data"] == data.model_dump()
+
+
+def test_a_two_series_radar_renders_its_wash_inside_the_rim_and_nothing_outside() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="radar",
+        data=RadarData(
+            axes=["n", "e", "s", "w"],
+            series=[
+                Series(name="big", values=[10.0, 10.0, 10.0, 10.0]),
+                Series(name="small", values=[2.0, 2.0, 2.0, 2.0]),
+            ],
+        ),
+        x=0,
+        y=0,
+        width=240,
+        height=240,
+    )
+    image = _render(doc)
+    centre, radius = _wheel(doc, placed.ref.id)
+    # A point at 45°, four fifths of the way out: inside the first series' diamond, outside the
+    # second's, and off every ring and spoke — so the only paint there is series 1's own wash.
+    step = radius * 0.4
+    inside = image.getpixel((int(centre[0] + step), int(centre[1] - step)))  # type: ignore[attr-defined]
+    assert isinstance(inside, tuple)
+    # ...the channels within a rounding step of --series-1: a 0.15 wash is stored premultiplied,
+    # so unpremultiplying it back out cannot land on the exact byte it went in as.
+    assert inside[:3] == pytest.approx((0x44, 0x77, 0xAA), abs=3)
+    assert 0 < inside[3] < 128  # ...washed in, not painted flat
+    # ...and the corner beyond the rim is bare canvas, which a document has none of.
+    corner = radius * 0.9
+    outside = image.getpixel((int(centre[0] + corner), int(centre[1] - corner)))  # type: ignore[attr-defined]
+    assert isinstance(outside, tuple)
+    assert outside[3] == 0

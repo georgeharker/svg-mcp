@@ -94,7 +94,7 @@ class GraphNode(BaseModel):
     module never has to learn any producer's vocabulary.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", use_attribute_docstrings=True)
 
     id: str
     """The producer's identity for this node — the key its edges name, and the diagram node's
@@ -155,7 +155,7 @@ class GraphGroup(BaseModel):
     call ``add_diagram_container`` afterwards with the ids from ``mapping``.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", use_attribute_docstrings=True)
 
     id: str
     """The group's identity — its friendly name once drawn, and a handle edges may name."""
@@ -178,7 +178,9 @@ class GraphEdge(BaseModel):
     both ``{"from": …, "to": …}`` and ``{"source": …, "target": …}`` parse to the same edge.
     """
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(
+        extra="ignore", populate_by_name=True, use_attribute_docstrings=True
+    )
 
     source: str = Field(alias="from")
     """The node id the edge leaves. Accepts ``from`` (the producer's spelling) or ``source``."""
@@ -201,6 +203,8 @@ class GraphImport(BaseModel):
     Every drop is counted SEPARATELY, because "37 edges went in and 24 came out" is only useful
     if the caller can tell a self-loop from a collapse from a node it excluded itself.
     """
+
+    model_config = ConfigDict(use_attribute_docstrings=True)
 
     nodes_created: int = 0
     edges_created: int = 0
