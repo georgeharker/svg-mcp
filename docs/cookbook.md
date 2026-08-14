@@ -169,3 +169,61 @@ add_callout(target=b.id, text="hot shard — see runbook", kind="warning")
 Moved something by hand? `reflow()` — edges re-route, callout leaders re-anchor, fitted
 containers re-fit. Editing data? `edit_chart`/`edit_table`/`edit_diagram_*` patch the spec
 and re-derive; the node keeps its id, classes, and position.
+
+## Diagram a call graph in one call
+
+Already have the graph? Don't transcribe it — `add_diagram_graph` takes the shape a code-index
+or dependency export already emits (`from`/`to`, extra keys ignored).
+
+```
+add_diagram_graph(
+  nodes=[{id:"src/ops/chart.py", symbols:315}, {id:"src/ops/diagram.py", symbols:178},
+         {id:"src/ops/graph.py",  symbols:69}, {id:"src/model/document.py", symbols:32},
+         {id:"src/model/errors.py", symbols:6}, {id:"src/model/__init__.py", symbols:1}],
+  edges=[{from:"src/ops/chart.py",  to:"src/ops/diagram.py",    weight:21},
+         {from:"src/ops/chart.py",  to:"src/model/document.py", weight:27},
+         {from:"src/ops/graph.py",  to:"src/ops/diagram.py",    weight:4},
+         {from:"src/model/document.py", to:"src/model/errors.py", weight:5}],
+  collapse=[{id:"model", label:"model (document · errors)", kind:"datastore",
+             members:["src/model/document.py", "src/model/errors.py"]}],
+  exclude=["*/__init__.py"],
+  size_field="symbols", scale_width=[120, 260], scale_height=[40, 96],
+  layout="layered", direction="TB")
+# → {nodes_created:4, edges_created:3, groups_created:1, nodes_collapsed:2,
+#    self_edges_dropped:1, nodes_filtered:1, mapping:{…}, bounds:[20, 20, 476, 261], …}
+resize_document(mode="fit", margin=20)
+```
+
+The `document.py → errors.py` edge is now *inside* the group, so it becomes a self-edge and is
+**dropped and counted** — nothing is silently lost. `size_field` reads a key your export already
+carries; scaling **both** dimensions maps each by the square root, so the box's *area* carries the
+count (and never shrinks below its label). A graph decides its own size, so check `bounds` and let
+`resize_document(mode="fit")` shrink-wrap the canvas to it. Every node keeps its graph id as its
+name, so `add_callout(target="src/ops/diagram.py", …)` resolves straight afterwards.
+
+## Pin what matters, route the rest
+
+`layout_diagram` moves **every** node in scope. Two spec fields opt individual things out — and
+they survive re-derivation, because they are part of the spec rather than the drawn geometry.
+
+```
+hsm = add_diagram_node(kind="external", label="HSM", x=40, y=300, pinned=true)   # rack position
+api = add_diagram_node(kind="service",  label="API")
+add_diagram_edge(source=api.id, target=hsm.id, kind="control", label="sign",
+                 waypoints=[[220, 180], [220, 320]])      # this edge IS the picture
+layout_diagram(algorithm="layered", direction="LR")       # everything else gets placed
+translate_node(target=api.id, dx=0, dy=-40)
+reflow()                                                  # re-route from where things are NOW
+```
+
+What survives what: `pinned` keeps **both** of the node's coordinates through `layout_diagram`,
+which packs the drawing around it — but its **rank is still computed from its edges**, so a node
+pinned far from where its rank lands gets edges that double back. Pinning anything also anchors
+the whole scope to that pin: it is no longer normalized onto `origin_x`/`origin_y`. `waypoints`
+pin the route's **middle** — the ends keep following the nodes' faces — through every later
+`reflow` *and* `layout_diagram`, but they do **not** pin the nodes: lay out again and the boxes
+move while the route stays. `edit_diagram_edge(waypoints=[…])` replaces a pinned route wholesale;
+`waypoints=[]` clears the pin and hands the edge back to the router. Everything unpinned is
+routed down the lanes the layout reserves — and those lanes are **not stored**, so a bare
+`reflow()` re-routes long edges direct: run `layout_diagram` again for lanes, or pin the one
+route you care about.

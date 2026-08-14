@@ -30,9 +30,11 @@ add more by declaring a role and a `[kinds]` entry.
 `add_diagram_edge(source, target, kind, route, label)` — edges store **what they connect,
 not where they run**. Sides are chosen from the geometry (`auto`) or named (`N/S/E/W`);
 several edges sharing a face fan out across it instead of piling on one point; routes are
-`orthogonal` (right angles, rounded elbows), `straight`, or `spline`; labels sit on the
-longest segment with a canvas-colored halo. Built-in kinds: `data` (solid), `control`
-(dashed), `dependency` (dotted).
+`orthogonal` (right angles, rounded elbows), `straight`, or `spline`. A label is **scored**
+onto its cheapest candidate segment — only a run long enough to hold the text offers one (the
+longest is tried first, and used anyway if none qualifies), charged for overlapping boxes,
+other routes, and labels already placed — and wears a canvas-colored halo so it reads over the
+line. Built-in kinds: `data` (solid), `control` (dashed), `dependency` (dotted).
 
 ## Containers
 
@@ -65,11 +67,108 @@ are reported, not guessed at.
 - `grid` — document order into rows. Ignores edges.
 
 A layout pass moves **every** node in scope — hand placement is preserved by *not* calling it,
-or, one node at a time, by `add_diagram_node(pinned=true)` / `edit_diagram_node(pinned=true)`.
-A pinned node keeps **both** coordinates and `layered` packs the rest of the drawing around it
-as an immovable wall. Its rank is still computed from its edges, so a node pinned far from
-where its rank lands gets edges that double back. Pinning anything also anchors the drawing to
-that pin: the scope is no longer normalized onto `origin_x`/`origin_y`.
+or one node at a time with `pinned` (below).
+
+Long edges are routed down **lanes** the pass reserves for them, so an edge that spans several
+ranks travels between the boxes instead of over them.
+
+## Hand-routing and pinning
+
+Two escape hatches from "the layout decides". Both are spec fields, so they survive re-derivation.
+
+**`waypoints` — pin the route, not the boxes.** `add_diagram_edge(waypoints=[[x, y], …])` (or
+`edit_diagram_edge`) threads the edge through those points, in world coordinates. The two ends
+keep following the nodes' faces; the **middle is drawn exactly as given**, through every later
+`reflow` and `layout_diagram`. On `edit_diagram_edge` the list **replaces** the pinned route
+wholesale — a route is one shape, not a list of separate decisions — an **empty list clears the
+pin** and hands the edge back to the router, and omitting the argument leaves whatever it has
+alone. A pinned route beats the lanes `layout_diagram` would have used, but it does *not* pin
+the nodes: lay the diagram out again and the boxes move while your route stays where you put it.
+
+**Lanes are ephemeral, by design.** The lanes a layout pass reserves belong to that pass and are
+not stored, so a bare `reflow` re-routes long edges **direct** — and one may go back to crossing
+a box. Run `layout_diagram` again for lanes, or pin the route. That is the explicit-reflow
+contract working, not a regression.
+
+**`pinned` — pin the box.** `add_diagram_node(pinned=true)` / `edit_diagram_node(pinned=true)`
+makes `layout_diagram` leave that node's x/y alone and pack the rest of the drawing around it as
+an immovable wall. Its **rank is still computed from its edges**, so a node pinned far from where
+its rank lands gets edges that double back to reach it. Pinning anything also anchors the whole
+drawing to that pin: the scope is no longer normalized onto `origin_x`/`origin_y`, so other nodes
+may sit above or left of the origin. `pinned=false` gives the node back to the layout.
+
+## Ingesting a graph
+
+`add_diagram_graph(nodes, edges, …)` — you already **have** the graph. A service map, a
+dependency tree, a state machine, an org chart, a call graph: paste it in and get N
+`add_diagram_node` + M `add_diagram_edge` + `layout_diagram` in one call. The wire shape
+**mirrors what such exports emit**, so there is no transcription step: `{nodes, edges}` where a
+node is `{id, label?, kind?}` and an edge is `{from|source, to|target, kind?, label?, weight?}`.
+Both spellings of the endpoints parse, and **extra keys are ignored rather than rejected** — a
+richer export must not fail to ingest, and the extras stay readable by `size_field`.
+
+What it does on your behalf: **self-edges are dropped and counted** (a box cannot point at
+itself); **parallel edges between the same pair merge** into one with their weights summed; an
+edge naming an id no node declares is **refused, never invented** — that is a hole in the export,
+not a box to guess at. A `kind` no resident theme can dress (`"calls"`) falls back to the default
+kind and is listed in `kinds_defaulted`.
+
+**You decide what the picture is about; this never guesses.** There is no importance score and
+no threshold, because which nodes deserve a box is a semantic judgement about what the diagram is
+*for* — rank a codebase by any centrality measure and you get its exception module, not its
+architecture. Three ways to say it:
+
+- **all of it** — pass everything and read `bounds`.
+- **all of it except** — `exclude=[…]`, ids or globs you have judged to be noise (`include=[…]`
+  is the keep-list form). An exact id always matches itself, so an id with glob characters in it
+  is safe to write.
+- **grouped this way** — `collapse=[{id, members, label?, kind?}]` draws several nodes as **one**.
+  Edges re-point at the group, edges between members become internal (dropped, counted), and
+  parallels merge. Collapsing **replaces** its members; to keep them visible with a box round
+  them, ingest normally and call `add_diagram_container` with ids from `mapping`.
+
+**Size is extent, not box.** `size_field` names a key your export already carries (`"symbols"`,
+`"loc"`, `"cost"`); a per-node `size` wins over it. It can be written into the label
+(`size_labels` → `diagram (177)`) and, **only if you ask**, scale the box: `scale_width=[60, 200]`
+and/or `scale_height=[36, 120]`, each independently optional. Scale one dimension and it maps
+linearly; scale **both** and each maps by the **square root**, so the box's *area* carries the
+quantity either way. A scaled box never shrinks below what its label needs. Area is a weak
+channel — for "rank these", `add_chart(kind="bar")` is the honest tool.
+
+Weight is data too: `weight_labels` writes it on the line and it sums when parallels merge. It
+never restyles the edge — line weight belongs to the theme.
+
+```
+add_diagram_graph(
+  nodes=[{id:"src/ops/chart.py", symbols:315}, {id:"src/ops/diagram.py", symbols:178},
+         {id:"src/model/document.py", symbols:32}, {id:"src/model/errors.py", symbols:6}],
+  edges=[{from:"src/ops/chart.py", to:"src/ops/diagram.py", weight:21},
+         {from:"src/ops/chart.py", to:"src/model/document.py", weight:27},
+         {from:"src/model/document.py", to:"src/model/errors.py", weight:5}],
+  collapse=[{id:"model", label:"model", kind:"datastore",
+             members:["src/model/document.py", "src/model/errors.py"]}],
+  size_field="symbols", scale_width=[120, 260], scale_height=[40, 96],
+  layout="layered", direction="TB")
+# → {nodes_created:3, edges_created:2, groups_created:1, nodes_collapsed:2,
+#    self_edges_dropped:1, mapping:{…}, kinds_defaulted:[], bounds:[x, y, w, h], ranks:2, …}
+resize_document(mode="fit", margin=20)
+```
+
+Labels: a node with no `label` is captioned by `label_mode` — `"trimmed"` by default (drop the
+prefix every id shares, and a path-shaped id's file extension), or `"basename"`/`"id"`. Full
+paths are unreadable as box labels.
+
+A graph decides its own size, so read `bounds` (the x/y/w/h the drawing actually occupies)
+against the canvas: forty nodes will not fit a default document, and `resize_document(mode="fit")`
+shrink-wraps to it. Each node is **named after its graph id**, so your own vocabulary keeps
+working — `add_callout(target="src/ops/diagram.py")` afterwards just resolves (and `mapping`
+gives the created ids, with `name:<graph id>` forcing the name reading if an id ever collides).
+
+The obvious producer is a code index — a crib `code_graph` export drops straight in, which is
+exactly how the self-portrait below is drawn: this project's own modules, seven `collapse`
+groups, boxes scaled by symbol count.
+
+![the project's own module graph, ingested in one call](./img/facade-architecture.png)
 
 ## Charts
 

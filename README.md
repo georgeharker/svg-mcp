@@ -166,7 +166,7 @@ See [`DESIGN.md`](./DESIGN.md) for the full architecture and the
 
 ## Status
 
-The full inkex catalog is mapped through to **180 MCP tools** (see
+The full inkex catalog is mapped through to **181 MCP tools** (see
 [`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md)), plus the theme system and the declarative
 facade families (diagrams, charts, annotations), with ruff/mypy clean and the test suite green.
 
@@ -220,12 +220,27 @@ facade families (diagrams, charts, annotations), with ruff/mypy clean and the te
   and rounded orthogonal routing, containers drawn behind their members, explicit `reflow()`
   after moves, and `layout_diagram` (layered/tree/grid) for zero-coordinate authoring. See
   [`docs/diagrams.md`](./docs/diagrams.md).
-- **Charts** — data-parametric bar/line/donut/scatter/sparkline with nice-number ticks and
-  margins measured from the actual tick labels; an `axes=` spec for pinned (and clipped) limits,
-  tick counts or explicit ticks, percent/currency/SI labels, gridlines, tick marks and log
-  scales; `edit_chart` re-derives the picture from new data. Deliberately not a plotting library
-  (no statistical transforms, secondary axes or colormaps — `import_svg` matplotlib output for
-  that).
+- **Graph ingest** (`add_diagram_graph`) — hand it a whole `{nodes, edges}` graph, in the shape
+  code-graph/dependency exports already emit (`from`/`to`, extra keys ignored), and get boxes,
+  arrows and a layout in one call: self-edges dropped and counted, parallel edges merged with
+  their weights summed, unknown endpoints refused rather than invented. You say what the picture
+  is about — `collapse` groups, `include`/`exclude` globs, `size_field` scaling a box by area —
+  because no centrality score knows which nodes deserve one.
+- **Edge router** — `layout_diagram` reserves a **lane** per rank-spanning edge (dummy nodes in
+  the ranking) so long edges travel between the boxes instead of over them, routes sharing a
+  corridor fan apart instead of drawing on top of each other, and a label is scored onto the
+  cheapest segment long enough to hold it — charged for the boxes, routes and labels it would
+  land on. When the router's choice isn't yours, `waypoints` pins an edge's middle through every
+  later reflow and layout, and `pinned` keeps a node where you put it while the layout packs
+  the drawing around it.
+- **Charts** — seven data-parametric kinds (`bar`, `line`, `donut`, `scatter`, `histogram`,
+  `sparkline`, `radar`) with nice-number ticks and margins measured from the actual tick labels;
+  an `axes=` spec for pinned (and clipped) limits, tick counts or explicit ticks,
+  percent/currency/SI labels, gridlines, minor ticks, tick direction, rotated/inverted axes, a
+  zero spine, reference lines and log scales; plus waterfalls with a total bar, normalized
+  stacks, marker glyphs (open, `markevery`, bubbles by area), series bands, and step-mid lines.
+  `edit_chart` re-derives the picture from new data. Deliberately not a plotting library (no
+  density/KDE, secondary axes or colormaps — `import_svg` matplotlib output for that).
 - **Annotations** — `add_legend()` generated from what the document uses (swatches wear the
   real theme classes), `add_callout` cards whose leader lines point at node **ids** and
   survive `reflow`, `add_table` with measured columns, `add_callout_card` with kind-colored
@@ -283,6 +298,14 @@ the bundled default theme, and stays editable (`edit_chart` swaps the data and r
 </p>
 <p align="center">
   <img src="./docs/img/facade-annotate.png" alt="annotation facades" width="760">
+</p>
+
+And the same idea applied to a graph you already have: the self-portrait below is svg-mcp's own
+module graph handed to `add_diagram_graph` in **one call** — a code-index export, seven `collapse`
+groups, boxes scaled by symbol count, laid out and routed with no coordinates anywhere.
+
+<p align="center">
+  <img src="./docs/img/facade-architecture.png" alt="the project's own module graph, ingested in one call" width="620">
 </p>
 
 Guides: [`docs/themes.md`](./docs/themes.md) (authoring a design language as CSS — tokens,
