@@ -6,9 +6,17 @@ a lane per rank-spanning edge) out. They know nothing about documents, elements 
 every ordering rule below is testable on its own.
 
 Layout is deliberately a whole-scope OPT-IN: :func:`layout_diagram` repositions every node in
-the scope it is given, explicit prior positions included. Hand placement survives by not calling
-it — there is no per-node "pinned" flag, because a layout that has to route around fixed nodes
-is a different algorithm, not a flag on this one.
+the scope it is given, explicit prior positions included, and hand placement survives by not
+calling it. The ONE exception is a node whose spec says ``pinned``, which keeps both of its
+coordinates. That flag arrives with the priority coordinate pass and could not have arrived
+before it: the old greedy pass had nowhere to put a fixed node — it packed each rank left to
+right and every position was a consequence of the one before it. The priority method already
+asks, for every node, "who wins when two of you want the same room?", so a fixed node is just
+the answer "this one, always" — an infinite-priority wall the rest of the rank packs around.
+
+A pin is a PLACEMENT override, not a topology one: the node's rank is still computed from the
+edges, so a node pinned far from its rank's band gets doubling-back edges. That is the caller's
+geometry, drawn exactly as asked.
 
 Both axes are named rather than numbered: the MAIN axis is the one ranks advance along and the
 CROSS axis is the one nodes spread across within a rank. ``LR`` maps main→x and cross→y, ``TB``
@@ -19,6 +27,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -45,8 +54,14 @@ Algorithm = Literal["layered", "tree", "grid"]
 
 _DEFAULT_GAP_LAYER = 90.0
 _SWEEPS = 4  # down, up, down, up — enough to settle the small graphs a diagram actually is
+# Coordinate sweeps: down, up, down. One fewer than the ORDERING sweeps, and deliberately an odd
+# number — a downward pass is the one that leaves every rank sitting on its predecessors' medians,
+# so a pass order ending upward leaves the last rank holding a median of positions that moved
+# after it was read. Three gives every rank a look in both directions and still finishes facing
+# the way the drawing reads.
+_PACK_SWEEPS = 3
 # The cross-axis room one dummy reserves. Small — a lane is a line, not a box — but not zero, or
-# the greedy coordinate pass would stack a lane flush against the node above it.
+# the coordinate pass would stack a lane flush against the node above it.
 _DUMMY_EXTENT = 8.0
 
 EdgeKey = tuple[str, str]
@@ -110,6 +125,11 @@ def _origins(direction: Direction, origin_x: float, origin_y: float) -> tuple[fl
 def _point(main: float, cross: float, direction: Direction) -> Point:
     """An ``(x, y)`` from a main/cross pair — the only place the two frames meet."""
     return (main, cross) if direction == "LR" else (cross, main)
+
+
+def _axes(at: Point, direction: Direction) -> tuple[float, float]:
+    """The ``(main, cross)`` a world point sits at — :func:`_point` read the other way round."""
+    return at if direction == "LR" else (at[1], at[0])
 
 
 def _rank_offsets(bands: Sequence[Sequence[float]], main_origin: float, gap: float) -> list[float]:
@@ -291,7 +311,7 @@ def layout_tree(
     return Placement(positions=positions, ranks=rank_count, cycles_broken=cycles)
 
 
-# --- layered (Sugiyama-lite) -------------------------------------------------
+# --- layered (Sugiyama) ------------------------------------------------------
 
 
 def _break_cycles(
@@ -437,6 +457,237 @@ def _regroup_by_container(layer: Sequence[str], group_of: Mapping[str, str]) -> 
     return [node_id for key in order for node_id in members[key]]
 
 
+# --- the cross-axis coordinate pass (Sugiyama's priority method) --------------
+
+
+def _median(values: Sequence[float]) -> float:
+    """The middle of a run of values; the mean of the two middles when there is no single one.
+
+    The MEDIAN, not the mean the ordering sweeps use: ordering only needs a key to sort by, but a
+    coordinate is a place to stand, and one far-off neighbour should not drag a node out of line
+    with the rest of them.
+    """
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+Priority = tuple[int, int, int]
+"""Who wins when two slots in a rank want the same room: tier, then degree, then document order."""
+
+
+def _priorities(
+    slots: Sequence[str],
+    neighbours: Mapping[str, AbstractSet[str]],
+    dummies: AbstractSet[str],
+    pinned: AbstractSet[str],
+) -> dict[str, Priority]:
+    """Rank every slot for the coordinate pass, most important first.
+
+    Three tiers. A PINNED node outranks everything, because its position is a fact rather than a
+    preference. Then the dummies: a lane that bends reads as a detour the drawing does not have,
+    and straightening one is worth more than straightening any single edge. Then the real nodes by
+    their degree in the layout edge set — the node with the most neighbours is the one whose
+    median settles the most edges at once. Document order breaks the last tie, which makes the
+    priorities a TOTAL order: two nodes can never each be the other's wall, so no rank deadlocks.
+    """
+    return {
+        slot: (
+            2 if slot in pinned else 1 if slot in dummies else 0,
+            len(neighbours.get(slot, ())),
+            -index,
+        )
+        for index, slot in enumerate(slots)
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _Pack:
+    """One cross-axis packing in progress: where every slot sits, and who may push whom.
+
+    ``at`` is the LEADING cross edge of each slot (its top, for ``LR``), and it is the one thing
+    here that changes — everything else is the rules the pushing obeys.
+    """
+
+    at: dict[str, float]
+    sizes: Mapping[str, tuple[float, float]]
+    dummies: AbstractSet[str]
+    pinned: Mapping[str, float]
+    priority: Mapping[str, Priority]
+    spacing_cross: float
+
+    def gap(self, first: str, second: str) -> float:
+        """The clearance owed between two adjacent slots: the lane pitch if either IS a lane.
+
+        A lane is a line, not a box: charging it the full node gap on both sides blows a rank
+        threading several of them out to a multiple of the drawing's width.
+        """
+        if first in self.dummies or second in self.dummies:
+            return _DUMMY_EXTENT
+        return self.spacing_cross
+
+    def slack(self, layer: Sequence[str], index: int, step: int) -> float:
+        """The free room between ``layer[index]`` and the slot one ``step`` along the rank.
+
+        Never negative: two pins can be placed on top of each other (see :meth:`seed`), and a
+        would-be mover must read that as "no room", not as room to travel backwards.
+        """
+        first, second = (index, index + 1) if step > 0 else (index - 1, index)
+        left, right = layer[first], layer[second]
+        clear = self.at[right] - self.at[left] - self.sizes[left][1] - self.gap(left, right)
+        return max(0.0, clear)
+
+    def seed(self, layer: Sequence[str], cross_origin: float) -> None:
+        """Pack one rank at minimal pitch, holding its pinned members exactly where they are.
+
+        The starting guess the sweeps then improve on: everything as tight as its extents and gaps
+        allow. A pin is placed at its own coordinate, and the unpinned slots BEFORE it give way
+        (backwards pass) — their tight packing was a guess, the pin is not. Two pins with no room
+        between them are left overlapping: that is the caller's geometry, drawn as asked.
+        """
+        floor = cross_origin
+        for index, slot in enumerate(layer):
+            self.at[slot] = self.pinned.get(slot, floor)
+            floor = self.at[slot] + self.sizes[slot][1]
+            if index + 1 < len(layer):
+                floor += self.gap(slot, layer[index + 1])
+        for index in range(len(layer) - 2, -1, -1):
+            slot, after = layer[index], layer[index + 1]
+            if slot in self.pinned:
+                continue
+            room = self.at[after] - self.gap(slot, after) - self.sizes[slot][1]
+            self.at[slot] = min(self.at[slot], room)
+
+    def shove(self, layer: Sequence[str], index: int, delta: float) -> float:
+        """Move ``layer[index]`` by ``delta``, pushing lower-priority slots along; how far it got.
+
+        The whole of the priority method is in the two ways this can end. A neighbour of LOWER
+        standing is pushed ahead of the mover, recursively, and gives up exactly as much room as
+        it has. A neighbour of higher or equal standing — and any pinned node, whatever its degree
+        — is a WALL: the mover is clamped short of it rather than the wall being disturbed, so a
+        sweep can never undo a placement a more important node has already earned.
+        """
+        step = 1 if delta > 0 else -1
+        want = abs(delta)
+        got = want
+        neighbour = index + step
+        if 0 <= neighbour < len(layer):
+            free = self.slack(layer, index, step)
+            if want > free:
+                mover, blocker = layer[index], layer[neighbour]
+                if blocker in self.pinned or self.priority[blocker] >= self.priority[mover]:
+                    got = free
+                else:
+                    got = free + self.shove(layer, neighbour, (want - free) * step)
+        self.at[layer[index]] += got * step
+        return got
+
+    def pull(
+        self,
+        layer: Sequence[str],
+        neighbours: Mapping[str, AbstractSet[str]],
+        ranked: Mapping[str, int],
+        adjacent: int,
+    ) -> None:
+        """Pull one rank toward the medians of its neighbours in the rank ``adjacent`` to it.
+
+        In DESCENDING priority, so the slot that most wants to be somewhere gets there first and
+        is a wall to everyone after it. A slot with no neighbour over there has no opinion and
+        stays where the packing put it; a pinned one has no opinion either, by definition.
+        """
+        places = {slot: index for index, slot in enumerate(layer)}
+        for slot in sorted(layer, key=lambda slot: self.priority[slot], reverse=True):
+            if slot in self.pinned:
+                continue
+            anchors = [
+                self.at[other] + self.sizes[other][1] / 2.0
+                for other in neighbours[slot]
+                if ranked[other] == adjacent
+            ]
+            if not anchors:
+                continue
+            delta = _median(anchors) - self.sizes[slot][1] / 2.0 - self.at[slot]
+            if delta:
+                self.shove(layer, places[slot], delta)
+
+
+def _normalization(
+    cross_at: Mapping[str, float],
+    order: Sequence[str],
+    cross_origin: float,
+    *,
+    pinned: bool,
+) -> float:
+    """How far the packed drawing has to slide to start at the origin — ZERO if anything is pinned.
+
+    Say it out loud, because it is the one rule where two promises collide. Normally the pass
+    normalizes on the REAL nodes: whatever the sweeps did, the drawing is slid so its topmost node
+    sits on the cross origin, and a lane that ended up above it simply runs there — the origin is
+    a statement about where the DRAWING starts, and a lane is not part of its extent.
+
+    A pin is a promise about absolute coordinates, and a normalizing shift is a promise about
+    where the drawing starts; they cannot both be kept. The pin wins, wholesale: ONE pinned node
+    anywhere in the scope turns normalization off for EVERYTHING. Not "shift the others and leave
+    the pin", which would slide the drawing out from under the node it was pinned relative to and
+    make the pin meaningless; not "shift so the pin lands back where it was", which is the same
+    number as no shift at all whenever the pin is what sets the minimum, and a lie otherwise. A
+    pinned scope keeps the frame the pin is expressed in, and the consequence a caller must expect
+    is that unpinned nodes may then sit ABOVE the cross origin (the sweeps move freely in both
+    directions) — the drawing is anchored to the pin now, not to ``origin_x``/``origin_y``.
+    """
+    if pinned:
+        return 0.0
+    return cross_origin - min(cross_at[node_id] for node_id in order)
+
+
+def _pack_ranks(
+    layers: Sequence[Sequence[str]],
+    slots: Sequence[str],
+    sizes: Mapping[str, tuple[float, float]],
+    neighbours: Mapping[str, AbstractSet[str]],
+    ranked: Mapping[str, int],
+    *,
+    dummies: AbstractSet[str],
+    pinned: Mapping[str, float],
+    spacing_cross: float,
+    cross_origin: float,
+) -> dict[str, float]:
+    """Cross-axis coordinates by Sugiyama's PRIORITY METHOD: pack tight, then straighten by rank.
+
+    What this replaced was a single greedy pass that read each rank left to right, put every node
+    at its neighbours' mean, and then took ``max(wanted, floor)`` so it never overlapped the node
+    before it. That ``max`` only ever pushed one way, so a rank could be dragged across but never
+    corrected back, and the drift COMPOUNDED rank by rank: on a 16-node acceptance graph the
+    drawing spread 2488 units across an axis that wanted about 800, and read as a staircase.
+
+    The cure is to stop deriving a position from the position beside it. Every rank is packed at
+    minimal pitch first, so the spread of a rank is decided by what is IN it; then each sweep
+    pulls nodes toward the median of their neighbours in the previous (or next) rank, in
+    descending priority, and a node moving pushes only slots that matter less than it does.
+    Nothing accumulates, because nothing is defined in terms of its neighbour's coordinate.
+
+    Returns the leading cross edge of every slot, dummies included — the lanes read theirs back.
+    """
+    pack = _Pack(
+        at={},
+        sizes=sizes,
+        dummies=dummies,
+        pinned=pinned,
+        priority=_priorities(slots, neighbours, dummies, pinned.keys()),
+        spacing_cross=spacing_cross,
+    )
+    for layer in layers:
+        pack.seed(layer, cross_origin)
+    for sweep in range(_PACK_SWEEPS):
+        down = sweep % 2 == 0
+        sequence = range(1, len(layers)) if down else range(len(layers) - 2, -1, -1)
+        for index in sequence:
+            pack.pull(layers[index], neighbours, ranked, index - 1 if down else index + 1)
+    return pack.at
+
+
 def layout_layered(
     nodes: Sequence[LayoutNode],
     edges: Sequence[tuple[str, str]],
@@ -447,8 +698,9 @@ def layout_layered(
     spacing_cross: float,
     origin_x: float = 20.0,
     origin_y: float = 20.0,
+    pinned: Mapping[str, Point] | None = None,
 ) -> Placement:
-    """Sugiyama-lite: break cycles, layer by longest path, order by barycenter, then place.
+    """Sugiyama: break cycles, layer by longest path, order by barycenter, place by priority.
 
     Two additions to the textbook version. Every edge that spans more than one rank is cut into
     unit hops through DUMMY nodes, which take part in the ordering sweeps and the coordinate pass
@@ -458,6 +710,12 @@ def layout_layered(
     members of a container are pulled back together within their rank, so a container drawn around
     them afterwards is a box and not a comb. Dummies belong to no container, so regrouping treats
     each of them as its own singleton group and leaves it where the sweep put it.
+
+    ``pinned`` maps a node id to the world top-left it is to KEEP. Such a node is placed on both
+    axes by the caller, not by this function: its rank is still computed (and its edges still get
+    lanes through it), but the main-axis band its rank sits in does not apply to it, and on the
+    cross axis it is an infinite-priority wall the rest of its rank packs around. Pinning also
+    turns the final normalization OFF for the whole drawing — see :func:`_normalization`.
     """
     if not nodes:
         return Placement()
@@ -503,35 +761,28 @@ def layout_layered(
         for offset, band in zip(offsets, bands, strict=True)
     ]
 
-    dummy_ids = set(dummy_rank)
-    cross_at: dict[str, float] = {}
-    for index, layer in enumerate(layers):
-        floor = -math.inf
-        previous_was_lane = False
-        for position, slot in enumerate(layer):
-            extent = sizes[slot][1]
-            is_lane = slot in dummy_ids
-            anchors = [
-                cross_at[other] + sizes[other][1] / 2.0
-                for other in neighbours[slot]
-                if ranked[other] == index - 1 and other in cross_at
-            ]
-            if anchors:
-                wanted = sum(anchors) / len(anchors) - extent / 2.0
-            else:
-                wanted = cross_origin if position == 0 else floor
-            cross_at[slot] = max(wanted, floor)
-            # A lane is a line, not a box: charge the small lane pitch on either side of a
-            # dummy rather than the full node gap, or a rank threading many lanes blows its
-            # cross extent out to several times the drawing (observed: 3752u wide vs 792).
-            gap = _DUMMY_EXTENT if is_lane or previous_was_lane else spacing_cross
-            floor = cross_at[slot] + extent + gap
-            previous_was_lane = is_lane
-    # Normalized on the REAL nodes: the origin is a statement about where the drawing starts, and
-    # a lane is not part of the drawing's extent. A lane above the first node simply runs there.
-    shift = cross_origin - min(cross_at[node_id] for node_id in order)
+    holds = pinned or {}
+    held = {
+        node_id: _axes(at, direction)[1]
+        for node_id, at in holds.items()
+        if node_id in rank
+    }
+    cross_at = _pack_ranks(
+        layers,
+        slots,
+        sizes,
+        neighbours,
+        ranked,
+        dummies=frozenset(dummy_rank),
+        pinned=held,
+        spacing_cross=spacing_cross,
+        cross_origin=cross_origin,
+    )
+    shift = _normalization(cross_at, order, cross_origin, pinned=bool(held))
     positions = {
-        node_id: _point(offsets[rank[node_id]], cross_at[node_id] + shift, direction)
+        node_id: holds[node_id]
+        if node_id in held
+        else _point(offsets[rank[node_id]], cross_at[node_id] + shift, direction)
         for node_id in order
     }
     waypoints: dict[EdgeKey, list[Point]] = {}
@@ -556,17 +807,37 @@ def layout_layered(
 # --- the pass over a real document -------------------------------------------
 
 
-def _scope_nodes(doc: Document, scope: str | None) -> list[tuple[str, LayoutNode, Point]]:
+@dataclass(frozen=True, slots=True)
+class _Found:
+    """One diagram node the pass is about to move: its identity, its size, where it is, and pins."""
+
+    id: str
+    node: LayoutNode
+    at: Point
+    pinned: bool
+
+
+def _scope_nodes(doc: Document, scope: str | None) -> list[_Found]:
     """The diagram nodes DIRECTLY under the scope parent, in document order, with their boxes."""
-    out: list[tuple[str, LayoutNode, Point]] = []
+    out: list[_Found] = []
     for child in doc.resolve_parent(scope):
-        if not isinstance(child.tag, str) or read_node_spec(child) is None:
+        if not isinstance(child.tag, str):
+            continue
+        spec = read_node_spec(child)
+        if spec is None:
             continue
         node_id = str(child.get_id())
         box = _box_of(doc, node_id)
         if box is None:
             continue
-        out.append((node_id, LayoutNode(id=node_id, w=box.w, h=box.h), (box.x, box.y)))
+        out.append(
+            _Found(
+                id=node_id,
+                node=LayoutNode(id=node_id, w=box.w, h=box.h),
+                at=(box.x, box.y),
+                pinned=spec.pinned,
+            )
+        )
     return out
 
 
@@ -588,8 +859,17 @@ def layout_diagram(
     default); the edges consulted are the ones with both ends in that set, and the containers
     consulted are the ones with a member in it. Everything else in the document is left alone.
 
-    This moves EVERY node in the set — a layout is a decision about the whole picture, so hand
-    placement is preserved by not calling it rather than by exempting individual nodes.
+    This moves every node in the set except the ones whose spec says ``pinned`` — a layout is a
+    decision about the whole picture, so hand placement is preserved by not calling it, and a
+    single node's placement by saying so on that node. A pinned node keeps BOTH coordinates and
+    the layered packer treats it as an infinite-priority wall the rest of its rank packs around.
+    Its RANK is still computed from its edges, so a node pinned far from where its rank lands has
+    edges that double back to reach it; that is the caller's geometry, drawn as asked.
+
+    A pin also anchors the drawing's frame: with any node pinned, the pass performs NEITHER the
+    normalization onto ``origin_x``/``origin_y`` NOR the container-overflow correction, because
+    both are whole-scope shifts and a shifted pin is not a pin. Unpinned nodes may then sit above
+    or left of the origin. Pin nothing and both corrections apply exactly as before.
 
     Rank-spanning edges are routed down the LANES the layered algorithm reserved for them. Those
     lanes are threaded into this pass's reflow and deliberately not stored anywhere: they are
@@ -605,8 +885,9 @@ def layout_diagram(
     found = _scope_nodes(doc, scope)
     if not found:
         return DiagramLayout()
-    nodes = [node for _id, node, _at in found]
+    nodes = [item.node for item in found]
     known = {node.id for node in nodes}
+    pinned = {item.id: item.at for item in found if item.pinned}
     edges: list[tuple[str, str]] = []
     routed: dict[EdgeKey, list[str]] = {}
     for element, spec in _edge_groups(doc):
@@ -657,13 +938,21 @@ def layout_diagram(
             spacing_cross=cross,
             origin_x=origin_x,
             origin_y=origin_y,
+            pinned=pinned,
         )
     else:
         raise InvalidArgument(f"unknown layout algorithm {algorithm!r}: use layered, tree or grid")
 
-    for node_id, _node, (at_x, at_y) in found:
-        target = placement.positions[node_id]
-        translate_node(doc, node_id, target[0] - at_x, target[1] - at_y)
+    # A pinned node is skipped rather than translated by zero: the layered packer already gave it
+    # back exactly where it was, but grid and tree have no notion of a pin at all (they place it,
+    # and are simply not listened to), and skipping is the only thing that keeps the promise
+    # byte-for-byte in every case. Those two may then run something over the top of it — a pin in
+    # a layout that has no room to make is the caller asking for exactly that.
+    for item in found:
+        if item.pinned:
+            continue
+        target = placement.positions[item.id]
+        translate_node(doc, item.id, target[0] - item.at[0], target[1] - item.at[1])
     lanes = {
         edge_id: points
         for key, points in placement.edge_waypoints.items()
@@ -673,16 +962,18 @@ def layout_diagram(
     # Auto containers add padding + label headroom OUTSIDE the node extents the placement
     # normalized, so a fitted box can overflow the origin (clipping its label at the canvas
     # edge). Measure the refit boxes and shift the whole scope down/right by any deficit.
+    # A pinned scope is exempt for the same reason it skips normalization: this is a whole-scope
+    # shift, and shifting a pin is not honouring it.
     shift_x, shift_y = 0.0, 0.0
     for group, _spec in _container_groups(doc):
-        if str(group.get_id()) in containers:
+        if str(group.get_id()) in containers and not pinned:
             box = _bbox_xywh(group)
             if box is not None:
                 shift_x = max(shift_x, origin_x - box[0])
                 shift_y = max(shift_y, origin_y - box[1])
     if shift_x > 0 or shift_y > 0:
-        for node_id, _node, _at in found:
-            translate_node(doc, node_id, shift_x, shift_y)
+        for item in found:
+            translate_node(doc, item.id, shift_x, shift_y)
         lanes = {
             edge_id: [(x + shift_x, y + shift_y) for x, y in points]
             for edge_id, points in lanes.items()

@@ -261,8 +261,8 @@ _FACADES: tuple[_Facade, ...] = (
         kind="diagram_node",
         text=("kind", "label", "shape"),
         numbers=("w", "h"),
-        bools=("themed",),
-        optional=frozenset({"themed"}),
+        bools=("themed", "pinned"),
+        optional=frozenset({"themed", "pinned"}),
     ),
     _Facade(
         attr="data-diagram-edge",

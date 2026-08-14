@@ -642,6 +642,39 @@ def test_a_node_spec_round_trips_through_get_params() -> None:
         "themed": True,
         "auto": False,
     }
+    # The dict comparison above is exhaustive, so it already says there is no `pinned` key: a
+    # node the layout owns stores none, the same way an edge nobody routed by hand stores no
+    # waypoints.
+
+
+def test_a_pinned_node_round_trips_through_get_params() -> None:
+    doc = _doc()
+    placed = ops.add_diagram_node(doc, kind="service", label="Fixed", width=80, height=40,
+                                  pinned=True)
+    params = get_params(doc, placed.ref.id)["params"]
+    assert isinstance(params, dict)
+    assert params["pinned"] is True
+    spec = read_node_spec(doc.resolve(placed.ref.id))
+    assert spec is not None and spec.pinned is True
+
+
+def test_pinning_is_set_and_cleared_by_edit_and_survives_every_other_edit() -> None:
+    doc = _doc()
+    placed = ops.add_diagram_node(doc, kind="service", label="A", width=80, height=40)
+    ops.edit_diagram_node(doc, placed.ref.id, pinned=True)
+
+    # A re-label and a re-kind rewrite the whole spec; neither is a statement about placement.
+    ops.edit_diagram_node(doc, placed.ref.id, label="A renamed")
+    ops.edit_diagram_node(doc, placed.ref.id, kind="note")
+    spec = read_node_spec(doc.resolve(placed.ref.id))
+    assert spec is not None and spec.pinned is True and spec.kind == "note"
+
+    ops.edit_diagram_node(doc, placed.ref.id, pinned=False)
+    cleared = read_node_spec(doc.resolve(placed.ref.id))
+    assert cleared is not None and cleared.pinned is False
+    params = get_params(doc, placed.ref.id)["params"]
+    assert isinstance(params, dict)
+    assert "pinned" not in params  # cleared back to an absent key, not a stored false
 
 
 # --- 3. edges ----------------------------------------------------------------

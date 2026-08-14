@@ -937,6 +937,11 @@ class NodeSpec:
     question as whether it currently wears a class: a facade built ``themed=False`` is meant to
     stay bare, so an edit that merely echoes its kind back must not dress it. Absent from a spec
     written before this was recorded, where it reads as True — every such facade was dressed.
+
+    ``pinned`` says this node keeps the coordinates it has: ``layout_diagram`` computes its rank
+    like everything else, but places nothing — the layout packs the rest of the drawing AROUND
+    it. False (an absent key, which is what every node written before this existed carries) means
+    the layout owns its position, which is the normal case.
     """
 
     kind: str
@@ -946,6 +951,7 @@ class NodeSpec:
     h: float
     auto: bool
     themed: bool = True
+    pinned: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1020,6 +1026,7 @@ def read_node_spec(element: BaseElement) -> NodeSpec | None:
             h=float(spec["h"]),
             auto=bool(spec.get("auto", False)),
             themed=bool(spec.get("themed", True)),
+            pinned=bool(spec.get("pinned", False)),
         )
     except (ValueError, TypeError, KeyError):
         return None
@@ -1088,19 +1095,21 @@ def _write_container_spec(element: BaseElement, spec: ContainerSpec) -> None:
 
 
 def _write_node_spec(element: BaseElement, spec: NodeSpec) -> None:
-    _store(
-        element,
-        _NODE_ATTR,
-        {
-            "kind": spec.kind,
-            "label": spec.label,
-            "shape": spec.shape,
-            "w": spec.w,
-            "h": spec.h,
-            "auto": spec.auto,
-            "themed": spec.themed,
-        },
-    )
+    stored: dict[str, SpecValue] = {
+        "kind": spec.kind,
+        "label": spec.label,
+        "shape": spec.shape,
+        "w": spec.w,
+        "h": spec.h,
+        "auto": spec.auto,
+        "themed": spec.themed,
+    }
+    # A node nobody pinned writes no ``pinned`` key at all — the same rule an edge's waypoints
+    # follow. An absent key is how a spec says "the layout owns this", and it keeps every node
+    # written before pinning existed byte-identical.
+    if spec.pinned:
+        stored["pinned"] = True
+    _store(element, _NODE_ATTR, stored)
 
 
 def _write_edge_spec(element: BaseElement, spec: EdgeSpec) -> None:
@@ -1465,6 +1474,7 @@ def add_diagram_node(
     style: Style | None = None,
     styles: list[str] | None = None,
     themed: bool = True,
+    pinned: bool = False,
 ) -> PlacedNode:
     """Add a diagram node — a shape and its centered label, as one themed group.
 
@@ -1472,6 +1482,11 @@ def add_diagram_node(
     manifest's ``[kinds]``) and paints the group, and the label is measured and padded from that
     theme's tokens. Omit ``width``/``height`` to size the box to its label, and ``x``/``y`` to
     stack it under the last diagram node in the same parent.
+
+    ``pinned`` exempts this node from :func:`layout_diagram`'s placement: it keeps the ``x``/``y``
+    it has and the layout packs everything else around it. Its rank is still COMPUTED from its
+    edges, so pinning it far from where its rank lands gives it doubling-back edges — the pin
+    overrides where the node is drawn, never what the graph says it is.
     """
     theme = serving_theme(doc, kind)
     shape = _shape_for(theme, kind)
@@ -1508,7 +1523,16 @@ def add_diagram_node(
         _set_label(doc, group, label, (at_x + w / 2.0, at_y + h / 2.0), halo=None, dy=None)
         _write_node_spec(
             group,
-            NodeSpec(kind=kind, label=label, shape=shape, w=w, h=h, auto=auto, themed=themed),
+            NodeSpec(
+                kind=kind,
+                label=label,
+                shape=shape,
+                w=w,
+                h=h,
+                auto=auto,
+                themed=themed,
+                pinned=pinned,
+            ),
         )
     return PlacedNode(ref=ref, x=at_x, y=at_y, w=w, h=h)
 
@@ -1594,6 +1618,7 @@ def edit_diagram_node(
     *,
     label: str | None = None,
     kind: str | None = None,
+    pinned: bool | None = None,
 ) -> NodeEdit:
     """Edit a diagram node by its SPEC: re-label it, or move it to another kind.
 
@@ -1601,6 +1626,11 @@ def edit_diagram_node(
     (an explicit width/height is a decision, not a guess). A new ``kind`` swaps the role class the
     group wears but does NOT redraw its shape — changing geometry under an existing node would
     throw away whatever has been laid out around it, so it is reported as ``shape_unchanged``.
+
+    ``pinned`` sets or clears the layout exemption (None leaves it as it is): a pinned node keeps
+    its coordinates through :func:`layout_diagram`, which packs the rest of the drawing around it.
+    Its rank is still computed from its edges, so a node pinned far from where its rank lands has
+    edges that double back to reach it.
     """
     group = doc.resolve(target)
     spec = read_node_spec(group)
@@ -1643,6 +1673,7 @@ def edit_diagram_node(
             h=h,
             auto=spec.auto,
             themed=spec.themed,
+            pinned=spec.pinned if pinned is None else pinned,
         ),
     )
     return NodeEdit(

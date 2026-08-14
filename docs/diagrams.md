@@ -57,13 +57,19 @@ are reported, not guessed at.
 
 `layout_diagram(algorithm, direction)` places every diagram node in scope, then reflows:
 
-- `layered` (default) — Sugiyama-style: cycle-safe ranking, crossing-minimized orders,
-  nodes sharing a container kept adjacent. For flows and architectures.
+- `layered` (default) — Sugiyama: cycle-safe ranking, crossing-minimized orders, coordinates
+  by the **priority method** (the most connected node in a rank gets the position it wants and
+  shoves the rest along, so busy paths come out straight and depth adds no drift), nodes
+  sharing a container kept adjacent. For flows and architectures.
 - `tree` — parents centered over children. For genuine hierarchies.
 - `grid` — document order into rows. Ignores edges.
 
-A layout pass moves **every** node in scope — hand placement is preserved by *not*
-calling it, never by exempting individual nodes.
+A layout pass moves **every** node in scope — hand placement is preserved by *not* calling it,
+or, one node at a time, by `add_diagram_node(pinned=true)` / `edit_diagram_node(pinned=true)`.
+A pinned node keeps **both** coordinates and `layered` packs the rest of the drawing around it
+as an immovable wall. Its rank is still computed from its edges, so a node pinned far from
+where its rank lands gets edges that double back. Pinning anything also anchors the drawing to
+that pin: the scope is no longer normalized onto `origin_x`/`origin_y`.
 
 ## Charts
 

@@ -385,8 +385,14 @@ def test_nodes_sharing_a_container_are_pulled_together_within_their_rank() -> No
         origin_x=0.0,
         origin_y=0.0,
     )
-    assert _by_cross(loose.positions)[1:] == ["a", "b", "c"]  # document order, b in between
-    assert _by_cross(grouped.positions)[1:] == ["a", "c", "b"]  # the container's two, adjacent
+    # The rank the container constrains, read in cross order. Root is left out of the comparison
+    # because it is not in that rank: the coordinate pass centers it on its children's median, so
+    # WHERE it sorts relative to them is a fact about parents, not about containers.
+    def rank_one(placement: dict[str, Point]) -> list[str]:
+        return [node for node in _by_cross(placement) if node != "root"]
+
+    assert rank_one(loose.positions) == ["a", "b", "c"]  # document order, b in between
+    assert rank_one(grouped.positions) == ["a", "c", "b"]  # the container's two, adjacent
     assert grouped.positions["c"][1] - grouped.positions["a"][1] == 50.0  # one slot apart
 
 
@@ -541,6 +547,169 @@ def test_dummies_take_part_in_the_ordering_sweeps() -> None:
     assert lane[0][1] < placement.positions["m"][1]  # and its lane above m, the way a runs
 
 
+# --- 3c. the priority coordinate pass ----------------------------------------
+#
+# The disease these were written against: the greedy cross-axis pass derived every position from
+# the one beside it (`max(wanted, floor)`, which could only ever push one way), so a rank was
+# dragged across by its anchors and never corrected back — and the drag COMPOUNDED, rank by rank,
+# into a drawing that read as a diagonal staircase. Each of these was checked against the old pass
+# by stashing this change: the numbers in the comments are what it produced.
+
+_LANE_PITCH = 8.0  # _DUMMY_EXTENT: how straight "straight" has to be to count
+
+
+def _staircase(depth: int, width: int = 3) -> tuple[list[LayoutNode], list[tuple[str, str]]]:
+    """``depth`` ranks of ``width`` nodes, wired so each rank's first node hangs off the last one.
+
+    The shape that made the old pass drift: rank r+1's first node is anchored at the BOTTOM of
+    rank r, so the greedy floor pushed the rest of rank r+1 past it, which pushed rank r+2 further
+    still. One rank of drag is a wonky drawing; five ranks of it is a staircase.
+    """
+    letters = "abcdefgh"[:depth]
+    nodes = [LayoutNode(id=f"{rank}{i}", w=80.0, h=40.0) for rank in letters for i in range(width)]
+    edges = [(f"{rank}{width - 1}", f"{after}0") for rank, after in zip(letters, letters[1:],
+                                                                       strict=False)]
+    edges += [
+        (f"{rank}{i}", f"{after}{i}")
+        for rank, after in zip(letters, letters[1:], strict=False)
+        for i in range(1, width)
+    ]
+    return nodes, edges
+
+
+def _spreads(
+    placement: dict[str, Point], nodes: Sequence[LayoutNode], gap: float
+) -> tuple[list[tuple[float, float]], float]:
+    """Per-rank ``(spread, natural width)`` and the whole drawing's cross spread.
+
+    A rank's NATURAL width is what it would occupy packed tight — its extents plus one gap
+    between each pair — which is the only honest yardstick for "did this rank spread out".
+    """
+    ranks: dict[float, list[LayoutNode]] = {}
+    for node in nodes:
+        ranks.setdefault(placement[node.id][0], []).append(node)
+    per_rank = [
+        (
+            max(placement[node.id][1] + node.h for node in members)
+            - min(placement[node.id][1] for node in members),
+            sum(node.h for node in members) + gap * (len(members) - 1),
+        )
+        for members in ranks.values()
+    ]
+    total = max(
+        placement[node.id][1] + node.h for node in nodes
+    ) - min(placement[node.id][1] for node in nodes)
+    return per_rank, total
+
+
+def test_the_priority_pass_holds_a_rank_to_its_own_width_however_deep_the_graph() -> None:
+    """The staircase regression, stated as the two bounds the greedy pass blew through.
+
+    At four ranks of three the old pass drew rank 3 at 1.76x its natural width and spread the
+    drawing over 360 units where the widest rank wanted 168 — both over. It got worse with depth
+    (2.14x and 424u at five ranks) because the drag compounded. The priority pass holds 1.38x and
+    296u at EVERY depth, which is the point: nothing accumulates, so depth costs nothing.
+    """
+    spreads = []
+    for depth in (3, 4, 5):
+        nodes, edges = _staircase(depth)
+        placement = layout_layered(
+            nodes, edges, spacing_main=90.0, spacing_cross=24.0, origin_x=0.0, origin_y=0.0
+        )
+        per_rank, total = _spreads(placement.positions, nodes, 24.0)
+        for spread, natural in per_rank:
+            assert spread <= natural * 1.5
+        assert total <= 2 * max(natural for _spread, natural in per_rank)
+        spreads.append(total)
+    assert spreads[0] == spreads[1] == spreads[2]  # depth buys no drift at all
+
+
+def test_a_chain_stays_straight_through_the_ranks_it_shares_with_distractors() -> None:
+    """The priority method's signature result: the busy path is the one that gets to be straight.
+
+    a→b→c→d, with a fan node ahead of each of b and c in its rank and in document order. The old
+    pass placed each rank's first node on its anchor and floored the chain node below it, so the
+    chain stepped down 64 units a rank (centers 20, 84, 148, 148). b and c are the most connected
+    nodes in their ranks, so the priority pass seats them on their median first and shoves the fan
+    nodes out of the way instead.
+
+    The last rank has no distractor on purpose: d and a fan node there would both have degree one,
+    and which of two equals wins is a question about document order, not about priority.
+    """
+    # Document order puts the distractors first, which is what made the old pass place them first.
+    nodes = _nodes("a", "x1", "x2", "b", "c", "d", w=80.0, h=40.0)
+    placement = layout_layered(
+        nodes,
+        [("a", "b"), ("b", "c"), ("c", "d"), ("a", "x1"), ("b", "x2")],
+        spacing_main=90.0,
+        spacing_cross=24.0,
+        origin_x=0.0,
+        origin_y=0.0,
+    )
+    centers = [placement.positions[node][1] + 20.0 for node in ("a", "b", "c", "d")]
+    assert max(centers) - min(centers) <= _LANE_PITCH
+
+
+def test_the_same_graph_lays_out_the_same_way_every_time() -> None:
+    nodes, edges = _staircase(4)
+    first = layout_layered(
+        nodes, edges, spacing_main=90.0, spacing_cross=24.0, origin_x=0.0, origin_y=0.0
+    )
+    again = layout_layered(
+        nodes, edges, spacing_main=90.0, spacing_cross=24.0, origin_x=0.0, origin_y=0.0
+    )
+    assert first.positions == again.positions
+
+
+# --- 3d. pinned nodes in the packer ------------------------------------------
+
+
+def _hub(pinned: dict[str, Point] | None) -> dict[str, Point]:
+    """A rank holding a low-degree node and, after it, the hub that wants to stand where it is."""
+    nodes = _nodes("top", "quiet", "hub", "t1", "t2", w=80.0, h=40.0)
+    return layout_layered(
+        nodes,
+        [("top", "quiet"), ("top", "hub"), ("hub", "t1"), ("hub", "t2")],
+        spacing_main=90.0,
+        spacing_cross=24.0,
+        origin_x=0.0,
+        origin_y=0.0,
+        pinned=pinned,
+    ).positions
+
+
+def test_a_sweep_shoves_a_low_priority_neighbour_aside() -> None:
+    """The control for the pin test below: the hub outranks the quiet node and pushes through it.
+
+    Three edges against one, so the hub is placed first and the quiet node ahead of it in the rank
+    gives way — which the hub landing exactly level with ``top``, the median it asked for, records.
+    """
+    loose = _hub(None)
+    assert loose["hub"][1] == loose["top"][1]
+
+
+def test_a_pinned_node_is_a_wall_that_no_sweep_can_move() -> None:
+    """The same graph with the quiet node pinned: the hub's degree buys it nothing at all now."""
+    held = _hub({"quiet": (170.0, 0.0)})
+    assert held["quiet"] == (170.0, 0.0)  # exactly where it was pinned, both coordinates
+    assert held["hub"][1] != held["top"][1]  # clamped short of its median, not shoved through
+    assert held["hub"][1] - held["quiet"][1] >= 64.0  # …and the node gap held (40 + 24)
+
+
+def test_pinning_anchors_the_frame_so_nothing_is_normalized_onto_the_origin() -> None:
+    """The documented rule, asserted: one pin turns the whole scope's normalization off.
+
+    Unpinned, the drawing is slid so its topmost node sits on the cross origin. Pinned, it is not
+    slid at all — the pin is an absolute coordinate, and a shifted pin is not a pin — so other
+    nodes are free to sit above the origin.
+    """
+    loose = _hub(None)
+    assert min(at[1] for at in loose.values()) == 0.0  # normalized onto origin_y
+    held = _hub({"quiet": (170.0, 200.0)})
+    assert held["quiet"] == (170.0, 200.0)
+    assert min(at[1] for at in held.values()) != 0.0  # the frame belongs to the pin now
+
+
 def test_an_empty_set_lays_out_to_nothing() -> None:
     for placement in (
         layout_grid([], spacing_main=1.0, spacing_cross=1.0),
@@ -678,16 +847,43 @@ def test_the_shapes_a_layered_layout_draws_keep_their_edges_out_of_the_boxes() -
         assert no_box_overlap(doc)
 
 
+def _gate(doc: Document) -> tuple[str, str]:
+    """A four-rank fan whose long edge CANNOT be drawn straight: A ⇉ B ⇉ C ⇉ D, plus A→D.
+
+    A hangs off two middles and D off two more, so the median coordinate pass parks both of them
+    level with a middle node rather than off to one side — which is exactly what makes the direct
+    A→D route run through the two boxes between them. (A plain chain used to do this too. It no
+    longer does: the priority pass offsets a chain's two ends TOWARD their long edge's lane, and
+    the direct route then sneaks past the boxes by a couple of units. Better drawing, worse test
+    data — hence the fan, where the other edges hold both ends in the band.)
+    """
+    ends = [
+        ops.add_diagram_node(doc, kind="service", label=name, width=80, height=40).ref.id
+        for name in ("A", "D")
+    ]
+    for lane in range(2):
+        middles = [
+            ops.add_diagram_node(
+                doc, kind="service", label=f"{name}{lane}", width=80, height=40
+            ).ref.id
+            for name in ("B", "C")
+        ]
+        ops.add_diagram_edge(doc, source=ends[0], target=middles[0])
+        ops.add_diagram_edge(doc, source=middles[0], target=middles[1])
+        ops.add_diagram_edge(doc, source=middles[1], target=ends[1])
+    ops.add_diagram_edge(doc, source=ends[0], target=ends[1])
+    return (ends[0], ends[1])
+
+
 def test_a_lane_keeps_a_rank_spanning_edge_clear_of_what_it_passes() -> None:
-    """A→D over a three-rank chain: the one case a direct route cannot draw without a collision.
+    """A→D over four ranks: the one case a direct route cannot draw without a collision.
 
     The second half is the same document routed WITHOUT lanes, which is what a plain reflow does —
     it is asserted to fail, both to prove the test data really is a collision case and to pin the
     documented semantic that lanes are layout scaffolding rather than stored geometry.
     """
     doc = _doc()
-    ids = _chain(doc, 4)
-    ops.add_diagram_edge(doc, source=ids[0], target=ids[3])
+    _gate(doc)
     ops.layout_diagram(doc)
     assert edges_avoid_boxes(doc) == []
 
@@ -723,6 +919,69 @@ def test_a_pinned_route_wins_over_the_lane_the_layout_would_have_used() -> None:
     # It still goes where it was told, not down the lane the layout reserved for it (which runs
     # just under the rank of boxes, hundreds of units above y=300).
     assert passes_through(path_points(d), (300.0, 300.0), TOL)
+
+
+def test_a_layout_pass_leaves_a_pinned_node_exactly_where_it_was() -> None:
+    """The promise, byte for byte: a pinned node's coordinates come out of layout unchanged.
+
+    Not "close to": the pass skips the translate entirely for a pinned node, so there is no
+    rounding to be within.
+    """
+    doc = _doc()
+    ids = _diamond(doc)
+    ops.edit_diagram_node(doc, ids[2], pinned=True)
+    before = _box_of(doc, ids[2])
+    assert before is not None
+    ops.layout_diagram(doc)
+    after = _box_of(doc, ids[2])
+    assert after is not None
+    assert (after.x, after.y) == (before.x, before.y)
+
+
+def test_the_rest_of_the_drawing_packs_around_a_pinned_node() -> None:
+    """A pin is a wall, not a hole: everything else still lays out, and still clears it.
+
+    Laid out first, then one box dragged down its rank and pinned there, which is the workflow the
+    flag exists for — the pin stays inside its own rank's band, so the only thing that has to give
+    is the cross-axis packing of the node beside it.
+    """
+    doc = _doc()
+    ids = _diamond(doc)
+    ops.layout_diagram(doc)
+    ops.translate_node(doc, ids[1], 0.0, 220.0)  # well below where the layout put it
+    ops.edit_diagram_node(doc, ids[1], pinned=True)
+    pinned = _box_of(doc, ids[1])
+    assert pinned is not None
+    result = ops.layout_diagram(doc)
+
+    assert result.nodes_placed == 4  # the pinned node is still one of the nodes it laid out
+    held = _box_of(doc, ids[1])
+    assert held is not None and (held.x, held.y) == (pinned.x, pinned.y)
+    assert no_box_overlap(doc)
+    assert min_gap(doc) >= 24.0 - 1e-6  # the node gap holds against the wall too
+    assert edges_avoid_boxes(doc) == []
+    # And the whole drawing came down to meet the pin rather than the pin being pulled back up to
+    # the origin: with anything pinned, this pass normalizes nothing.
+    assert _corner(doc, ids)[1] > 20.0
+
+
+def test_a_pinned_node_keeps_its_main_axis_coordinate_as_well_as_its_cross() -> None:
+    """Both coordinates, which is what makes a pin a placement override rather than a nudge.
+
+    The node's RANK is still computed — it is rank 1 of 3 either way — so pinning it back past
+    rank 0 is exactly the doubling-back geometry the docstrings warn about, drawn as asked.
+    """
+    doc = _doc()
+    ids = _diamond(doc)
+    ops.edit_diagram_node(doc, ids[1], pinned=True)
+    ops.translate_node(doc, ids[1], -60.0, 0.0)  # left of where any rank of this diagram starts
+    before = _box_of(doc, ids[1])
+    assert before is not None
+    ops.layout_diagram(doc)
+    after, first = _box_of(doc, ids[1]), _box_of(doc, ids[0])
+    assert after is not None and first is not None
+    assert (after.x, after.y) == (before.x, before.y)
+    assert after.x < first.x  # rank 1 drawn to the LEFT of rank 0: the caller's geometry, kept
 
 
 def test_a_document_with_no_diagram_nodes_lays_out_to_nothing() -> None:

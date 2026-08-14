@@ -3293,6 +3293,7 @@ def add_diagram_node(
     style: ShapeStyle | None = None,
     styles: list[str] | None = None,
     themed: bool = True,
+    pinned: bool = False,
 ) -> dict[str, str | float | None | list[str]]:
     """Add a diagram NODE — a kind-shaped box with a centered label, as one group.
 
@@ -3318,6 +3319,9 @@ def add_diagram_node(
         style: Inline style on the group (wins over the theme).
         styles: Extra named styles / theme classes to attach.
         themed: false = skip the theme's automatic hooks (the shape is still kind-derived).
+        pinned: true = `layout_diagram` leaves this node's x/y ALONE and packs the drawing
+            around it. Its rank is still computed from its edges, so a node pinned far from
+            where its rank lands gets edges that double back to reach it.
 
     Returns:
         The group's {id, tag, name}, plus `auto_styles` and the placed {x, y, w, h}.
@@ -3336,6 +3340,7 @@ def add_diagram_node(
         style=_style(style),
         styles=styles,
         themed=themed,
+        pinned=pinned,
     )
     return {**_placed(doc, placed.ref), "x": placed.x, "y": placed.y, "w": placed.w, "h": placed.h}
 
@@ -3419,6 +3424,7 @@ def edit_diagram_node(
     target: str,
     label: str | None = None,
     kind: str | None = None,
+    pinned: bool | None = None,
 ) -> dict[str, str | bool | None]:
     """Edit a diagram node by its SPEC — re-label it, or move it to another kind.
 
@@ -3431,11 +3437,17 @@ def edit_diagram_node(
         target: The node group's id or name.
         label: New label text ("" removes it).
         kind: New kind (re-paints; reported back as shape_unchanged).
+        pinned: true = `layout_diagram` leaves this node's x/y ALONE and packs the drawing
+            around it; false = give it back to the layout; omit to leave the flag as it is.
+            The node's rank is still computed from its edges, so a node pinned far from where
+            its rank lands gets edges that double back to reach it.
 
     Returns:
         {id, tag, name, remeasured, shape_unchanged}.
     """
-    result = ops.edit_diagram_node(_doc(document_id), target, label=label, kind=kind)
+    result = ops.edit_diagram_node(
+        _doc(document_id), target, label=label, kind=kind, pinned=pinned
+    )
     return {
         **result.ref.as_dict(),
         "remeasured": result.remeasured,
@@ -3625,10 +3637,18 @@ def layout_diagram(
     the same call.
 
     This moves EVERY diagram node in the scope, explicit positions included — a layout is a
-    decision about the whole picture. Hand placement is preserved by NOT calling this.
+    decision about the whole picture. Hand placement is preserved by NOT calling this, or, for
+    one node at a time, with `add_diagram_node(pinned=true)` / `edit_diagram_node(pinned=true)`:
+    a pinned node keeps both coordinates and "layered" packs the rest of the drawing around it.
+    Its RANK is still computed from its edges, so a node pinned far from where its rank lands
+    gets edges that double back to reach it. Pinning anything also anchors the whole drawing to
+    that pin: the scope is no longer normalized onto origin_x/origin_y, so other nodes may sit
+    above or left of the origin.
 
-    - "layered": Sugiyama-lite. Cycles are cut, nodes ranked by their longest path from a source,
-      and each rank ordered to minimise crossings. The one for a flow or an architecture.
+    - "layered": Sugiyama. Cycles are cut, nodes ranked by their longest path from a source, each
+      rank ordered to minimise crossings, and coordinates set by the priority method (the most
+      connected node in a rank gets the position it wants and shoves the rest along). The one for
+      a flow or an architecture.
     - "tree": a forest by depth, leaves in slots and each parent centered over its children.
       Cleaner than layered when the graph really is a hierarchy.
     - "grid": document order into a uniform grid; ignores the edges entirely.
