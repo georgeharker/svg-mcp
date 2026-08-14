@@ -695,6 +695,23 @@ def test_a_lane_keeps_a_rank_spanning_edge_clear_of_what_it_passes() -> None:
     assert edges_avoid_boxes(doc) != []
 
 
+def test_pulling_shared_corridors_apart_never_walks_a_route_into_a_box() -> None:
+    """The acceptance invariant for corridor separation: it may double a line, never cross a box.
+
+    A chain with three rank-spanning edges over it gives the router plenty of shared lane to fan
+    out, and every box in the middle of the chain is something an over-eager offset could push a
+    run into.
+    """
+    doc = _doc()
+    ids = _chain(doc, 5)
+    ops.add_diagram_edge(doc, source=ids[0], target=ids[3])
+    ops.add_diagram_edge(doc, source=ids[1], target=ids[4])
+    ops.add_diagram_edge(doc, source=ids[0], target=ids[4])
+    ops.layout_diagram(doc)
+    assert edges_avoid_boxes(doc) == []
+    assert no_box_overlap(doc)
+
+
 def test_a_pinned_route_wins_over_the_lane_the_layout_would_have_used() -> None:
     doc = _doc()
     ids = _chain(doc, 4)

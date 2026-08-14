@@ -24,6 +24,7 @@ import math
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Literal, cast
 
 import inkex
@@ -467,10 +468,17 @@ def _longest_midpoint(points: Sequence[Point]) -> Point:
 
 @dataclass(frozen=True, slots=True)
 class Route:
-    """A routed edge: the path data to draw and where its label wants to sit."""
+    """A routed edge: the path data to draw, where its label wants to sit, and the polyline.
+
+    ``points`` is the route BEFORE it was turned into path data — the vertices for an orthogonal
+    route, the anchors and any threaded lane for the other two. It is what the label scorer reads
+    candidates off and what corridor separation adjusts, so it travels with the drawn result
+    rather than being re-derived from the ``d`` string it produced.
+    """
 
     d: str
     label_at: Point
+    points: tuple[Point, ...] = ()
 
 
 def _spline_path(points: Sequence[Point], sa: Side, sb: Side) -> str:
@@ -496,6 +504,41 @@ def _spline_path(points: Sequence[Point], sa: Side, sb: Side) -> str:
     return " ".join(parts)
 
 
+def route_points(
+    a: Point,
+    sa: Side,
+    b: Point,
+    sb: Side,
+    *,
+    route: RouteStyle,
+    stub: float,
+    via: Sequence[Point] | None = None,
+) -> list[Point]:
+    """The polyline one edge follows, before any of it is turned into path data.
+
+    Split out from :func:`route_edge` because the geometry has to be settled for the WHOLE
+    diagram before any of it is drawn: corridor separation moves runs that several edges share,
+    and a label is scored against the routes its neighbours ended up taking.
+    """
+    through = list(via) if via else []
+    if route in ("straight", "spline"):
+        return [a, *through, b]
+    return orthogonal_waypoints(a, sa, b, sb, stub, through)
+
+
+def draw_route(
+    points: Sequence[Point], sa: Side, sb: Side, *, route: RouteStyle, radius: float
+) -> str:
+    """Path data for a settled polyline, in whichever of the three styles was asked for."""
+    if route == "straight":
+        return " ".join(
+            [f"M {_pair(points[0])}", *(f"L {_pair(point)}" for point in points[1:])]
+        )
+    if route == "spline":
+        return _spline_path(points, sa, sb)
+    return rounded_path(points, radius)
+
+
 def route_edge(
     a: Point,
     sa: Side,
@@ -513,16 +556,374 @@ def route_edge(
     reserved lanes, or a route an author pinned. It never affects which faces the edge uses
     (that is :func:`resolve_sides`' job) and never reaches past the anchors.
     """
-    through = list(via) if via else []
-    if route == "straight":
-        points = [a, *through, b]
-        drawn = " ".join([f"M {_pair(a)}", *(f"L {_pair(point)}" for point in points[1:])])
-        return Route(drawn, _longest_midpoint(points))
-    if route == "spline":
-        points = [a, *through, b]
-        return Route(_spline_path(points, sa, sb), _longest_midpoint(points))
-    points = orthogonal_waypoints(a, sa, b, sb, stub, through)
-    return Route(rounded_path(points, radius), _longest_midpoint(points))
+    points = route_points(a, sa, b, sb, route=route, stub=stub, via=via)
+    return Route(
+        draw_route(points, sa, sb, route=route, radius=radius),
+        _longest_midpoint(points),
+        tuple(points),
+    )
+
+
+# --- label placement ---------------------------------------------------------
+#
+# An edge label is the one piece of a diagram that has nowhere it MUST go: the path is pinned at
+# both ends, but the text may sit anywhere along it. Putting it at the midpoint of the longest
+# segment — the old rule — is right only when that midpoint happens to be over free paper, and on
+# a real diagram it lands on a node, on another edge's label, or on a crossing edge often enough
+# to be the first thing a reader notices. So the placement is SCORED instead: every segment long
+# enough to hold the text offers a candidate, each candidate is charged for what it covers, and
+# the cheapest wins. Ties go to the first candidate generated, which is the old answer.
+
+# How far above a segment the text sits, and how far to its side when the segment runs vertically.
+_LABEL_DY = -4.0
+_LABEL_SIDE_GAP = 4.0
+
+# What a candidate is charged for. The two overlap terms are fractions of the label's own area, so
+# fully covering a node costs _COST_BOX and a sliver costs proportionally less — which keeps them
+# comparable with each other and far above the per-crossing charge. Distance is the tie-breaker
+# that keeps a label near the line it names when nothing else separates two candidates.
+_COST_BOX = 1000.0
+_COST_LABEL = 800.0
+_COST_CROSSING = 25.0
+_COST_DISTANCE = 1.0
+
+Segment = tuple[Point, Point]
+
+
+@dataclass(frozen=True, slots=True)
+class LabelContext:
+    """What an edge label has to stay out of: node boxes, labels already placed, other routes."""
+
+    boxes: tuple[Box, ...] = ()
+    placed: tuple[Box, ...] = ()
+    segments: tuple[Segment, ...] = ()
+
+
+def _overlap_area(a: Box, b: Box) -> float:
+    """The area two boxes share — zero when they merely touch or miss."""
+    across = min(a.x + a.w, b.x + b.w) - max(a.x, b.x)
+    down = min(a.y + a.h, b.y + b.h) - max(a.y, b.y)
+    return across * down if across > 0.0 and down > 0.0 else 0.0
+
+
+def _segment_hits(start: Point, end: Point, box: Box, inset: float = 0.0) -> bool:
+    """True when a segment gets inside ``box`` by more than ``inset`` (Liang–Barsky clipping)."""
+    left, top = box.x + inset, box.y + inset
+    right, bottom = box.x + box.w - inset, box.y + box.h - inset
+    if right <= left or bottom <= top:
+        return False
+    near, far = 0.0, 1.0
+    for delta, from_, low, high in (
+        (end[0] - start[0], start[0], left, right),
+        (end[1] - start[1], start[1], top, bottom),
+    ):
+        if abs(delta) < _EPS:
+            if from_ < low or from_ > high:
+                return False
+            continue
+        first, second = (low - from_) / delta, (high - from_) / delta
+        near, far = max(near, min(first, second)), min(far, max(first, second))
+        if near > far:
+            return False
+    return True
+
+
+def label_rect(at: Point, dy: float, size: Point) -> Box:
+    """The box a label occupies: its measured size, centred on ``at`` shifted down by ``dy``.
+
+    The one place the drawing contract is written down — a facade label is anchored ``middle`` on
+    a ``central`` baseline, so the text's centre is the point it was written at plus its ``dy``.
+    """
+    return Box(at[0] - size[0] / 2.0, at[1] + dy - size[1] / 2.0, size[0], size[1])
+
+
+def score_label(
+    rect: Box,
+    boxes: Sequence[Box],
+    placed_labels: Sequence[Box],
+    segments: Sequence[Segment],
+) -> float:
+    """What a label placement costs: what it covers, and what it crosses. Lower is better.
+
+    Covering a node or another label is charged by AREA (as a fraction of the label's own), so a
+    clipped corner costs less than a direct hit. Crossing an edge is charged per crossing rather
+    than by area: a line has no area to overlap, and two crossings of the same run is what a
+    reader sees as the label sitting ON the wire.
+    """
+    area = max(rect.w * rect.h, _EPS)
+    covered = sum(_overlap_area(rect, box) for box in boxes) / area * _COST_BOX
+    clashing = sum(_overlap_area(rect, other) for other in placed_labels) / area * _COST_LABEL
+    crossings = sum(1 for start, end in segments if _segment_hits(start, end, rect))
+    return covered + clashing + _COST_CROSSING * crossings
+
+
+def label_candidates(points: Sequence[Point], size: Point) -> list[tuple[Point, float]]:
+    """Every position an edge label is allowed to take, best guess FIRST.
+
+    A segment offers a candidate only if the text fits along it — a label wider than the run it
+    labels reads as belonging to nothing. If none qualifies the longest segment is used anyway,
+    because the label still has to go somewhere. The longest segment is always tried first (and
+    above the line first), so a diagram with nothing to avoid keeps the placement it always had.
+    """
+    pts = _dedupe(points)
+    if len(pts) < 2:
+        return [((pts[0] if pts else (0.0, 0.0)), _LABEL_DY)]
+    width, height = size
+    segments = list(zip(pts, pts[1:], strict=False))
+    lengths = [math.dist(start, end) for start, end in segments]
+    longest = max(range(len(segments)), key=lambda index: lengths[index])
+    qualifying = [index for index, length in enumerate(lengths) if length > width]
+    order = [longest, *(index for index in qualifying if index != longest)]
+    out: list[tuple[Point, float]] = []
+    for index in order:
+        (sx, sy), (ex, ey) = segments[index]
+        mid = ((sx + ex) / 2.0, (sy + ey) / 2.0)
+        if abs(ex - sx) >= abs(ey - sy):  # a horizontal run: above the line, or below it
+            out.append((mid, _LABEL_DY))
+            out.append((mid, height))
+        else:  # a vertical run: beside the line, on either side
+            gap = width / 2.0 + _LABEL_SIDE_GAP
+            out.append(((mid[0] - gap, mid[1]), _LABEL_DY))
+            out.append(((mid[0] + gap, mid[1]), _LABEL_DY))
+    return out
+
+
+def place_label(
+    points: Sequence[Point], size: Point, context: LabelContext
+) -> tuple[Point, float]:
+    """Where an edge's label goes and by how much it is nudged: the cheapest candidate.
+
+    Deterministic by construction — the candidates are generated in a fixed order and the winner
+    is chosen by a STRICT improvement, so the same document always produces the same placement.
+    """
+    best_at, best_dy, best_score = (points[0] if points else (0.0, 0.0)), _LABEL_DY, math.inf
+    for at, dy in label_candidates(points, size):
+        rect = label_rect(at, dy, size)
+        near = math.dist((rect.cx, rect.cy), at)
+        score = (
+            score_label(rect, context.boxes, context.placed, context.segments)
+            + _COST_DISTANCE * near
+        )
+        if score < best_score:
+            best_at, best_dy, best_score = at, dy, score
+    return best_at, best_dy
+
+
+# --- corridor separation -----------------------------------------------------
+#
+# Two orthogonal routes that happen to run along the same lane are drawn exactly on top of each
+# other, and one line where the reader expects two is not a small blemish: it hides a whole
+# relation. So after every route is settled, the runs they SHARE are found and fanned out around
+# the corridor's own centre line. The offset is applied to a whole run at once — a jog halfway
+# along a shared corridor is a worse artifact than the overlap it was trying to fix.
+
+# Two runs this close on the cross axis are in the same corridor, whatever the arithmetic says.
+_CORRIDOR_TOL = 1.0
+# How deep a run may sit inside a node box before the offset that put it there counts as crossing.
+_BOX_INSET = 0.5
+# The pitches a group tries, in order: full, then tighter, rather than pushing a run into a box.
+_PITCH_STEPS = (1.0, 0.5, 0.25)
+_DEFAULT_SEPARATION = 4.0
+
+Axis = Literal["h", "v"]
+
+
+@dataclass(frozen=True, slots=True)
+class Corridor:
+    """A maximal straight run of one route: where it lies, how far it goes, and which points it is.
+
+    ``coord`` is the cross-axis position (the y of a horizontal run, the x of a vertical one) and
+    ``lo``/``hi`` bound it along its own axis. ``start``/``end`` index into the route's points, so
+    an offset can move exactly the vertices that make the run and leave the rest joined to them.
+    """
+
+    edge: str
+    axis: Axis
+    coord: float
+    lo: float
+    hi: float
+    start: int
+    end: int
+
+
+def _axis_of(start: Point, end: Point) -> Axis | None:
+    """Which axis a segment runs along — None for a zero-length one or a diagonal."""
+    across, down = abs(end[0] - start[0]), abs(end[1] - start[1])
+    if across <= _ALIGN_TOL and down <= _ALIGN_TOL:
+        return None
+    if down <= _ALIGN_TOL:
+        return "h"
+    if across <= _ALIGN_TOL:
+        return "v"
+    return None
+
+
+def _cross(point: Point, axis: Axis) -> float:
+    return point[1] if axis == "h" else point[0]
+
+
+def _along(point: Point, axis: Axis) -> float:
+    return point[0] if axis == "h" else point[1]
+
+
+def collinear_runs(routes: Mapping[str, Sequence[Point]]) -> list[Corridor]:
+    """Every maximal axis-aligned run in every route, in edge-id order.
+
+    Consecutive segments on the same axis and the same cross-axis coordinate are ONE run: an
+    orthogonal route often leaves its stub and carries straight on down the same lane, and
+    offsetting the two halves independently would put a step in the middle of a straight line.
+    """
+    out: list[Corridor] = []
+    for edge in sorted(routes):
+        pts = list(routes[edge])
+        index, total = 0, len(pts)
+        while index < total - 1:
+            axis = _axis_of(pts[index], pts[index + 1])
+            if axis is None:
+                index += 1
+                continue
+            coord = _cross(pts[index], axis)
+            end = index + 1
+            while end < total - 1 and _axis_of(pts[end], pts[end + 1]) == axis:
+                if abs(_cross(pts[end + 1], axis) - coord) > _ALIGN_TOL:
+                    break
+                end += 1
+            span = [_along(point, axis) for point in pts[index : end + 1]]
+            out.append(Corridor(edge, axis, coord, min(span), max(span), index, end))
+            index = end
+    return out
+
+
+def corridor_groups(
+    runs: Sequence[Corridor], tol: float = _CORRIDOR_TOL
+) -> list[list[Corridor]]:
+    """The runs of DIFFERENT edges that share a corridor, grouped; groups of one are dropped.
+
+    Sharing means the same axis, the same cross-axis coordinate within ``tol``, and intervals
+    that actually overlap — two runs meeting end to end are not on top of each other. Grouping is
+    transitive, so three lanes a unit apart are one corridor of three rather than two pairs.
+    Each group is ordered by edge id, which is what makes the fan-out deterministic.
+    """
+    home = list(range(len(runs)))
+
+    def root(index: int) -> int:
+        while home[index] != index:
+            home[index] = home[home[index]]
+            index = home[index]
+        return index
+
+    for first, one in enumerate(runs):
+        for second in range(first + 1, len(runs)):
+            other = runs[second]
+            if one.edge == other.edge or one.axis != other.axis:
+                continue
+            if abs(one.coord - other.coord) > tol:
+                continue
+            if min(one.hi, other.hi) - max(one.lo, other.lo) <= 0.0:
+                continue
+            home[root(first)] = root(second)
+
+    grouped: dict[int, list[Corridor]] = {}
+    for index, run in enumerate(runs):
+        grouped.setdefault(root(index), []).append(run)
+    return [
+        sorted(members, key=lambda run: (run.edge, run.start))
+        for _key, members in sorted(grouped.items())
+        if len(members) > 1
+    ]
+
+
+def centred_offsets(count: int, pitch: float) -> list[float]:
+    """``count`` offsets spaced by ``pitch``, centred on zero — the corridor keeps its own line."""
+    return [(index - (count - 1) / 2.0) * pitch for index in range(count)]
+
+
+def offset_run(points: Sequence[Point], run: Corridor, offset: float) -> list[Point]:
+    """Shift one whole run perpendicular to itself, keeping the route joined at both ends.
+
+    The vertices the run is made of move together, so the perpendicular segments either side of
+    it simply get longer or shorter — no step appears mid-run. A run that reaches an ANCHOR is
+    the exception: that point belongs to the node's face and cannot move, so it is left where it
+    is and the segment leaving it absorbs the shift as a taper.
+    """
+    if abs(offset) <= _EPS:
+        return list(points)
+    moved = list(points)
+    first = run.start + 1 if run.start == 0 else run.start
+    last = run.end - 1 if run.end == len(moved) - 1 else run.end
+    for index in range(first, last + 1):
+        x, y = moved[index]
+        moved[index] = (x, y + offset) if run.axis == "h" else (x + offset, y)
+    return moved
+
+
+def _run_offends(points: Sequence[Point], run: Corridor, boxes: Sequence[Box]) -> set[int]:
+    """Which of ``boxes`` a run — and the two segments it hangs off — is currently inside."""
+    low = max(0, run.start - 1)
+    high = min(len(points) - 1, run.end + 1)
+    return {
+        which
+        for which, box in enumerate(boxes)
+        for index in range(low, high)
+        if _segment_hits(points[index], points[index + 1], box, _BOX_INSET)
+    }
+
+
+def _no_worse(
+    shifted: Sequence[Point], before: Sequence[Point], run: Corridor, boxes: Sequence[Box]
+) -> bool:
+    """True when an offset put the run inside no box it was not already inside.
+
+    Measured as a CHANGE rather than as an absolute, because a route may already be crossing
+    something — an unlaid-out long edge does it routinely — and refusing to separate it from its
+    twin would leave the reader with one line through the box instead of two. What the offset
+    must never do is take a run that was clear and put it through a node.
+    """
+    return not (
+        _run_offends(shifted, run, boxes) - _run_offends(before, run, boxes)
+    )
+
+
+def separate_corridors(
+    routes: Mapping[str, Sequence[Point]],
+    *,
+    pitch: float,
+    obstacles: Mapping[str, Sequence[Box]] | None = None,
+    pinned: Sequence[str] = (),
+) -> dict[str, list[Point]]:
+    """Fan out every shared corridor, and hand back each route's adjusted points.
+
+    Runs shorter than twice the pitch are left alone: a short jog has no corridor to speak of,
+    and moving it would only bend the two corners around it. A group whose fan-out would push a
+    run into a node box tries a tighter pitch instead, and keeps its overlap rather than crossing
+    a box — a doubled line is a blemish, an edge through a node is a lie.
+
+    A ``pinned`` route still takes part in a corridor but never moves: it holds its slot, so the
+    routes around it step aside by their own offsets and the overlap still clears. Geometry an
+    author typed is not something a tidying pass gets to nudge by two units.
+    """
+    working = {edge: list(points) for edge, points in routes.items()}
+    if pitch <= 0.0:
+        return working
+    held = set(pinned)
+    runs = [run for run in collinear_runs(routes) if run.hi - run.lo > 2.0 * pitch]
+    for group in corridor_groups(runs):
+        for scale in _PITCH_STEPS:
+            trial: dict[str, list[Point]] = {}
+            failed = False
+            for run, offset in zip(group, centred_offsets(len(group), pitch * scale), strict=True):
+                if run.edge in held:
+                    continue
+                before = trial.get(run.edge, working[run.edge])
+                shifted = offset_run(before, run, offset)
+                if not _no_worse(shifted, before, run, (obstacles or {}).get(run.edge, ())):
+                    failed = True
+                    break
+                trial[run.edge] = shifted
+            if not failed:
+                working.update(trial)
+                break
+    return working
 
 
 # --- specs -------------------------------------------------------------------
@@ -745,11 +1146,16 @@ def _label_font(theme: ServingTheme) -> str:
     return (theme.tokens.get("--font") or _DEFAULT_FONT).split(",")[0].strip().strip("'\"")
 
 
+@lru_cache(maxsize=4096)
 def measure_label(text: str, family: str, size: float) -> tuple[float, float]:
     """Measure a label, falling back through the generic family and then to a metric-free guess.
 
     ``sans-serif`` is a CSS family, not a font, and a headless box may have none of the usual
     faces installed — so a facade that could not size its own box is not an acceptable outcome.
+
+    Cached, because measuring re-opens the font file and a reroute now asks for every edge label
+    in the document: the answer depends only on the arguments and on which fonts are installed,
+    and the font scan behind it is already cached for the life of the process.
     """
     for candidate in (family, *_GENERIC_FONTS.get(family.lower(), ())):
         try:
@@ -1309,27 +1715,61 @@ def _edge_groups(doc: Document) -> Iterator[tuple[BaseElement, EdgeSpec]]:
                 yield node, spec
 
 
-def _write_route(doc: Document, leg: _Leg, a: Point, b: Point) -> None:
+def _node_ids(doc: Document) -> list[str]:
+    """Every diagram node's id, in document order."""
+    return [
+        str(node.get_id())
+        for node in doc.svg.iter()
+        if isinstance(node.tag, str) and node.get(_NODE_ATTR) is not None
+    ]
+
+
+def _segments_of(points: Sequence[Point]) -> list[Segment]:
+    return list(zip(points, points[1:], strict=False))
+
+
+def _bounds(points: Sequence[Point], margin: Point) -> Box:
+    """The box a polyline occupies, grown by ``margin`` on each axis.
+
+    A route only has to be scored against what is NEAR it: everything else contributes zero to
+    every candidate, and walking the whole diagram per edge is what turns a reroute quadratic.
+    """
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return Box(
+        min(xs) - margin[0],
+        min(ys) - margin[1],
+        max(xs) - min(xs) + 2 * margin[0],
+        max(ys) - min(ys) + 2 * margin[1],
+    )
+
+
+def _touches(a: Box, b: Box) -> bool:
+    return (
+        a.x <= b.x + b.w and b.x <= a.x + a.w and a.y <= b.y + b.h and b.y <= a.y + a.h
+    )
+
+
+def _write_route(doc: Document, leg: _Leg, points: Sequence[Point], label_at: Point,
+                 label_dy: float) -> None:
+    """Draw one settled route and put its label where the scorer said it should go."""
     theme = serving_theme(doc, leg.spec.kind)
-    result = route_edge(
-        a,
+    drawn = draw_route(
+        points,
         leg.sa,
-        b,
         leg.ta,
         route=leg.spec.route,
-        stub=_token(theme, "--edge-stub", _DEFAULT_STUB),
         radius=_token(theme, "--edge-radius", _DEFAULT_RADIUS),
-        via=leg.via or None,
     )
     path = _first_path(leg.element)
     if path is None:
-        path = inkex.PathElement.new(result.d)
+        path = inkex.PathElement.new(drawn)
         leg.element.add(path)
         path.set_id(doc.new_id("edge-path"))
-    path.set("d", result.d)
+    path.set("d", drawn)
     path.style = inkex.Style({"fill": "none", "marker-end": f"url(#{_arrow_marker(doc)})"})
     canvas = theme.tokens.get("--canvas", _DEFAULT_CANVAS)
-    _set_label(doc, leg.element, leg.spec.label, result.label_at, halo=canvas, dy=-4.0)
+    _set_label(doc, leg.element, leg.spec.label, label_at, halo=canvas, dy=label_dy)
 
 
 def _reroute(
@@ -1348,6 +1788,12 @@ def _reroute(
     a rank-spanning edge. They are never stored. An edge whose spec carries author-pinned
     ``waypoints`` ignores the lane it was offered — geometry somebody typed beats geometry the
     layout worked out.
+
+    The pass runs in three stages, because the last two need the WHOLE picture: every route's
+    polyline is settled first, then the corridors several routes share are fanned apart, and only
+    then is anything drawn and its label scored against what its neighbours ended up doing.
+    Geometry is computed for every edge, not just the ones in ``scope`` — a narrowed reroute must
+    place its edges exactly where a full one would, or scoping would change the drawing.
     """
 
     def wanted(element: BaseElement, spec: EdgeSpec) -> bool:
@@ -1359,11 +1805,20 @@ def _reroute(
         lane = (via or {}).get(str(element.get_id()))
         return tuple(lane) if lane else ()
 
+    # One bounding box per element per pass: measuring a box is the expensive part of routing,
+    # and every node is asked about at least twice (its own edges, and everyone else's obstacles).
+    measured: dict[str, Box | None] = {}
+
+    def box_for(target: str) -> Box | None:
+        if target not in measured:
+            measured[target] = _box_of(doc, target)
+        return measured[target]
+
     legs: list[_Leg] = []
     chosen: list[bool] = []
     skipped: list[str] = []
     for element, spec in _edge_groups(doc):
-        source, target = _box_of(doc, spec.source), _box_of(doc, spec.target)
+        source, target = box_for(spec.source), box_for(spec.target)
         if source is None or target is None:
             if wanted(element, spec):
                 skipped.append(str(element.get_id()))
@@ -1384,13 +1839,107 @@ def _reroute(
         for member, fraction in zip(members, spread_fractions(home.center, side, far), strict=True):
             fractions[member] = fraction
 
+    themes = {leg.spec.kind: serving_theme(doc, leg.spec.kind) for leg in legs}
+    routes: list[list[Point]] = []
+    for index, leg in enumerate(legs):
+        theme = themes[leg.spec.kind]
+        routes.append(
+            route_points(
+                anchor_point(leg.source, leg.sa, fractions[(index, True)]),
+                leg.sa,
+                anchor_point(leg.target, leg.ta, fractions[(index, False)]),
+                leg.ta,
+                route=leg.spec.route,
+                stub=_token(theme, "--edge-stub", _DEFAULT_STUB),
+                via=leg.via or None,
+            )
+        )
+
+    # Only orthogonal routes take part: a spline or a straight line between two spread ports
+    # coincides with another only by accident, and nudging a curve sideways changes its shape
+    # rather than its lane. The pitch is the TIGHTEST any serving theme asks for, so a corridor
+    # shared by two kinds separates by one number whichever edge is looked at first.
+    boxes = {
+        node_id: box
+        for node_id, box in ((node_id, box_for(node_id)) for node_id in _node_ids(doc))
+        if box is not None
+    }
+    ids = [str(leg.element.get_id()) for leg in legs]
+    pitch = min(
+        (_token(theme, "--edge-separation", _DEFAULT_SEPARATION) for theme in themes.values()),
+        default=0.0,
+    )
+    # What each route has to be scored and clamped against is only what lies NEAR it, so every
+    # route's own extent is measured once — grown by the furthest its label could be put and by
+    # the widest the corridor fan could push it — and used to narrow both lists.
+    sizes = [
+        measure_label(leg.spec.label, _label_font(themes[leg.spec.kind]), _LABEL_SIZE)
+        if leg.spec.label
+        else (0.0, 0.0)
+        for leg in legs
+    ]
+    reach = [
+        _bounds(
+            points,
+            (
+                max(2.0 * pitch, size[0] + _LABEL_SIDE_GAP),
+                max(2.0 * pitch, 1.5 * size[1] + _LABEL_SIDE_GAP),
+            ),
+        )
+        for points, size in zip(routes, sizes, strict=True)
+    ]
+    orthogonal = {
+        ids[index]: points
+        for index, (leg, points) in enumerate(zip(legs, routes, strict=True))
+        if leg.spec.route == "orthogonal"
+    }
+    obstacles = {
+        ids[index]: [
+            box
+            for node_id, box in boxes.items()
+            if node_id not in (leg.spec.source, leg.spec.target) and _touches(reach[index], box)
+        ]
+        for index, leg in enumerate(legs)
+    }
+    separated = separate_corridors(
+        orthogonal,
+        pitch=pitch,
+        obstacles=obstacles,
+        pinned=[ids[index] for index, leg in enumerate(legs) if leg.spec.waypoints],
+    )
+    routes = [separated.get(ids[index], points) for index, points in enumerate(routes)]
+
+    # Labels are placed against every route in the diagram and against the labels already put
+    # down this pass, so the order matters — it is document order, which is stable.
+    segments = [_segments_of(points) for points in routes]
+    placed: list[Box] = []
     rerouted = 0
     for index, leg in enumerate(legs):
+        points = routes[index]
+        if leg.spec.label:
+            size = sizes[index]
+            near = reach[index]
+            others = tuple(
+                segment
+                for other, run in enumerate(segments)
+                if other != index and _touches(near, reach[other])
+                for segment in run
+            )
+            at, dy = place_label(
+                points,
+                size,
+                LabelContext(
+                    boxes=tuple(box for box in boxes.values() if _touches(near, box)),
+                    placed=tuple(rect for rect in placed if _touches(near, rect)),
+                    segments=others,
+                ),
+            )
+            placed.append(label_rect(at, dy, size))
+        else:
+            at, dy = _longest_midpoint(points), _LABEL_DY
         if not chosen[index]:
             continue
-        a = anchor_point(leg.source, leg.sa, fractions[(index, True)])
-        b = anchor_point(leg.target, leg.ta, fractions[(index, False)])
-        _write_route(doc, leg, a, b)
+        _write_route(doc, leg, points, at, dy)
         rerouted += 1
     return Reflow(edges_rerouted=rerouted, skipped=skipped, containers_refit=0)
 

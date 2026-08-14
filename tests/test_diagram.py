@@ -14,16 +14,29 @@ from svg_mcp.model import Document
 from svg_mcp.model.errors import InvalidArgument
 from svg_mcp.ops.diagram import (
     Box,
+    Corridor,
+    LabelContext,
+    _box_of,
+    _overlap_area,
     _shape_for,
     anchor_point,
     auto_side,
+    centred_offsets,
+    collinear_runs,
+    corridor_groups,
+    label_candidates,
+    label_rect,
     measure_label,
+    offset_run,
     orthogonal_waypoints,
+    place_label,
     read_edge_spec,
     read_node_spec,
     resolve_sides,
     rounded_path,
     route_edge,
+    score_label,
+    separate_corridors,
     spread_fractions,
 )
 from svg_mcp.ops.themes import ServingTheme, serving_theme
@@ -294,6 +307,205 @@ def test_a_threaded_spline_chains_one_cubic_per_hop_and_keeps_its_end_handles() 
     assert _close(curves[-1][2], b)
 
 
+# --- 1c. scoring where an edge label goes -------------------------------------
+
+
+def _rect_of(at: Point, dy: float, size: Point) -> Box:
+    return label_rect(at, dy, size)
+
+
+def test_a_lone_route_keeps_the_answer_it_always_had() -> None:
+    # Nothing to avoid: the label still sits above the midpoint of the longest segment, because
+    # that candidate is generated first and ties are broken towards it.
+    points = [(0.0, 0.0), (200.0, 0.0), (200.0, 60.0)]
+    at, dy = place_label(points, (40.0, 14.0), LabelContext())
+    assert at == (100.0, 0.0)
+    assert dy == -4.0
+
+
+def test_a_label_leaves_the_segment_that_runs_through_a_box() -> None:
+    points = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0)]
+    size = (40.0, 14.0)
+    blocker = Box(60.0, -40.0, 80.0, 80.0)  # squarely over the longest segment's midpoint
+    plain = place_label(points, size, LabelContext())
+    at, dy = place_label(points, size, LabelContext(boxes=(blocker,)))
+    assert (at, dy) != plain
+    assert _rect_of(at, dy, size).x >= blocker.x + blocker.w or _rect_of(
+        at, dy, size
+    ).y >= blocker.y + blocker.h
+
+
+def test_a_segment_shorter_than_the_label_is_not_a_candidate() -> None:
+    # Only the long run can hold the text, so the stubs at either end are never offered.
+    points = [(0.0, 0.0), (10.0, 0.0), (210.0, 0.0), (220.0, 0.0)]
+    ats = {at for at, _dy in label_candidates(points, (40.0, 14.0))}
+    assert ats == {(110.0, 0.0)}
+
+
+def test_a_route_with_no_segment_long_enough_still_labels_its_longest() -> None:
+    points = [(0.0, 0.0), (12.0, 0.0), (12.0, 20.0)]
+    ats = [at for at, _dy in label_candidates(points, (400.0, 14.0))]
+    # The 20-unit vertical is the longest, so it is used anyway — offered to either side of the
+    # line, and nothing else is offered at all.
+    assert [at[1] for at in ats] == [10.0, 10.0]
+    assert [at[0] for at in ats] == [12.0 - 204.0, 12.0 + 204.0]
+
+
+def test_a_vertical_run_offers_both_sides_and_never_sits_on_the_line() -> None:
+    points = [(0.0, 0.0), (0.0, 200.0)]
+    size = (40.0, 14.0)
+    at, dy = place_label(points, size, LabelContext())
+    assert at == (-24.0, 100.0)  # half the width plus the side gap, to the left first
+    assert dy == -4.0
+
+
+def test_the_second_label_steps_aside_from_the_first() -> None:
+    size = (40.0, 14.0)
+    across = [(0.0, 0.0), (200.0, 0.0)]
+    down = [(100.0, -100.0), (100.0, 100.0), (300.0, 100.0)]
+    first_at, first_dy = place_label(across, size, LabelContext())
+    first = _rect_of(first_at, first_dy, size)
+    second_at, second_dy = place_label(
+        down,
+        size,
+        LabelContext(placed=(first,), segments=((across[0], across[1]),)),
+    )
+    second = _rect_of(second_at, second_dy, size)
+    assert _overlap_area(first, second) == 0.0
+    assert second_at != (76.0, 0.0)  # not the crossing point it would have taken unencumbered
+
+
+def test_score_charges_area_for_a_box_and_a_count_for_a_crossing() -> None:
+    rect = Box(0.0, 0.0, 40.0, 10.0)
+    assert score_label(rect, (), (), ()) == 0.0
+    half = score_label(rect, (Box(0.0, 0.0, 20.0, 10.0),), (), ())
+    whole = score_label(rect, (Box(0.0, 0.0, 40.0, 10.0),), (), ())
+    assert half == pytest.approx(whole / 2.0)
+    assert whole > score_label(rect, (), (), (((20.0, -50.0), (20.0, 50.0)),))
+    assert score_label(rect, (), (), (((20.0, -50.0), (20.0, 50.0)),)) > 0.0
+
+
+def test_placement_is_the_same_every_time_for_the_same_inputs() -> None:
+    points = [(0.0, 0.0), (200.0, 0.0), (200.0, 100.0), (400.0, 100.0)]
+    context = LabelContext(
+        boxes=(Box(60.0, -40.0, 80.0, 80.0),),
+        placed=(Box(180.0, 20.0, 40.0, 14.0),),
+        segments=(((300.0, 0.0), (300.0, 200.0)),),
+    )
+    once = place_label(points, (40.0, 14.0), context)
+    assert all(place_label(points, (40.0, 14.0), context) == once for _ in range(5))
+
+
+# --- 1d. pulling shared corridors apart ---------------------------------------
+
+
+def test_consecutive_segments_on_one_lane_are_a_single_run() -> None:
+    runs = collinear_runs({"a": [(0.0, 0.0), (50.0, 0.0), (200.0, 0.0), (200.0, 80.0)]})
+    assert [(run.axis, run.lo, run.hi, run.start, run.end) for run in runs] == [
+        ("h", 0.0, 200.0, 0, 2),
+        ("v", 0.0, 80.0, 2, 3),
+    ]
+
+
+def test_runs_group_when_they_share_a_lane_and_not_when_they_merely_touch() -> None:
+    runs = collinear_runs(
+        {
+            "a": [(0.0, 0.0), (0.0, 100.0), (200.0, 100.0)],
+            "b": [(0.5, 50.0), (0.5, 200.0)],  # within the corridor tolerance, and overlapping
+            "c": [(0.0, -100.0), (0.0, 0.0)],  # meets a end to end: not on top of it
+            "d": [(80.0, 0.0), (80.0, 100.0)],  # a different lane entirely
+        }
+    )
+    groups = corridor_groups(runs)
+    assert len(groups) == 1
+    assert [run.edge for run in groups[0]] == ["a", "b"]
+
+
+def test_offsets_are_centred_on_the_corridor() -> None:
+    assert centred_offsets(1, 4.0) == [0.0]
+    assert centred_offsets(2, 4.0) == [-2.0, 2.0]
+    assert centred_offsets(3, 4.0) == [-4.0, 0.0, 4.0]
+    assert centred_offsets(4, 4.0) == [-6.0, -2.0, 2.0, 6.0]
+
+
+def _corridor_pair() -> dict[str, list[Point]]:
+    """Two routes down the same vertical lane, each with a stub at either end."""
+    return {
+        "zed": [(-20.0, 0.0), (0.0, 0.0), (0.0, 100.0), (20.0, 100.0)],
+        "alf": [(-20.0, 20.0), (0.0, 20.0), (0.0, 120.0), (20.0, 120.0)],
+    }
+
+
+def test_a_shared_corridor_fans_out_in_edge_id_order() -> None:
+    out = separate_corridors(_corridor_pair(), pitch=4.0)
+    assert [point[0] for point in out["alf"]] == [-20.0, -2.0, -2.0, 20.0]
+    assert [point[0] for point in out["zed"]] == [-20.0, 2.0, 2.0, 20.0]
+    assert [point[1] for point in out["zed"]] == [0.0, 0.0, 100.0, 100.0]  # nothing else moved
+
+
+def test_separation_does_not_depend_on_the_order_the_routes_arrive_in() -> None:
+    forwards = _corridor_pair()
+    backwards = {key: list(forwards[key]) for key in reversed(list(forwards))}
+    assert separate_corridors(backwards, pitch=4.0) == separate_corridors(forwards, pitch=4.0)
+
+
+def test_an_offset_run_keeps_its_anchor_and_tapers_the_stub() -> None:
+    points = [(0.0, 0.0), (0.0, 100.0), (50.0, 100.0)]
+    run = Corridor(edge="a", axis="v", coord=0.0, lo=0.0, hi=100.0, start=0, end=1)
+    moved = offset_run(points, run, 3.0)
+    assert moved[0] == (0.0, 0.0)  # the anchor is the node's face: it cannot move
+    assert moved[1] == (3.0, 100.0)  # the corner takes the whole shift — the stub leans over
+    assert moved[2] == (50.0, 100.0)
+
+
+def test_an_interior_run_moves_whole_and_re_joins_its_corners() -> None:
+    points = [(0.0, 0.0), (20.0, 0.0), (20.0, 100.0), (60.0, 100.0)]
+    run = Corridor(edge="a", axis="v", coord=20.0, lo=0.0, hi=100.0, start=1, end=2)
+    moved = offset_run(points, run, -3.0)
+    assert moved == [(0.0, 0.0), (17.0, 0.0), (17.0, 100.0), (60.0, 100.0)]
+    assert moved[0][1] == moved[1][1] and moved[2][1] == moved[3][1]  # no jog appeared
+
+
+def test_a_run_shorter_than_twice_the_pitch_is_left_alone() -> None:
+    routes = {
+        "a": [(-20.0, 0.0), (0.0, 0.0), (0.0, 6.0), (20.0, 6.0)],
+        "b": [(-20.0, 2.0), (0.0, 2.0), (0.0, 8.0), (20.0, 8.0)],
+    }
+    assert separate_corridors(routes, pitch=4.0) == routes
+
+
+def test_a_group_tightens_its_pitch_rather_than_crossing_a_box() -> None:
+    routes = _corridor_pair()
+    # A box that the full -2 offset would put "alf" inside, but a halved one would not.
+    blocker = Box(-3.0, 40.0, 2.0, 20.0)
+    out = separate_corridors(routes, pitch=4.0, obstacles={"alf": [blocker]})
+    assert [point[0] for point in out["alf"]] == [-20.0, -1.0, -1.0, 20.0]
+    assert [point[0] for point in out["zed"]] == [-20.0, 1.0, 1.0, 20.0]
+
+
+def test_a_corridor_keeps_its_overlap_when_every_pitch_would_cross_a_box() -> None:
+    routes = _corridor_pair()
+    blocker = Box(-4.0, 40.0, 4.0, 20.0)  # covers every offset the group could try
+    assert separate_corridors(routes, pitch=4.0, obstacles={"alf": [blocker]}) == routes
+
+
+def test_a_pinned_route_holds_its_slot_and_its_geometry() -> None:
+    routes = _corridor_pair()
+    out = separate_corridors(routes, pitch=4.0, pinned=["alf"])
+    assert out["alf"] == routes["alf"]  # what the author typed is drawn as the author typed it
+    assert [point[0] for point in out["zed"]] == [-20.0, 2.0, 2.0, 20.0]  # the free one steps off
+
+
+def test_a_run_already_inside_a_box_is_still_separated_from_its_twin() -> None:
+    # The offset must not be blamed for a crossing that was there before it: refusing to move
+    # would leave the reader looking at ONE line through the box instead of two.
+    routes = _corridor_pair()
+    blocker = Box(-10.0, 40.0, 20.0, 20.0)
+    out = separate_corridors(routes, pitch=4.0, obstacles={"alf": [blocker], "zed": [blocker]})
+    assert out != routes
+    assert [point[0] for point in out["alf"]] == [-20.0, -2.0, -2.0, 20.0]
+
+
 # --- 2. nodes ----------------------------------------------------------------
 
 
@@ -490,6 +702,58 @@ def test_three_edges_leaving_one_node_fan_out_across_its_face() -> None:
         if read_edge_spec(group) is not None:
             ys.append(_segments(str(group[0].get("d")))[0][1][0][1])
     assert ys == [pytest.approx(122.5), pytest.approx(145.0), pytest.approx(167.5)]
+
+
+def _x_at(d: str, y: float) -> float:
+    """Where a drawn route sits horizontally as it passes a given height."""
+    points = _vertices(d)
+    for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+        if min(sy, ey) <= y <= max(sy, ey) and abs(ey - sy) > TOL:
+            return sx + (ex - sx) * (y - sy) / (ey - sy)
+    raise AssertionError(f"the route never reaches y={y}")
+
+
+def _label_of(doc: Document, edge_id: str) -> tuple[Point, float]:
+    text = next(child for child in doc.resolve(edge_id) if child.TAG == "text")
+    return (float(str(text.get("x"))), float(str(text.get("y")))), float(str(text.get("dy")))
+
+
+def test_two_edges_down_one_corridor_are_drawn_as_two_lines() -> None:
+    doc = _doc()
+    a = ops.add_diagram_node(doc, kind="service", label="A", x=40, y=40, width=80, height=40)
+    b = ops.add_diagram_node(doc, kind="service", label="B", x=440, y=320, width=80, height=40)
+    c = ops.add_diagram_node(doc, kind="service", label="C", x=40, y=140, width=80, height=40)
+    d = ops.add_diagram_node(doc, kind="service", label="D", x=440, y=220, width=80, height=40)
+    first = ops.add_diagram_edge(doc, source=a.ref.id, target=b.ref.id)
+    second = ops.add_diagram_edge(doc, source=c.ref.id, target=d.ref.id)
+    # Both Z routes turn on the same mid-rank lane and run down it together for a while; drawn
+    # unseparated they would be one line where the reader has to see two.
+    at = 200.0
+    apart = abs(
+        _x_at(str(doc.resolve(first.ref.id)[0].get("d")), at)
+        - _x_at(str(doc.resolve(second.ref.id)[0].get("d")), at)
+    )
+    assert apart >= 2.0
+
+
+def test_a_label_moves_off_the_longest_segment_when_a_node_sits_on_it() -> None:
+    doc = _doc()
+    a = ops.add_diagram_node(doc, kind="service", label="A", x=40, y=40, width=80, height=40)
+    b = ops.add_diagram_node(doc, kind="service", label="B", x=400, y=200, width=80, height=40)
+    edge = ops.add_diagram_edge(doc, source=a.ref.id, target=b.ref.id, label="gateway")
+    (free_x, free_y), _dy = _label_of(doc, edge.ref.id)
+    assert _close((free_x, free_y), (260.0, 140.0)) or abs(free_y - 140.0) <= TOL  # the mid lane
+
+    blocker = ops.add_diagram_node(
+        doc, kind="note", label="in the way", x=200, y=110, width=120, height=60
+    )
+    ops.reflow(doc)
+    (moved_x, moved_y), _moved_dy = _label_of(doc, edge.ref.id)
+    box = _box_of(doc, blocker.ref.id)
+    assert box is not None
+    size = measure_label("gateway", "sans-serif", 12.0)
+    assert _overlap_area(label_rect((moved_x, moved_y), _moved_dy, size), box) == 0.0
+    assert abs(moved_y - 60.0) <= TOL  # up onto the first horizontal run, which is clear
 
 
 def test_an_edge_spec_round_trips_through_get_params() -> None:

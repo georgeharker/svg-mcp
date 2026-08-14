@@ -87,6 +87,10 @@
   /* --- routing: how far an edge leaves a node before it turns --------- */
   --edge-stub: 12;
   --edge-radius: 8;
+  /* How far apart two edges are pulled where they would otherwise run down the same lane. Small
+   * on purpose: enough that a reader counts two lines rather than one, not so much that a fanned
+   * corridor stops reading as one route. */
+  --edge-separation: 4;
 
   /* The clear air a callout leaves between the node it annotates and its own card — wide enough
    * that the leader reads as a line rather than as a join. */
