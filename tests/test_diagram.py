@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import math
 import re
 from pathlib import Path
 
@@ -199,6 +200,100 @@ def test_an_orthogonal_label_sits_on_the_longest_segment() -> None:
     assert _close(result.label_at, (200.0, 100.0))  # the vertical mid-run is the longest
 
 
+# --- 1b. threading a route through lane points -------------------------------
+
+
+def test_a_threaded_route_drops_into_its_lane_and_runs_along_it() -> None:
+    # The shape a rank-spanning edge wants: out of A, down into the lane, along past everything
+    # in between, up to B. Every cross-axis change lands between two stations, never on one.
+    points = orthogonal_waypoints(
+        (100.0, 50.0), "E", (600.0, 60.0), "W", 12.0, [(250.0, 200.0), (400.0, 200.0)]
+    )
+    assert points[0] == (100.0, 50.0)
+    assert points[-1] == (600.0, 60.0)
+    assert [at[1] for at in points[1:-1]] == [50.0, 200.0, 200.0, 60.0]
+    assert points[1][0] == pytest.approx(181.0)  # half way from the stub end to the first lane
+    assert points[-2][0] == pytest.approx(494.0)  # and half way from the last lane to the other
+    # The lane points themselves are run straight through, so they leave no vertex behind.
+    assert (250.0, 200.0) not in points and (400.0, 200.0) not in points
+
+
+def test_a_lane_the_route_is_already_level_with_adds_no_jog() -> None:
+    points = orthogonal_waypoints(
+        (100.0, 50.0), "E", (600.0, 50.0), "W", 12.0, [(250.0, 50.3), (400.0, 50.0)]
+    )
+    assert points == [(100.0, 50.0), (600.0, 50.0)]  # one straight run, nothing to turn at
+
+
+def test_the_corners_a_thread_turns_are_rounded_like_any_other() -> None:
+    result = route_edge(
+        (100.0, 50.0),
+        "E",
+        (600.0, 50.0),
+        "W",
+        route="orthogonal",
+        stub=12.0,
+        radius=8.0,
+        via=[(250.0, 200.0), (400.0, 200.0)],
+    )
+    corners = _corners(result.d)
+    assert len(corners) == 4  # down into the lane, along it, and back up: two turns at each end
+    assert all(command in ("M", "L", "Q") for command, _points in _segments(result.d))
+
+
+def test_a_thread_never_reaches_past_the_anchors() -> None:
+    a, b = (100.0, 50.0), (600.0, 50.0)
+    points = orthogonal_waypoints(a, "E", b, "W", 12.0, [(250.0, 200.0)])
+    assert points[0] == a and points[-1] == b
+
+
+def test_an_auto_side_faces_the_lane_rather_than_the_far_node() -> None:
+    # B is due east, so the direct line leaves E — but the lane drops away south first, and an
+    # anchor pointing away from its own first segment is what reads as broken.
+    source, target = Box(0, 0, 40, 40), Box(400, 0, 40, 40)
+    assert resolve_sides(source, target, "auto", "auto") == ("E", "W")
+    threaded = resolve_sides(source, target, "auto", "auto", [(20.0, 300.0), (420.0, 300.0)])
+    assert threaded == ("S", "S")
+
+
+def test_an_explicit_anchor_still_beats_the_lane() -> None:
+    source, target = Box(0, 0, 40, 40), Box(400, 0, 40, 40)
+    assert resolve_sides(source, target, "N", "auto", [(20.0, 300.0)]) == ("N", "W")
+
+
+def test_a_straight_route_polylines_through_its_lane() -> None:
+    result = route_edge(
+        (100.0, 50.0),
+        "E",
+        (600.0, 50.0),
+        "W",
+        route="straight",
+        stub=12.0,
+        radius=8.0,
+        via=[(250.0, 200.0), (400.0, 200.0)],
+    )
+    assert _segments(result.d) == [
+        ("M", [(100.0, 50.0)]),
+        ("L", [(250.0, 200.0)]),
+        ("L", [(400.0, 200.0)]),
+        ("L", [(600.0, 50.0)]),
+    ]
+    assert _close(result.label_at, (500.0, 125.0))  # the longest run of the four, as ever
+
+
+def test_a_threaded_spline_chains_one_cubic_per_hop_and_keeps_its_end_handles() -> None:
+    a, b = (100.0, 50.0), (600.0, 50.0)
+    via = [(250.0, 200.0), (400.0, 200.0)]
+    result = route_edge(a, "E", b, "W", route="spline", stub=12.0, radius=8.0, via=via)
+    curves = [points for command, points in _segments(result.d) if command == "C"]
+    assert len(curves) == 3  # a→via, via→via, via→b
+    first_reach = 0.4 * ((150.0**2 + 150.0**2) ** 0.5)
+    assert _close(curves[0][0], (100.0 + first_reach, 50.0))  # still leaves along its own normal
+    last_reach = 0.4 * ((200.0**2 + 150.0**2) ** 0.5)
+    assert _close(curves[-1][1], (600.0 - last_reach, 50.0))  # and still arrives along b's
+    assert _close(curves[-1][2], b)
+
+
 # --- 2. nodes ----------------------------------------------------------------
 
 
@@ -332,6 +427,7 @@ def test_a_node_spec_round_trips_through_get_params() -> None:
         "shape": "pill",
         "w": 120.0,
         "h": 40.0,
+        "themed": True,
         "auto": False,
     }
 
@@ -404,6 +500,8 @@ def test_an_edge_spec_round_trips_through_get_params() -> None:
     )
     result = get_params(doc, edge.ref.id)
     assert result["kind"] == "diagram_edge"
+    # No `waypoints` key at all: an edge nobody pinned a route on stores none, and get_params
+    # reports the absence rather than inventing a null.
     assert result["params"] == {
         "source": a,
         "target": b,
@@ -412,7 +510,17 @@ def test_an_edge_spec_round_trips_through_get_params() -> None:
         "ta": "auto",
         "route": "spline",
         "label": "hi",
+        "themed": True,
     }
+
+
+def test_a_pinned_route_round_trips_through_get_params() -> None:
+    doc = _doc()
+    a, b = _pair(doc)
+    edge = ops.add_diagram_edge(doc, source=a, target=b, waypoints=[(200.0, 300.0), (260.0, 300.0)])
+    params = get_params(doc, edge.ref.id)["params"]
+    assert isinstance(params, dict)
+    assert params["waypoints"] == [[200.0, 300.0], [260.0, 300.0]]
 
 
 def test_an_edge_is_not_placed_inside_either_node() -> None:
@@ -478,6 +586,65 @@ def test_reflow_reports_an_edge_whose_node_is_gone() -> None:
     assert result.edges_rerouted == 0
     assert result.skipped == [edge.ref.id]
     assert str(doc.resolve(edge.ref.id)[0].get("d")) == before  # left exactly as it was
+
+
+def _vertices(d: str) -> list[Point]:
+    """The polyline a drawn route follows — a rounded corner standing in for its own vertex."""
+    return [points[0] if command == "Q" else points[-1] for command, points in _segments(d)]
+
+
+def _through(d: str, at: Point) -> bool:
+    """True when the drawn route passes over ``at``, at a corner or in the middle of a run.
+
+    A pinned point the route runs straight through leaves no vertex of its own behind, so asking
+    about vertices would be asking about the path encoding rather than about the drawing.
+    """
+    points = _vertices(d)
+    for start, end in zip(points, points[1:], strict=False):
+        span = math.dist(start, end)
+        if span <= 1e-9:
+            continue
+        along = ((at[0] - start[0]) * (end[0] - start[0])
+                 + (at[1] - start[1]) * (end[1] - start[1])) / span**2
+        held = min(1.0, max(0.0, along))
+        nearest = (start[0] + held * (end[0] - start[0]), start[1] + held * (end[1] - start[1]))
+        if _close(nearest, at):
+            return True
+    return False
+
+
+def test_a_pinned_route_keeps_its_middle_and_re_anchors_its_ends() -> None:
+    doc = _doc()
+    a, b = _pair(doc)
+    edge = ops.add_diagram_edge(doc, source=a, target=b, waypoints=[(220.0, 320.0)])
+    assert _through(str(doc.resolve(edge.ref.id)[0].get("d")), (220.0, 320.0))
+
+    ops.translate_node(doc, b, 0, 160)
+    ops.reflow(doc)
+    d = str(doc.resolve(edge.ref.id)[0].get("d"))
+    assert _through(d, (220.0, 320.0))  # the middle is what the author typed, not what moved
+    end = _segments(d)[-1][1][-1]
+    assert _close(end, (340.0, 320.0))  # but the far end followed B to where B is now
+
+
+def test_clearing_the_pinned_route_hands_the_edge_back_to_the_router() -> None:
+    doc = _doc()
+    a, b = _pair(doc)
+    edge = ops.add_diagram_edge(doc, source=a, target=b, waypoints=[(220.0, 320.0)])
+    ops.edit_diagram_edge(doc, edge.ref.id, waypoints=[])
+    spec = read_edge_spec(doc.resolve(edge.ref.id))
+    assert spec is not None and spec.waypoints is None  # an empty list CLEARS the pin
+    assert "waypoints" not in str(doc.resolve(edge.ref.id).get("data-diagram-edge"))
+    assert not _through(str(doc.resolve(edge.ref.id)[0].get("d")), (220.0, 320.0))
+
+
+def test_editing_an_edge_without_naming_waypoints_leaves_the_pinned_route_alone() -> None:
+    doc = _doc()
+    a, b = _pair(doc)
+    edge = ops.add_diagram_edge(doc, source=a, target=b, waypoints=[(220.0, 320.0)])
+    ops.edit_diagram_edge(doc, edge.ref.id, label="still pinned")
+    spec = read_edge_spec(doc.resolve(edge.ref.id))
+    assert spec is not None and spec.waypoints == ((220.0, 320.0),)
 
 
 def test_reflow_can_be_told_to_leave_edges_alone() -> None:

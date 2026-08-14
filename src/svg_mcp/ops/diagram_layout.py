@@ -1,8 +1,9 @@
 """Whole-scope layout for diagram facades: three algorithms, then the pass that applies one.
 
 The algorithms are pure functions over plain data — a list of ``LayoutNode`` (id and size), a
-list of edge pairs, and a container→members map in, top-left positions out. They know nothing
-about documents, elements or themes, so every ordering rule below is testable on its own.
+list of edge pairs, and a container→members map in, top-left positions (and, for the layered one,
+a lane per rank-spanning edge) out. They know nothing about documents, elements or themes, so
+every ordering rule below is testable on its own.
 
 Layout is deliberately a whole-scope OPT-IN: :func:`layout_diagram` repositions every node in
 the scope it is given, explicit prior positions included. Hand placement survives by not calling
@@ -44,6 +45,15 @@ Algorithm = Literal["layered", "tree", "grid"]
 
 _DEFAULT_GAP_LAYER = 90.0
 _SWEEPS = 4  # down, up, down, up — enough to settle the small graphs a diagram actually is
+# The cross-axis room one dummy reserves. Small — a lane is a line, not a box — but not zero, or
+# the greedy coordinate pass would stack a lane flush against the node above it.
+_DUMMY_EXTENT = 8.0
+
+EdgeKey = tuple[str, str]
+"""How a caller matches an edge to its lane: the ``(source, target)`` pair it handed in.
+
+Deliberately the AUTHORED pair, not the laid-out one — a cycle-broken edge is reversed inside the
+algorithm and its waypoints are turned back before they leave, so a caller never has to know."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,11 +71,17 @@ class LayoutNode:
 
 @dataclass(frozen=True, slots=True)
 class Placement:
-    """What an algorithm decided: a top-left per node, plus what it had to notice on the way."""
+    """What an algorithm decided: a top-left per node, plus what it had to notice on the way.
+
+    ``edge_waypoints`` is the lane an algorithm reserved for each edge that spans more than one
+    rank: world points, in the same frame as ``positions``, reading source→target. Absent for
+    every edge that did not need one, and empty for algorithms that reserve none.
+    """
 
     positions: dict[str, Point] = field(default_factory=dict)
     ranks: int = 0
     cycles_broken: int = 0
+    edge_waypoints: dict[EdgeKey, list[Point]] = field(default_factory=dict)
 
 
 class DiagramLayout(BaseModel):
@@ -96,16 +112,17 @@ def _point(main: float, cross: float, direction: Direction) -> Point:
     return (main, cross) if direction == "LR" else (cross, main)
 
 
-def _rank_offsets(
-    ranked: Sequence[Sequence[LayoutNode]], direction: Direction, main_origin: float, gap: float
-) -> list[float]:
-    """Where each rank starts on the main axis: the previous rank's widest node, then the gap."""
+def _rank_offsets(bands: Sequence[Sequence[float]], main_origin: float, gap: float) -> list[float]:
+    """Where each rank starts on the main axis: the previous band's widest member, then the gap.
+
+    ``bands`` is the MAIN extent of everything in each rank, in rank order — real nodes and,
+    where an algorithm has them, the dummies standing in for edges passing through.
+    """
     offsets: list[float] = []
     at = main_origin
-    for members in ranked:
+    for extents in bands:
         offsets.append(at)
-        widest = max((_extents(node, direction)[0] for node in members), default=0.0)
-        at += widest + gap
+        at += max(extents, default=0.0) + gap
     return offsets
 
 
@@ -262,7 +279,9 @@ def layout_tree(
 
     rank_count = max(depth.values()) + 1
     ranked = [[node for node in nodes if depth[node.id] == rank] for rank in range(rank_count)]
-    offsets = _rank_offsets(ranked, direction, main_origin, spacing_main)
+    offsets = _rank_offsets(
+        [[sizes[node.id][0] for node in members] for members in ranked], main_origin, spacing_main
+    )
     positions = {
         node.id: _point(
             offsets[depth[node.id]], centers[node.id] - sizes[node.id][1] / 2.0, direction
@@ -351,6 +370,56 @@ def _barycenter_sweep(
         layers[index].sort(key=lambda node_id: keys[node_id])
 
 
+@dataclass(frozen=True, slots=True)
+class _Chain:
+    """The dummies standing in for one rank-spanning edge, in rank order from its layout head."""
+
+    key: EdgeKey
+    dummies: tuple[str, ...]
+    flipped: bool  # the edge was reversed to break a cycle, so its lane reads back-to-front
+
+
+def _dummy_chains(
+    edges: Sequence[tuple[str, str]],
+    back: set[tuple[str, str]],
+    rank: Mapping[str, int],
+) -> tuple[list[tuple[str, str]], dict[str, int], list[_Chain]]:
+    """Split every rank-spanning edge into unit hops through one dummy per rank it skips.
+
+    This is the Sugiyama step the layout used to leave out, and it buys two different things at
+    once. Crossing minimisation only ever compares ADJACENT ranks, so a long edge is invisible to
+    it until it has been cut into short ones; and the dummies, once placed, ARE the lane the edge
+    is routed down, which is what stops it being drawn through whatever boxes sit in between.
+
+    Returns the unit-length segment list, the dummies' ranks, and one chain per split edge.
+    """
+    segments: list[tuple[str, str]] = []
+    dummy_rank: dict[str, int] = {}
+    chains: list[_Chain] = []
+    for source, target in edges:
+        flipped = (source, target) in back
+        head, tail = (target, source) if flipped else (source, target)
+        span = rank[tail] - rank[head]
+        if span <= 1:
+            segments.append((head, tail))
+            continue
+        dummies: list[str] = []
+        for step in range(1, span):
+            # A NUL-prefixed name cannot collide with an SVG id, so a dummy is never mistaken for
+            # a node — including by the container regrouping, which sees it as an unnamed
+            # singleton and leaves it exactly where the sweep put it.
+            dummy = f"\0lane{len(dummy_rank)}"
+            dummy_rank[dummy] = rank[head] + step
+            dummies.append(dummy)
+        previous = head
+        for dummy in dummies:
+            segments.append((previous, dummy))
+            previous = dummy
+        segments.append((previous, tail))
+        chains.append(_Chain(key=(source, target), dummies=tuple(dummies), flipped=flipped))
+    return segments, dummy_rank, chains
+
+
 def _regroup_by_container(layer: Sequence[str], group_of: Mapping[str, str]) -> list[str]:
     """Pull each container's members in a rank together, groups ordered by their mean position.
 
@@ -381,9 +450,14 @@ def layout_layered(
 ) -> Placement:
     """Sugiyama-lite: break cycles, layer by longest path, order by barycenter, then place.
 
-    The one addition to the textbook version is the container constraint — after every ordering
-    sweep the members of a container are pulled back together within their rank, so a container
-    drawn around them afterwards is a box and not a comb.
+    Two additions to the textbook version. Every edge that spans more than one rank is cut into
+    unit hops through DUMMY nodes, which take part in the ordering sweeps and the coordinate pass
+    exactly as real nodes do; their cross-axis centers come back out as that edge's waypoints, so
+    a long edge follows a lane the layout reserved for it instead of a straight run through
+    whatever it happens to pass over. And the container constraint: after every ordering sweep the
+    members of a container are pulled back together within their rank, so a container drawn around
+    them afterwards is a box and not a comb. Dummies belong to no container, so regrouping treats
+    each of them as its own singleton group and leaves it where the sweep put it.
     """
     if not nodes:
         return Placement()
@@ -398,12 +472,13 @@ def layout_layered(
 
     rank = _longest_path_ranks(order, layout_edges)
     rank_count = max(rank.values()) + 1
-    layers = [
-        [node_id for node_id in order if rank[node_id] == index] for index in range(rank_count)
-    ]
+    segments, dummy_rank, chains = _dummy_chains(clean, back, rank)
+    ranked = {**rank, **dummy_rank}
+    slots = [*order, *dummy_rank]  # document order first, then the dummies as they were made
+    layers = [[slot for slot in slots if ranked[slot] == index] for index in range(rank_count)]
 
-    neighbours: dict[str, set[str]] = {node_id: set() for node_id in order}
-    for source, target in layout_edges:
+    neighbours: dict[str, set[str]] = {slot: set() for slot in slots}
+    for source, target in segments:
         neighbours[source].add(target)
         neighbours[target].add(source)
     group_of: dict[str, str] = {}
@@ -412,42 +487,62 @@ def layout_layered(
             group_of.setdefault(member, container)
 
     for sweep in range(_SWEEPS):
-        _barycenter_sweep(layers, neighbours, rank, down=sweep % 2 == 0)
+        _barycenter_sweep(layers, neighbours, ranked, down=sweep % 2 == 0)
         for index, layer in enumerate(layers):
             layers[index] = _regroup_by_container(layer, group_of)
 
     sizes = {node.id: _extents(node, direction) for node in nodes}
-    by_id = {node.id: node for node in nodes}
+    sizes.update(dict.fromkeys(dummy_rank, (_DUMMY_EXTENT, _DUMMY_EXTENT)))
     main_origin, cross_origin = _origins(direction, origin_x, origin_y)
-    offsets = _rank_offsets(
-        [[by_id[node_id] for node_id in layer] for layer in layers],
-        direction,
-        main_origin,
-        spacing_main,
-    )
+    bands = [[sizes[slot][0] for slot in layer] for layer in layers]
+    offsets = _rank_offsets(bands, main_origin, spacing_main)
+    # Where a lane crosses each rank: the middle of that rank's band, so the waypoint sits level
+    # with the nodes it is threading past rather than in the gap on one side of them.
+    band_centers = [
+        offset + max(band, default=0.0) / 2.0
+        for offset, band in zip(offsets, bands, strict=True)
+    ]
 
     cross_at: dict[str, float] = {}
     for index, layer in enumerate(layers):
         floor = -math.inf
-        for position, node_id in enumerate(layer):
-            extent = sizes[node_id][1]
+        for position, slot in enumerate(layer):
+            extent = sizes[slot][1]
             anchors = [
                 cross_at[other] + sizes[other][1] / 2.0
-                for other in neighbours[node_id]
-                if rank[other] == index - 1 and other in cross_at
+                for other in neighbours[slot]
+                if ranked[other] == index - 1 and other in cross_at
             ]
             if anchors:
                 wanted = sum(anchors) / len(anchors) - extent / 2.0
             else:
                 wanted = cross_origin if position == 0 else floor
-            cross_at[node_id] = max(wanted, floor)
-            floor = cross_at[node_id] + extent + spacing_cross
-    shift = cross_origin - min(cross_at.values())
+            cross_at[slot] = max(wanted, floor)
+            floor = cross_at[slot] + extent + spacing_cross
+    # Normalized on the REAL nodes: the origin is a statement about where the drawing starts, and
+    # a lane is not part of the drawing's extent. A lane above the first node simply runs there.
+    shift = cross_origin - min(cross_at[node_id] for node_id in order)
     positions = {
-        node_id: _point(offsets[rank[node_id]], value + shift, direction)
-        for node_id, value in cross_at.items()
+        node_id: _point(offsets[rank[node_id]], cross_at[node_id] + shift, direction)
+        for node_id in order
     }
-    return Placement(positions=positions, ranks=rank_count, cycles_broken=cycles)
+    waypoints: dict[EdgeKey, list[Point]] = {}
+    for chain in chains:
+        lane = [
+            _point(
+                band_centers[ranked[dummy]],
+                cross_at[dummy] + _DUMMY_EXTENT / 2.0 + shift,
+                direction,
+            )
+            for dummy in chain.dummies
+        ]
+        waypoints[chain.key] = list(reversed(lane)) if chain.flipped else lane
+    return Placement(
+        positions=positions,
+        ranks=rank_count,
+        cycles_broken=cycles,
+        edge_waypoints=waypoints,
+    )
 
 
 # --- the pass over a real document -------------------------------------------
@@ -487,20 +582,32 @@ def layout_diagram(
 
     This moves EVERY node in the set — a layout is a decision about the whole picture, so hand
     placement is preserved by not calling it rather than by exempting individual nodes.
+
+    Rank-spanning edges are routed down the LANES the layered algorithm reserved for them. Those
+    lanes are threaded into this pass's reflow and deliberately not stored anywhere: they are
+    scaffolding for one placement, and freezing them into the document would leave every later
+    edit dragging around geometry that describes a layout nobody can see any more. The visible
+    consequence is that a plain ``reflow`` afterwards re-derives DIRECT routes — run the layout
+    again, or pin the route with ``edit_diagram_edge(waypoints=...)``, which no layout overrides.
+
+    An edge that already carries pinned waypoints keeps them: layout still MOVES its nodes (pinning
+    a route is not pinning the boxes), so a pinned route can end up stale — that is the caller's
+    own geometry doing exactly what they asked for.
     """
     found = _scope_nodes(doc, scope)
     if not found:
         return DiagramLayout()
     nodes = [node for _id, node, _at in found]
     known = {node.id for node in nodes}
-    edges = [
-        (spec.source, spec.target)
-        for _element, spec in _edge_groups(doc)
-        if spec.source in known and spec.target in known
-    ]
+    edges: list[tuple[str, str]] = []
+    routed: dict[EdgeKey, list[str]] = {}
+    for element, spec in _edge_groups(doc):
+        if spec.source in known and spec.target in known:
+            edges.append((spec.source, spec.target))
+            routed.setdefault((spec.source, spec.target), []).append(str(element.get_id()))
     containers = {}
-    for group, spec in _container_groups(doc):
-        inside = [member for member in spec.members if member in known]
+    for group, group_spec in _container_groups(doc):
+        inside = [member for member in group_spec.members if member in known]
         if inside:
             containers[str(group.get_id())] = inside
 
@@ -549,7 +656,12 @@ def layout_diagram(
     for node_id, _node, (at_x, at_y) in found:
         target = placement.positions[node_id]
         translate_node(doc, node_id, target[0] - at_x, target[1] - at_y)
-    flow = reflow(doc, edges=True, containers=True, scope=sorted(known))
+    lanes = {
+        edge_id: points
+        for key, points in placement.edge_waypoints.items()
+        for edge_id in routed.get(key, ())
+    }
+    flow = reflow(doc, edges=True, containers=True, scope=sorted(known), _via=lanes)
     # Auto containers add padding + label headroom OUTSIDE the node extents the placement
     # normalized, so a fitted box can overflow the origin (clipping its label at the canvas
     # edge). Measure the refit boxes and shift the whole scope down/right by any deficit.
@@ -563,7 +675,11 @@ def layout_diagram(
     if shift_x > 0 or shift_y > 0:
         for node_id, _node, _at in found:
             translate_node(doc, node_id, shift_x, shift_y)
-        flow = reflow(doc, edges=True, containers=True, scope=sorted(known))
+        lanes = {
+            edge_id: [(x + shift_x, y + shift_y) for x, y in points]
+            for edge_id, points in lanes.items()
+        }
+        flow = reflow(doc, edges=True, containers=True, scope=sorted(known), _via=lanes)
     return DiagramLayout(
         nodes_placed=len(nodes),
         ranks=placement.ranks,

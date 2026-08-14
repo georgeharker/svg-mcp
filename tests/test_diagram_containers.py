@@ -248,6 +248,7 @@ def test_a_container_spec_round_trips_through_get_params() -> None:
         "kind": "zone",
         "label": "Edge",
         "members": [a, b],
+        "themed": True,
         "auto": True,
     }
 

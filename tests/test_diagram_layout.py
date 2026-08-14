@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import io
+import math
+import re
+from collections.abc import Iterator, Sequence
 
 import pytest
 
 from svg_mcp import ops
 from svg_mcp.model import Document
-from svg_mcp.ops.diagram import _box_of, _container_groups
-from svg_mcp.ops.diagram_layout import LayoutNode, layout_grid, layout_layered, layout_tree
+from svg_mcp.ops.diagram import Box, _box_of, _container_groups, _edge_groups, read_node_spec
+from svg_mcp.ops.diagram_layout import (
+    Direction,
+    LayoutNode,
+    layout_grid,
+    layout_layered,
+    layout_tree,
+)
 from svg_mcp.query.outline import _bbox_xywh
 from svg_mcp.render import get_renderer
 from svg_mcp.render.base import RenderRequest
@@ -17,6 +26,11 @@ from svg_mcp.serialize import export_svg
 from svg_mcp.session import DocumentStore
 
 Point = tuple[float, float]
+
+# How far inside a node's own box an edge has to run before it counts as crossing it: half a
+# unit, which is under the stroke width and well under anything visible.
+TOL = 0.5
+_CURVE_STEPS = 12
 
 
 def _doc() -> Document:
@@ -30,6 +44,150 @@ def _nodes(*ids: str, w: float = 40.0, h: float = 40.0) -> list[LayoutNode]:
 def _by_cross(placement: dict[str, Point]) -> list[str]:
     """The node ids in cross-axis (y, for LR) order — the ordering a rank actually drew."""
     return [node_id for node_id, _at in sorted(placement.items(), key=lambda item: item[1][1])]
+
+
+# --- 0. layout invariants ----------------------------------------------------
+#
+# A layered layout is a heuristic, so its exact coordinates are an implementation detail that
+# every improvement to the algorithm is allowed to change. What must NOT change is what makes the
+# drawing readable, and these are those properties, stated once and asserted by name. Pinning
+# coordinates instead would make each improvement look like a regression.
+
+
+def ranks_advance(positions: Sequence[Point], direction: Direction) -> bool:
+    """True when positions given in RANK order never go backwards along the main axis."""
+    main = [at[0] if direction == "LR" else at[1] for at in positions]
+    return all(first <= second for first, second in zip(main, main[1:], strict=False))
+
+
+def _node_boxes(doc: Document) -> dict[str, Box]:
+    """Every diagram node's world box, by id — what a layout separates and a route stays out of."""
+    boxes: dict[str, Box] = {}
+    for node in doc.svg.iter():
+        if isinstance(node.tag, str) and read_node_spec(node) is not None:
+            node_id = str(node.get_id())
+            box = _box_of(doc, node_id)
+            if box is not None:
+                boxes[node_id] = box
+    return boxes
+
+
+def _gap(a: Box, b: Box) -> float:
+    """The clear space between two boxes: negative when they overlap, by how deep."""
+    across = max(a.x - (b.x + b.w), b.x - (a.x + a.w))
+    down = max(a.y - (b.y + b.h), b.y - (a.y + a.h))
+    return max(across, down)
+
+
+def min_gap(doc: Document) -> float:
+    """The tightest gap between any two diagram nodes; infinite when there are fewer than two."""
+    boxes = list(_node_boxes(doc).values())
+    gaps = [_gap(a, b) for index, a in enumerate(boxes) for b in boxes[index + 1 :]]
+    return min(gaps, default=math.inf)
+
+
+def no_box_overlap(doc: Document) -> bool:
+    """True when no two diagram-node boxes intersect."""
+    return min_gap(doc) > -TOL
+
+
+def _bezier(points: Sequence[Point]) -> Iterator[Point]:
+    """A curve sampled as a polyline — enough resolution to catch it clipping a corner."""
+    order = len(points) - 1
+    for step in range(1, _CURVE_STEPS + 1):
+        t = step / _CURVE_STEPS
+        x = sum(
+            math.comb(order, i) * (1 - t) ** (order - i) * t**i * point[0]
+            for i, point in enumerate(points)
+        )
+        y = sum(
+            math.comb(order, i) * (1 - t) ** (order - i) * t**i * point[1]
+            for i, point in enumerate(points)
+        )
+        yield (x, y)
+
+
+def path_points(d: str) -> list[Point]:
+    """The polyline a route draws, curves sampled — every command this module emits is absolute."""
+    out: list[Point] = []
+    at: Point = (0.0, 0.0)
+    for command, body in re.findall(r"([MLQC])([^MLQC]*)", d):
+        numbers = [float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", body)]
+        points = list(zip(numbers[0::2], numbers[1::2], strict=True))
+        if command in ("M", "L"):
+            out.extend(points)
+        else:
+            out.extend(_bezier([at, *points]))
+        at = points[-1]
+    return out
+
+
+def passes_through(points: Sequence[Point], at: Point, tolerance: float) -> bool:
+    """True when a drawn polyline comes within ``tolerance`` of ``at`` anywhere along it.
+
+    Anywhere ALONG it, not at a vertex: a point the route runs straight over is dropped from the
+    vertex list (and a corner is replaced by its rounding), so vertex equality would be asking
+    about the encoding rather than about the drawing.
+    """
+    for start, end in zip(points, points[1:], strict=False):
+        span = math.dist(start, end)
+        if span <= 1e-12:
+            near = start
+        else:
+            along = ((at[0] - start[0]) * (end[0] - start[0])
+                     + (at[1] - start[1]) * (end[1] - start[1])) / span**2
+            held = min(1.0, max(0.0, along))
+            near = (start[0] + held * (end[0] - start[0]), start[1] + held * (end[1] - start[1]))
+        if math.dist(near, at) <= tolerance:
+            return True
+    return False
+
+
+def _enters(start: Point, end: Point, box: Box) -> bool:
+    """True when the segment ``start``→``end`` gets inside ``box`` by more than the tolerance."""
+    left, top = box.x + TOL, box.y + TOL
+    right, bottom = box.x + box.w - TOL, box.y + box.h - TOL
+    if right <= left or bottom <= top:
+        return False
+    near, far = 0.0, 1.0
+    for delta, from_, low, high in (
+        (end[0] - start[0], start[0], left, right),
+        (end[1] - start[1], start[1], top, bottom),
+    ):
+        if abs(delta) < 1e-12:
+            if from_ < low or from_ > high:
+                return False
+            continue
+        first, second = (low - from_) / delta, (high - from_) / delta
+        near, far = max(near, min(first, second)), min(far, max(first, second))
+        if near > far:
+            return False
+    return True
+
+
+def edges_avoid_boxes(doc: Document) -> list[str]:
+    """The edges that run THROUGH a node box that is not one of their own two endpoints.
+
+    The acceptance invariant lanes exist for: an edge crossing a box it has nothing to do with is
+    the one routing fault a reader always notices, and before dummy nodes the layered layout had
+    no way to avoid it on a rank-spanning edge.
+    """
+    boxes = _node_boxes(doc)
+    offenders: list[str] = []
+    for element, spec in _edge_groups(doc):
+        path = next((child for child in element if str(getattr(child, "TAG", "")) == "path"), None)
+        if path is None:
+            continue
+        points = path_points(str(path.get("d")))
+        obstacles = [box for node_id, box in boxes.items() if node_id not in (spec.source,
+                                                                              spec.target)]
+        if any(
+            _enters(start, end, box)
+            for start, end in zip(points, points[1:], strict=False)
+            for box in obstacles
+        ):
+            offenders.append(str(element.get_id()))
+    return offenders
 
 
 # --- 1. grid -----------------------------------------------------------------
@@ -276,6 +434,113 @@ def test_layered_top_to_bottom_transposes_the_whole_drawing() -> None:
     assert {node: (y, x) for node, (x, y) in across.positions.items()} == down.positions
 
 
+# --- 3b. dummy nodes for rank-spanning edges ---------------------------------
+
+
+def test_an_edge_that_skips_a_rank_gets_one_waypoint_for_it() -> None:
+    placement = layout_layered(
+        _nodes("a", "b", "c"),
+        [("a", "b"), ("b", "c"), ("a", "c")],
+        spacing_main=50.0,
+        spacing_cross=10.0,
+        origin_x=0.0,
+        origin_y=0.0,
+    )
+    assert set(placement.edge_waypoints) == {("a", "c")}  # only the edge that spans two ranks
+    lane = placement.edge_waypoints[("a", "c")]
+    assert len(lane) == 1
+    assert lane[0][0] == pytest.approx(110.0)  # the middle of rank 1's band, not the gap beside it
+    assert lane[0][1] > placement.positions["b"][1] + 40.0  # clear of the node it passes
+
+
+def test_a_longer_span_gets_a_whole_chain_of_them() -> None:
+    placement = layout_layered(
+        _nodes("a", "b", "c", "d"),
+        [("a", "b"), ("b", "c"), ("c", "d"), ("a", "d")],
+        spacing_main=50.0,
+        spacing_cross=10.0,
+        origin_x=0.0,
+        origin_y=0.0,
+    )
+    lane = placement.edge_waypoints[("a", "d")]
+    assert len(lane) == 2  # one per rank the edge skips, in rank order
+    assert [at[0] for at in lane] == [pytest.approx(110.0), pytest.approx(200.0)]
+
+
+def test_a_span_of_one_reserves_no_lane_at_all() -> None:
+    placement = layout_layered(
+        _nodes("a", "b", "c", "d"),
+        [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")],
+        spacing_main=50.0,
+        spacing_cross=10.0,
+        origin_x=0.0,
+        origin_y=0.0,
+    )
+    assert placement.edge_waypoints == {}
+
+
+def test_a_lane_reads_source_to_target_even_when_the_edge_was_reversed() -> None:
+    # c→a closes a cycle, so it is reversed to be laid out; its lane must still come back the
+    # way the CALLER wrote the edge, or the router would thread it backwards.
+    placement = layout_layered(
+        _nodes("a", "b", "c"),
+        [("a", "b"), ("b", "c"), ("c", "a")],
+        spacing_main=50.0,
+        spacing_cross=10.0,
+        origin_x=0.0,
+        origin_y=0.0,
+    )
+    assert placement.cycles_broken == 1
+    lane = placement.edge_waypoints[("c", "a")]
+    assert len(lane) == 1  # a→c spans two ranks once c→a has been turned round
+    forward = layout_layered(
+        _nodes("a", "b", "c"),
+        [("a", "b"), ("b", "c"), ("a", "c")],
+        spacing_main=50.0,
+        spacing_cross=10.0,
+        origin_x=0.0,
+        origin_y=0.0,
+    )
+    assert lane == forward.edge_waypoints[("a", "c")]
+
+
+def test_a_two_rank_chain_gets_reversed_end_to_end() -> None:
+    # Two dummies, so reversal is observable: the lane must run c→a, i.e. right to left.
+    placement = layout_layered(
+        _nodes("a", "b", "c", "d"),
+        [("a", "b"), ("b", "c"), ("c", "d"), ("d", "a")],
+        spacing_main=50.0,
+        spacing_cross=10.0,
+        origin_x=0.0,
+        origin_y=0.0,
+    )
+    lane = placement.edge_waypoints[("d", "a")]
+    assert [at[0] for at in lane] == [pytest.approx(200.0), pytest.approx(110.0)]
+
+
+def test_dummies_take_part_in_the_ordering_sweeps() -> None:
+    """The lane for a→e must be pulled ABOVE m, which only a barycenter sweep can decide.
+
+    a leaves from above c, and m hangs off c — so the lane a→e belongs on a's side of m, and the
+    picture only reads that way if the dummy standing in for a→e is sorted with the rest of its
+    rank. A dummy that merely reserved space at the end of the rank would put the lane under m
+    and cross it against c→m→e; crossing minimisation cannot see the long edge until it is a
+    chain of short ones, which is the whole reason for the dummy.
+    """
+    placement = layout_layered(
+        _nodes("a", "c", "m", "e"),
+        [("c", "m"), ("m", "e"), ("a", "e")],
+        spacing_main=50.0,
+        spacing_cross=10.0,
+        origin_x=0.0,
+        origin_y=0.0,
+    )
+    assert placement.positions["a"][1] < placement.positions["c"][1]  # a above c in rank 0
+    lane = placement.edge_waypoints[("a", "e")]
+    assert len(lane) == 1
+    assert lane[0][1] < placement.positions["m"][1]  # and its lane above m, the way a runs
+
+
 def test_an_empty_set_lays_out_to_nothing() -> None:
     for placement in (
         layout_grid([], spacing_main=1.0, spacing_cross=1.0),
@@ -301,6 +566,12 @@ def _diamond(doc: Document, parent: str | None = None) -> list[str]:
     return ids
 
 
+def _corner(doc: Document, ids: Sequence[str]) -> Point:
+    """The top-left the laid-out set actually starts at — what an origin is a statement about."""
+    boxes = [box for box in (_box_of(doc, node_id) for node_id in ids) if box is not None]
+    return (min(box.x for box in boxes), min(box.y for box in boxes))
+
+
 def test_a_layout_pass_places_every_node_and_reports_what_it_did() -> None:
     doc = _doc()
     ids = _diamond(doc)
@@ -311,8 +582,11 @@ def test_a_layout_pass_places_every_node_and_reports_what_it_did() -> None:
     assert result.edges_rerouted == 4
     boxes = [_box_of(doc, node_id) for node_id in ids]
     assert all(box is not None for box in boxes)
-    xs = [box.x for box in boxes if box is not None]
-    assert xs[0] < xs[1] == xs[2] < xs[3]  # A, then B and C together, then D
+    # A, then B and C together, then D — stated as the invariant it is, not as four coordinates.
+    assert ranks_advance([(box.x, box.y) for box in boxes if box is not None], "LR")
+    assert no_box_overlap(doc)
+    assert min_gap(doc) >= 24.0 - 1e-6  # --gap-node, the cross-axis spacing it laid out with
+    assert edges_avoid_boxes(doc) == []
 
 
 def test_a_layout_pass_uses_the_theme_gaps_when_none_are_given() -> None:
@@ -323,7 +597,7 @@ def test_a_layout_pass_uses_the_theme_gaps_when_none_are_given() -> None:
     ops.layout_diagram(doc)
     first, second = _box_of(doc, a.ref.id), _box_of(doc, b.ref.id)
     assert first is not None and second is not None
-    assert (first.x, first.y) == (20.0, 20.0)  # the default origin
+    assert _corner(doc, [a.ref.id, b.ref.id]) == (20.0, 20.0)  # the default origin
     assert second.x - (first.x + first.w) == 90.0  # --gap-layer
 
 
@@ -382,8 +656,56 @@ def test_scope_limits_the_layout_to_one_parent_s_direct_children() -> None:
     assert result.nodes_placed == 4
     left_alone = _box_of(doc, outside.ref.id)
     assert left_alone is not None and (left_alone.x, left_alone.y) == (500.0, 500.0)
-    moved = _box_of(doc, inside[0])
-    assert moved is not None and (moved.x, moved.y) == (20.0, 20.0)
+    assert _corner(doc, inside) == (20.0, 20.0)  # the scope's own set starts at the origin
+
+
+def _chain(doc: Document, count: int) -> list[str]:
+    ids = [
+        ops.add_diagram_node(doc, kind="service", label=name, width=80, height=40).ref.id
+        for name in "ABCDE"[:count]
+    ]
+    for source, target in zip(ids, ids[1:], strict=False):
+        ops.add_diagram_edge(doc, source=source, target=target)
+    return ids
+
+
+def test_the_shapes_a_layered_layout_draws_keep_their_edges_out_of_the_boxes() -> None:
+    for build in (_diamond, lambda doc: _chain(doc, 3)):
+        doc = _doc()
+        build(doc)
+        ops.layout_diagram(doc)
+        assert edges_avoid_boxes(doc) == []
+        assert no_box_overlap(doc)
+
+
+def test_a_lane_keeps_a_rank_spanning_edge_clear_of_what_it_passes() -> None:
+    """A→D over a three-rank chain: the one case a direct route cannot draw without a collision.
+
+    The second half is the same document routed WITHOUT lanes, which is what a plain reflow does —
+    it is asserted to fail, both to prove the test data really is a collision case and to pin the
+    documented semantic that lanes are layout scaffolding rather than stored geometry.
+    """
+    doc = _doc()
+    ids = _chain(doc, 4)
+    ops.add_diagram_edge(doc, source=ids[0], target=ids[3])
+    ops.layout_diagram(doc)
+    assert edges_avoid_boxes(doc) == []
+
+    ops.reflow(doc)  # no lanes: every route is re-derived straight from the two boxes
+    assert edges_avoid_boxes(doc) != []
+
+
+def test_a_pinned_route_wins_over_the_lane_the_layout_would_have_used() -> None:
+    doc = _doc()
+    ids = _chain(doc, 4)
+    long_edge = ops.add_diagram_edge(
+        doc, source=ids[0], target=ids[3], waypoints=[(300.0, 300.0)]
+    )
+    ops.layout_diagram(doc)
+    d = str(doc.resolve(long_edge.ref.id)[0].get("d"))
+    # It still goes where it was told, not down the lane the layout reserved for it (which runs
+    # just under the rank of boxes, hundreds of units above y=300).
+    assert passes_through(path_points(d), (300.0, 300.0), TOL)
 
 
 def test_a_document_with_no_diagram_nodes_lays_out_to_nothing() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 import inkex
 
@@ -229,94 +230,96 @@ _PARAM_SHAPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("data-pill", "pill", ("x", "y", "width", "height", "smoothness")),
 )
 
-# Facade groups (ops.diagram, ops.chart, ops.annotate): (data-* attr, reported kind, text keys,
-# numeric keys, list-of-string keys, verbatim-JSON keys, boolean keys). Their spec IS the node —
-# read it back to see what an add_diagram_* / add_chart / add_table call means. A chart's `data`
-# and a table's `rows` are the things too structured to flatten, so they come back as the objects
-# they went in as.
-_FACADES: tuple[
-    tuple[
-        str,
-        str,
-        tuple[str, ...],
-        tuple[str, ...],
-        tuple[str, ...],
-        tuple[str, ...],
-        tuple[str, ...],
-    ],
-    ...,
-] = (
-    (
-        "data-diagram-node",
-        "diagram_node",
-        ("kind", "label", "shape"),
-        ("w", "h"),
-        (),
-        (),
-        (),
+# Facade groups (ops.diagram, ops.chart, ops.annotate). Their spec IS the node — read it back to
+# see what an add_diagram_* / add_chart / add_table call means. A chart's `data` and a table's
+# `rows` are the things too structured to flatten, so they come back as the objects they went in
+# as; so do the optional blocks (a chart's `axes`, a callout's `datum`, an edge's `waypoints`).
+@dataclass(frozen=True, slots=True)
+class _Facade:
+    """One facade's spec as ``get_params`` reports it: where it lives, and how each key reads back.
+
+    ``optional`` names the keys a spec is allowed to be MISSING — a block that is only written
+    when it was asked for (an edge nobody pinned a route on writes no ``waypoints``), or a field
+    added after the fact (``themed``, absent from every spec written before it existed). Anything
+    not named here is structural: a spec without it is corrupt, and reported as the plain group
+    it is rather than half-read.
+    """
+
+    attr: str
+    kind: str
+    text: tuple[str, ...] = ()
+    numbers: tuple[str, ...] = ()
+    lists: tuple[str, ...] = ()
+    json: tuple[str, ...] = ()
+    bools: tuple[str, ...] = ()
+    optional: frozenset[str] = frozenset()
+
+
+_FACADES: tuple[_Facade, ...] = (
+    _Facade(
+        attr="data-diagram-node",
+        kind="diagram_node",
+        text=("kind", "label", "shape"),
+        numbers=("w", "h"),
+        bools=("themed",),
+        optional=frozenset({"themed"}),
     ),
-    (
-        "data-diagram-edge",
-        "diagram_edge",
-        ("source", "target", "kind", "sa", "ta", "route", "label"),
-        (),
-        (),
-        (),
-        (),
+    _Facade(
+        attr="data-diagram-edge",
+        kind="diagram_edge",
+        text=("source", "target", "kind", "sa", "ta", "route", "label"),
+        json=("waypoints",),
+        bools=("themed",),
+        optional=frozenset({"themed", "waypoints"}),
     ),
-    (
-        "data-diagram-container",
-        "diagram_container",
-        ("kind", "label"),
-        (),
-        ("members",),
-        (),
-        (),
+    _Facade(
+        attr="data-diagram-container",
+        kind="diagram_container",
+        text=("kind", "label"),
+        lists=("members",),
+        bools=("themed",),
+        optional=frozenset({"themed"}),
     ),
-    (
-        "data-chart",
-        "chart",
-        ("kind", "title", "x_label", "y_label"),
-        ("w", "h"),
-        (),
-        ("data",),
-        (),
+    _Facade(
+        attr="data-chart",
+        kind="chart",
+        text=("kind", "title", "x_label", "y_label"),
+        numbers=("w", "h"),
+        json=("data", "axes"),
+        optional=frozenset({"axes"}),
     ),
-    (
-        "data-legend",
-        "legend",
-        ("title",),
-        ("columns",),
-        (),
-        ("entries",),
-        (),
+    _Facade(
+        attr="data-legend",
+        kind="legend",
+        text=("title",),
+        numbers=("columns",),
+        json=("entries",),
     ),
-    (
-        "data-callout",
-        "callout",
-        ("target", "text", "kind", "side"),
-        ("distance", "max_width"),
-        (),
-        (),
-        (),
+    _Facade(
+        attr="data-callout",
+        kind="callout",
+        text=("target", "text", "kind", "side"),
+        numbers=("distance", "max_width"),
+        json=("datum",),
+        bools=("themed",),
+        optional=frozenset({"themed", "datum"}),
     ),
-    (
-        "data-callout-card",
-        "callout_card",
-        ("title", "body", "kind"),
-        ("width",),
-        (),
-        (),
-        (),
+    _Facade(
+        attr="data-callout-card",
+        kind="callout_card",
+        text=("title", "body", "kind"),
+        numbers=("width",),
+        bools=("themed",),
+        optional=frozenset({"themed"}),
     ),
-    (
-        "data-table",
-        "table",
-        ("title",),
-        ("max_col_width", "x_pad"),
-        ("col_align",),
-        ("rows", "header"),
-        ("zebra",),
+    _Facade(
+        attr="data-table",
+        kind="table",
+        text=("title",),
+        numbers=("max_col_width", "x_pad"),
+        lists=("col_align",),
+        json=("rows", "header"),
+        bools=("zebra",),
     ),
 )
 
@@ -331,20 +334,39 @@ def _of(value: JsonValue) -> float | None:
 
 
 def _read_facade(element: inkex.BaseElement) -> tuple[str, ShapeParams] | None:
-    """A facade's stored spec under the same names its add_/edit_ tools use, or None."""
-    for attr, kind, text_keys, number_keys, list_keys, json_keys, bool_keys in _FACADES:
-        raw = element.get(attr)
+    """A facade's stored spec under the same names its add_/edit_ tools use, or None.
+
+    A key the facade declares OPTIONAL and the spec does not carry is reported as absent — the
+    key simply does not appear — rather than as a corrupt spec. That distinction is what lets a
+    block written only when it was asked for (an edge's pinned ``waypoints``, a chart's ``axes``,
+    a callout's ``datum``) be surfaced at all: registering it under the old all-or-nothing read
+    would have made every facade WITHOUT one unreadable.
+    """
+    for facade in _FACADES:
+        raw = element.get(facade.attr)
         if raw is None:
             continue
         try:
             spec = json.loads(raw)
-            params: ShapeParams = {key: str(spec[key]) for key in text_keys}
-            # A numeric field may be genuinely absent (a table's `x_pad` means "use the theme's"
-            # when null), and reporting that as null beats reporting the whole spec as corrupt.
-            params.update({key: _of(spec[key]) for key in number_keys})
-            params.update({key: bool(spec[key]) for key in bool_keys})
-            params.update({key: [str(item) for item in spec[key]] for key in list_keys})
-            for key in json_keys:
+            groups = (facade.text, facade.numbers, facade.lists, facade.json, facade.bools)
+            if any(
+                key not in spec
+                for group in groups
+                for key in group
+                if key not in facade.optional
+            ):
+                return None  # a structural key is missing: this spec is not readable
+            params: ShapeParams = {key: str(spec[key]) for key in facade.text if key in spec}
+            # A numeric field may be present but null (a table's `x_pad` means "use the theme's"
+            # then), and reporting that as null beats reporting the whole spec as corrupt.
+            params.update({key: _of(spec[key]) for key in facade.numbers if key in spec})
+            params.update({key: bool(spec[key]) for key in facade.bools if key in spec})
+            params.update(
+                {key: [str(item) for item in spec[key]] for key in facade.lists if key in spec}
+            )
+            for key in facade.json:
+                if key not in spec:
+                    continue
                 value = spec[key]
                 # A chart's `data` is an object and a legend's `entries` is an array; both are
                 # structured enough that flattening them would lose the spec rather than report it.
@@ -355,7 +377,7 @@ def _read_facade(element: inkex.BaseElement) -> tuple[str, ShapeParams] | None:
             return None  # corrupt spec → report the group as the plain <g> it is
         if "auto" in spec:
             params["auto"] = bool(spec["auto"])
-        return kind, params
+        return facade.kind, params
     return None
 
 
@@ -437,10 +459,14 @@ def get_params(doc: Document, target: str) -> dict[str, str | bool | ShapeParams
 
     Lets you read a shape, then edit it with matching params. Recognizes parametric stars/arcs,
     variable-width paths, squircles, the diagram facades (a node's kind/label/shape/size, an
-    edge's endpoints/anchors/route) and charts (kind, labels, box, and the ``data`` they were
-    drawn from, verbatim) — all reported with ``parametric: true``; for basic
-    shapes returns their geometry attributes; for a plain path, its ``d``. ``style`` is the node's
-    current presentation properties (fill, stroke, …).
+    edge's endpoints/anchors/route and any pinned ``waypoints``) and charts (kind, labels, box,
+    the ``data`` they were drawn from and their ``axes``, verbatim) — all reported with
+    ``parametric: true``; for basic shapes returns their geometry attributes; for a plain path,
+    its ``d``. ``style`` is the node's current presentation properties (fill, stroke, …).
+
+    Blocks a facade only writes when it was asked for — an edge's ``waypoints``, a chart's
+    ``axes``, a callout's ``datum`` — are reported when present and simply absent when not, so
+    the key set tells you which of them the facade actually carries.
 
     Returns ``{kind, parametric, params, style}``.
     """

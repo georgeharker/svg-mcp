@@ -657,6 +657,7 @@ def test_get_params_hands_back_the_spec_a_callout_was_built_from() -> None:
     assert params["target"] == node.ref.id
     assert (params["text"], params["kind"], params["side"]) == ("hot path", "warning", "S")
     assert (params["distance"], params["max_width"], params["auto"]) == (25.0, 160.0, True)
+    assert "datum" not in params  # a callout pointing at a BOX stores no datum, and reports none
 
 
 # --- 8b. callouts that point at one datum of a chart -------------------------
@@ -695,6 +696,17 @@ def test_a_datum_callout_lands_on_the_bar_it_names() -> None:
         doc, target=chart.ref.id, text="the spike", datum=ops.ChartDatum(index=1), x=420, y=60
     )
     assert _ends(doc, placed.ref.id)[1] == pytest.approx(_bar_top(doc, chart.ref.id, 1), abs=1.0)
+
+
+def test_get_params_hands_back_the_datum_a_callout_points_at() -> None:
+    doc = _doc()
+    chart = _chart(doc)
+    placed = ops.add_callout(
+        doc, target=chart.ref.id, text="the spike", datum=ops.ChartDatum(index=1), x=420, y=60
+    )
+    params = get_params(doc, placed.ref.id)["params"]
+    assert isinstance(params, dict)
+    assert params["datum"] == ops.ChartDatum(index=1).model_dump()
 
 
 def test_a_datum_callout_names_its_series_by_name_as_well_as_by_number() -> None:

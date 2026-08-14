@@ -3352,6 +3352,7 @@ def add_diagram_edge(
     target_anchor: Literal["auto", "N", "S", "E", "W"] = "auto",
     route: Literal["orthogonal", "straight", "spline"] = "orthogonal",
     label: str | None = None,
+    waypoints: list[Point] | None = None,
     parent: str | None = None,
     name: str | None = None,
     styles: list[str] | None = None,
@@ -3362,6 +3363,10 @@ def add_diagram_edge(
     The edge stores what it connects, not where it runs, so `reflow` can re-derive its path after
     the nodes move. Sides are chosen from the geometry unless you name them, and several edges on
     one face fan out across it instead of stacking on the same point.
+
+    `layout_diagram` routes long edges down lanes it reserves for them, so you rarely need to
+    place a route by hand — reach for `waypoints` when one edge IS the picture and you want it
+    drawn a particular way whatever else moves.
 
     All edges currently share ONE arrowhead marker (per-kind coloured heads are a later
     refinement), so the kind shows in the line's weight and dash, not the head.
@@ -3375,6 +3380,9 @@ def add_diagram_edge(
         target_anchor: Which face to arrive at; "auto" picks the facing one.
         route: "orthogonal" (right angles with rounded corners), "straight", or "spline".
         label: Text placed on the edge, with a canvas-coloured halo so it reads over the line.
+        waypoints: [[x, y], …] the route is PINNED to thread through, in world coordinates. The
+            two ends keep following the nodes' faces; the middle is drawn exactly as given,
+            through every later reflow and layout. Omit to let the router decide.
         parent: Group/layer id; omit for the document root (an edge does NOT live inside a node).
         name: Friendly label for the group.
         styles: Extra named styles / theme classes to attach.
@@ -3394,6 +3402,7 @@ def add_diagram_edge(
         target_anchor=target_anchor,
         route=route,
         label=label,
+        waypoints=waypoints,
         parent=parent,
         name=name,
         styles=styles,
@@ -3445,6 +3454,7 @@ def edit_diagram_edge(
     source_anchor: Literal["auto", "N", "S", "E", "W"] | None = None,
     target_anchor: Literal["auto", "N", "S", "E", "W"] | None = None,
     label: str | None = None,
+    waypoints: list[Point] | None = None,
 ) -> dict[str, str | int | None]:
     """Edit a diagram edge by its SPEC — kind, route style, anchors, label — and re-route it.
 
@@ -3457,6 +3467,11 @@ def edit_diagram_edge(
         source_anchor: New source face, or "auto".
         target_anchor: New target face, or "auto".
         label: New label text ("" removes it).
+        waypoints: [[x, y], …] REPLACING the pinned route wholesale — a route is one shape, not a
+            list of separate decisions. An EMPTY list clears the pin and hands the edge back to
+            the router; omitting the argument leaves whatever it has alone. A pinned route beats
+            the lanes `layout_diagram` would have used, but does NOT pin the nodes: lay the
+            diagram out again and the boxes move while your route stays where you put it.
 
     Returns:
         {id, tag, name, edges_rerouted}.
@@ -3469,6 +3484,7 @@ def edit_diagram_edge(
         source_anchor=source_anchor,
         target_anchor=target_anchor,
         label=label,
+        waypoints=waypoints,
     )
     return {**result.ref.as_dict(), "edges_rerouted": result.edges_rerouted}
 
@@ -3803,6 +3819,11 @@ def reflow(
     container is re-drawn around its members. An edge whose source or target no longer resolves
     is left untouched and reported in `skipped`; a container with nothing left to fit to is left
     untouched and reported in `skipped_containers`.
+
+    Routes come back DIRECT: the lanes `layout_diagram` reserves for edges that span several ranks
+    belong to that layout pass and are not stored, so a long edge re-routed here may go back to
+    crossing a box. Run `layout_diagram` again for lanes, or pin the route with
+    `edit_diagram_edge(waypoints=...)` — a pinned middle survives every reflow.
 
     Args:
         edges: false = leave edges alone.

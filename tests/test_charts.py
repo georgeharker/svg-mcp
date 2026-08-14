@@ -550,6 +550,17 @@ def test_get_params_hands_back_the_spec_a_chart_was_built_from() -> None:
     assert params["data"] == data.model_dump()
     assert (params["title"], params["x_label"], params["y_label"]) == ("T", "X", "Y")
     assert (params["w"], params["h"], params["auto"]) == (320.0, 200.0, True)
+    assert "axes" not in params  # a chart nobody gave axes to stores none, and reports none
+
+
+def test_get_params_hands_back_the_axes_a_chart_was_given() -> None:
+    doc = _doc()
+    data = BarData(categories=["a", "b"], series=[Series(name="one", values=[1.0, 2.0])])
+    axes = AxesSpec(ticks=4, gridlines="y")
+    placed = ops.add_chart(doc, kind="bar", data=data, axes=axes)
+    params = get_params(doc, placed.ref.id)["params"]
+    assert isinstance(params, dict)
+    assert params["axes"] == axes.model_dump()
 
 
 def test_an_auto_placed_chart_stacks_under_the_diagram_node_above_it() -> None:

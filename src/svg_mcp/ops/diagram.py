@@ -11,8 +11,10 @@ is SHAPED like, and its tokens say how much room to leave around it. Both are re
 :func:`~svg_mcp.ops.themes.serving_theme`, so a document that loaded no theme still gets the
 bundled default's answer.
 
-The routing engine below is deliberately pure: boxes, sides and tokens in, path data out. It is
-the same code whether an edge is being created, edited, or reflowed after a node moved.
+The routing engine below is deliberately pure: boxes, sides, tokens and any points to thread
+through in, path data out. It is the same code whether an edge is being created, edited, or
+reflowed after a node moved — and the same code whether the points it threads are the lanes a
+layout reserved for a long edge or a route the author pinned by hand.
 """
 
 from __future__ import annotations
@@ -229,20 +231,36 @@ class Box:
         return (self.cx, self.cy)
 
 
-def auto_side(source: Box, target: Box) -> Side:
-    """Which face of ``source`` faces ``target``: the dominant axis of the center-to-center gap."""
-    dx, dy = target.cx - source.cx, target.cy - source.cy
+def side_towards(box: Box, at: Point) -> Side:
+    """Which face of ``box`` faces the point ``at``: the dominant axis of the gap to it."""
+    dx, dy = at[0] - box.cx, at[1] - box.cy
     if abs(dx) >= abs(dy):
         return "E" if dx > 0 else "W"
     return "S" if dy > 0 else "N"
 
 
+def auto_side(source: Box, target: Box) -> Side:
+    """Which face of ``source`` faces ``target``: the dominant axis of the center-to-center gap."""
+    return side_towards(source, target.center)
+
+
 def resolve_sides(
-    source: Box, target: Box, source_pref: AnchorPref, target_pref: AnchorPref
+    source: Box,
+    target: Box,
+    source_pref: AnchorPref,
+    target_pref: AnchorPref,
+    via: Sequence[Point] | None = None,
 ) -> tuple[Side, Side]:
-    """The two faces an edge uses — the caller's preference where given, else the facing pair."""
-    start = source_pref if source_pref != "auto" else auto_side(source, target)
-    end = target_pref if target_pref != "auto" else auto_side(target, source)
+    """The two faces an edge uses — the caller's preference where given, else the facing pair.
+
+    With ``via`` points the facing pair is measured against the NEAREST end of the thread rather
+    than the far node's center: a lane may leave and arrive from a different side than the direct
+    line would, and an anchor pointing away from its own first segment is what reads as broken.
+    """
+    towards_target = via[0] if via else target.center
+    towards_source = via[-1] if via else source.center
+    start = source_pref if source_pref != "auto" else side_towards(source, towards_target)
+    end = target_pref if target_pref != "auto" else side_towards(target, towards_source)
     return start, end
 
 
@@ -296,17 +314,83 @@ def _dedupe(points: Sequence[Point]) -> list[Point]:
     return out
 
 
-def orthogonal_waypoints(a: Point, sa: Side, b: Point, sb: Side, stub: float) -> list[Point]:
+def _collinear(before: Point, here: Point, after: Point) -> bool:
+    """True when ``here`` sits on the straight run from ``before`` to ``after``, within the tol.
+
+    Measured as a perpendicular distance, not an angle: two lanes half a unit apart are the same
+    lane as far as the drawing is concerned, and a vertex there buys a corner nobody can see.
+    """
+    dx, dy = after[0] - before[0], after[1] - before[1]
+    span = math.hypot(dx, dy)
+    if span <= _EPS:  # the route comes straight back on itself: there is nothing in between
+        return True
+    return abs((here[0] - before[0]) * dy - (here[1] - before[1]) * dx) / span <= _ALIGN_TOL
+
+
+def _simplify(points: Sequence[Point]) -> list[Point]:
+    """Drop the points a route merely passes through — a thread must carry no zero-angle jogs."""
+    pts = _dedupe(points)
+    if len(pts) < 3:
+        return pts
+    out = [pts[0]]
+    for index in range(1, len(pts) - 1):
+        if not _collinear(out[-1], pts[index], pts[index + 1]):
+            out.append(pts[index])
+    out.append(pts[-1])
+    return out
+
+
+def _thread(start: Point, end: Point, *, horizontal: bool) -> list[Point]:
+    """The corner pair joining two stations of a threaded route, jogging BETWEEN their bands.
+
+    The cross-axis change is put half way along the main axis — the same split the two-anchor Z
+    router makes, and for the same reason: half way between two rank bands is free air, while
+    either band's own coordinate is exactly where its boxes are. Two stations already lined up
+    on the cross axis need no corner at all, which is what keeps a straight lane straight.
+    """
+    if horizontal:
+        if abs(start[1] - end[1]) <= _ALIGN_TOL:
+            return []
+        mid = (start[0] + end[0]) / 2.0
+        return [(mid, start[1]), (mid, end[1])]
+    if abs(start[0] - end[0]) <= _ALIGN_TOL:
+        return []
+    mid = (start[1] + end[1]) / 2.0
+    return [(start[0], mid), (end[0], mid)]
+
+
+def orthogonal_waypoints(
+    a: Point, sa: Side, b: Point, sb: Side, stub: float, via: Sequence[Point] | None = None
+) -> list[Point]:
     """The right-angled polyline from anchor ``a`` to anchor ``b``, stubs included.
 
     Each end leaves its face straight out by ``stub``; between those two stub ends the route is a
     Z (opposite faces, split on the free axis), a single corner (perpendicular faces), or a U
     (the same face, both stubs pushed out to the further of the two).
+
+    ``via`` replaces that middle with a THREAD: the route visits every via point in order, each
+    hop jogging across half way to the next one, and the points it ends up running straight
+    through are dropped. Each via point is a LANE position — a cross-axis slot the layout
+    reserved in one rank — so consecutive points differ mainly along the main axis.
     """
     na, nb = _NORMALS[sa], _NORMALS[sb]
     a2 = (a[0] + na[0] * stub, a[1] + na[1] * stub)
     b2 = (b[0] + nb[0] * stub, b[1] + nb[1] * stub)
     horizontal = sa in ("E", "W")
+    if via:
+        stations = [a2, *via, b2]
+        # Which axis a THREAD runs along is read off the thread, not off the source face: the
+        # lanes are strung out along the main axis, and an author who pinned a face the route
+        # only leaves by should not thereby transpose the whole middle of it.
+        spread_x = max(at[0] for at in stations) - min(at[0] for at in stations)
+        spread_y = max(at[1] for at in stations) - min(at[1] for at in stations)
+        horizontal = spread_x >= spread_y
+        threaded: list[Point] = [a, a2]
+        for start, end in zip(stations, stations[1:], strict=False):
+            threaded.extend(_thread(start, end, horizontal=horizontal))
+            threaded.append(end)
+        threaded.append(b)
+        return _simplify(threaded)
     middle: list[Point]
     if sa == sb:
         if horizontal:
@@ -389,6 +473,29 @@ class Route:
     label_at: Point
 
 
+def _spline_path(points: Sequence[Point], sa: Side, sb: Side) -> str:
+    """Chained cubics through ``points``, both ends leaving along their own face normal.
+
+    With two points this is EXACTLY the one-curve form the router has always drawn: the control
+    handles are the anchors pushed out along their normals by 0.4 of the span. Threading only
+    adds interior handles, aimed along the Catmull-Rom tangent (the chord across each via point),
+    so a threaded spline is the same aesthetic continued rather than a second curve style.
+    """
+    na, nb = _NORMALS[sa], _NORMALS[sb]
+    tangents: list[Point] = [na]
+    tangents.extend(_towards(before, after) for before, after in zip(points, points[2:],
+                                                                     strict=False))
+    tangents.append((-nb[0], -nb[1]))
+    parts = [f"M {_pair(points[0])}"]
+    for index, (start, end) in enumerate(zip(points, points[1:], strict=False)):
+        reach = 0.4 * math.dist(start, end)
+        out_of, into = tangents[index], tangents[index + 1]
+        c1 = (start[0] + out_of[0] * reach, start[1] + out_of[1] * reach)
+        c2 = (end[0] - into[0] * reach, end[1] - into[1] * reach)
+        parts.append(f"C {_pair(c1)} {_pair(c2)} {_pair(end)}")
+    return " ".join(parts)
+
+
 def route_edge(
     a: Point,
     sa: Side,
@@ -398,20 +505,23 @@ def route_edge(
     route: RouteStyle,
     stub: float,
     radius: float,
+    via: Sequence[Point] | None = None,
 ) -> Route:
-    """Draw one edge between two anchors, in whichever of the three styles was asked for."""
+    """Draw one edge between two anchors, in whichever of the three styles was asked for.
+
+    ``via`` threads the path through a list of points BETWEEN the two anchors — a layout's
+    reserved lanes, or a route an author pinned. It never affects which faces the edge uses
+    (that is :func:`resolve_sides`' job) and never reaches past the anchors.
+    """
+    through = list(via) if via else []
     if route == "straight":
-        return Route(f"M {_pair(a)} L {_pair(b)}", ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0))
+        points = [a, *through, b]
+        drawn = " ".join([f"M {_pair(a)}", *(f"L {_pair(point)}" for point in points[1:])])
+        return Route(drawn, _longest_midpoint(points))
     if route == "spline":
-        reach = 0.4 * math.dist(a, b)
-        na, nb = _NORMALS[sa], _NORMALS[sb]
-        c1 = (a[0] + na[0] * reach, a[1] + na[1] * reach)
-        c2 = (b[0] + nb[0] * reach, b[1] + nb[1] * reach)
-        return Route(
-            f"M {_pair(a)} C {_pair(c1)} {_pair(c2)} {_pair(b)}",
-            ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0),
-        )
-    points = orthogonal_waypoints(a, sa, b, sb, stub)
+        points = [a, *through, b]
+        return Route(_spline_path(points, sa, sb), _longest_midpoint(points))
+    points = orthogonal_waypoints(a, sa, b, sb, stub, through)
     return Route(rounded_path(points, radius), _longest_midpoint(points))
 
 
@@ -442,6 +552,12 @@ class EdgeSpec:
     """What a diagram edge connects, and how, as stored on its group.
 
     ``themed`` is the dressing intent — see :class:`NodeSpec`.
+
+    ``waypoints`` is an AUTHOR-PINNED middle: the world points the route threads between its two
+    anchors. None (an absent key, which is what every edge written before this existed carries)
+    means route freely. Present, it survives every reflow — the endpoints re-anchor to the nodes'
+    current faces, the middle is drawn exactly as it was typed. Layout-derived lanes are NOT
+    stored here; they are scaffolding, recomputed by each layout pass.
     """
 
     source: str
@@ -452,6 +568,7 @@ class EdgeSpec:
     route: RouteStyle
     label: str
     themed: bool = True
+    waypoints: tuple[Point, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,9 +585,11 @@ class ContainerSpec:
     themed: bool = True
 
 
-def _store(
-    element: BaseElement, attr: str, spec: Mapping[str, str | float | bool | list[str]]
-) -> None:
+SpecValue = str | float | bool | list[str] | list[list[float]]
+"""What a facade spec may hold: scalars, a member list, or a list of points."""
+
+
+def _store(element: BaseElement, attr: str, spec: Mapping[str, SpecValue]) -> None:
     element.set(attr, json.dumps(dict(spec), separators=(",", ":")))
 
 
@@ -512,6 +631,7 @@ def read_edge_spec(element: BaseElement) -> EdgeSpec | None:
         return None
     try:
         spec = json.loads(raw)
+        pinned = spec.get("waypoints")
         return EdgeSpec(
             source=str(spec["source"]),
             target=str(spec["target"]),
@@ -521,6 +641,11 @@ def read_edge_spec(element: BaseElement) -> EdgeSpec | None:
             route=_route_style(str(spec.get("route", "orthogonal"))),
             label=str(spec.get("label", "")),
             themed=bool(spec.get("themed", True)),
+            # An empty list reads as "no pinned route" — that is what clearing one writes, and
+            # what an edge that never had one means.
+            waypoints=(
+                None if not pinned else tuple((float(x), float(y)) for x, y in pinned)
+            ),
         )
     except (ValueError, TypeError, KeyError):
         return None
@@ -578,20 +703,21 @@ def _write_node_spec(element: BaseElement, spec: NodeSpec) -> None:
 
 
 def _write_edge_spec(element: BaseElement, spec: EdgeSpec) -> None:
-    _store(
-        element,
-        _EDGE_ATTR,
-        {
-            "source": spec.source,
-            "target": spec.target,
-            "kind": spec.kind,
-            "sa": spec.sa,
-            "ta": spec.ta,
-            "route": spec.route,
-            "label": spec.label,
-            "themed": spec.themed,
-        },
-    )
+    stored: dict[str, SpecValue] = {
+        "source": spec.source,
+        "target": spec.target,
+        "kind": spec.kind,
+        "sa": spec.sa,
+        "ta": spec.ta,
+        "route": spec.route,
+        "label": spec.label,
+        "themed": spec.themed,
+    }
+    # An edge nobody pinned a route on writes no ``waypoints`` key at all: an absent key is the
+    # only honest way to say "route this freely", and it keeps every existing edge byte-identical.
+    if spec.waypoints:
+        stored["waypoints"] = [[x, y] for x, y in spec.waypoints]
+    _store(element, _EDGE_ATTR, stored)
 
 
 # --- theme lookups -----------------------------------------------------------
@@ -1160,7 +1286,11 @@ def _box_of(doc: Document, target: str) -> Box | None:
 
 @dataclass(frozen=True, slots=True)
 class _Leg:
-    """One resolvable edge, pinned to real geometry and ready to have its ports assigned."""
+    """One resolvable edge, pinned to real geometry and ready to have its ports assigned.
+
+    ``via`` is the middle the route threads — the author's pinned waypoints, else the lane this
+    pass was handed, else nothing.
+    """
 
     element: BaseElement
     spec: EdgeSpec
@@ -1168,6 +1298,7 @@ class _Leg:
     target: Box
     sa: Side
     ta: Side
+    via: tuple[Point, ...] = ()
 
 
 def _edge_groups(doc: Document) -> Iterator[tuple[BaseElement, EdgeSpec]]:
@@ -1188,6 +1319,7 @@ def _write_route(doc: Document, leg: _Leg, a: Point, b: Point) -> None:
         route=leg.spec.route,
         stub=_token(theme, "--edge-stub", _DEFAULT_STUB),
         radius=_token(theme, "--edge-radius", _DEFAULT_RADIUS),
+        via=leg.via or None,
     )
     path = _first_path(leg.element)
     if path is None:
@@ -1200,16 +1332,32 @@ def _write_route(doc: Document, leg: _Leg, a: Point, b: Point) -> None:
     _set_label(doc, leg.element, leg.spec.label, result.label_at, halo=canvas, dy=-4.0)
 
 
-def _reroute(doc: Document, *, scope: set[str] | None = None) -> Reflow:
+def _reroute(
+    doc: Document,
+    *,
+    scope: set[str] | None = None,
+    via: Mapping[str, Sequence[Point]] | None = None,
+) -> Reflow:
     """Re-derive every diagram edge's path from the CURRENT node boxes, ports and all.
 
     Port spreading is computed over ALL edges even when ``scope`` narrows what gets rewritten —
     a node's ports are shared, so an edge's anchor depends on its neighbours whether or not the
     caller asked about them.
+
+    ``via`` supplies lanes for THIS pass only, keyed by edge id: the points a layout reserved for
+    a rank-spanning edge. They are never stored. An edge whose spec carries author-pinned
+    ``waypoints`` ignores the lane it was offered — geometry somebody typed beats geometry the
+    layout worked out.
     """
 
     def wanted(element: BaseElement, spec: EdgeSpec) -> bool:
         return scope is None or bool({str(element.get_id()), spec.source, spec.target} & scope)
+
+    def threaded(element: BaseElement, spec: EdgeSpec) -> tuple[Point, ...]:
+        if spec.waypoints:
+            return spec.waypoints
+        lane = (via or {}).get(str(element.get_id()))
+        return tuple(lane) if lane else ()
 
     legs: list[_Leg] = []
     chosen: list[bool] = []
@@ -1220,8 +1368,9 @@ def _reroute(doc: Document, *, scope: set[str] | None = None) -> Reflow:
             if wanted(element, spec):
                 skipped.append(str(element.get_id()))
             continue
-        sa, ta = resolve_sides(source, target, spec.sa, spec.ta)
-        legs.append(_Leg(element, spec, source, target, sa, ta))
+        thread = threaded(element, spec)
+        sa, ta = resolve_sides(source, target, spec.sa, spec.ta, thread or None)
+        legs.append(_Leg(element, spec, source, target, sa, ta, thread))
         chosen.append(wanted(element, spec))
 
     ends: dict[tuple[str, Side], list[tuple[int, bool]]] = {}
@@ -1256,6 +1405,7 @@ def add_diagram_edge(
     target_anchor: AnchorPref = "auto",
     route: RouteStyle = "orthogonal",
     label: str | None = None,
+    waypoints: list[Point] | None = None,
     parent: str | None = None,
     name: str | None = None,
     styles: list[str] | None = None,
@@ -1266,6 +1416,10 @@ def add_diagram_edge(
     The edge stores what it connects, not where it runs, so it can be re-derived at any time:
     the path is computed now from both boxes and re-computed by ``reflow`` after they move. Sides
     default to whichever faces each other; several edges on one face fan out across it.
+
+    ``waypoints`` PINS the middle of the route: the endpoints keep tracking the nodes' faces, but
+    the points in between are drawn exactly as given, through every later reflow and layout pass.
+    Omit them (or pass an empty list) to let the router decide.
 
     Every edge shares ONE arrowhead marker, so an edge's head does not follow its kind's colour
     yet — per-kind markers are a later refinement.
@@ -1298,6 +1452,7 @@ def add_diagram_edge(
                 route=route,
                 label=label or "",
                 themed=themed,
+                waypoints=tuple((float(x), float(y)) for x, y in waypoints or ()) or None,
             ),
         )
         result = _reroute(doc)
@@ -1313,11 +1468,16 @@ def edit_diagram_edge(
     source_anchor: AnchorPref | None = None,
     target_anchor: AnchorPref | None = None,
     label: str | None = None,
+    waypoints: list[Point] | None = None,
 ) -> EdgeEdit:
     """Edit a diagram edge by its SPEC — kind, route style, anchors, label — and re-route it.
 
     Changing an anchor re-spreads the faces it leaves and joins, so the edges sharing them move
     too; that is the point of storing the spec rather than the path.
+
+    ``waypoints`` REPLACES the pinned middle wholesale — there is no per-point edit, because a
+    route is one shape rather than a list of independent decisions. An EMPTY list clears the pin
+    and hands the edge back to the router; None (the default) leaves whatever it had alone.
     """
     group = doc.resolve(target)
     spec = read_edge_spec(group)
@@ -1335,6 +1495,11 @@ def edit_diagram_edge(
             route=route if route is not None else spec.route,
             label=label if label is not None else spec.label,
             themed=spec.themed,
+            waypoints=(
+                spec.waypoints
+                if waypoints is None
+                else tuple((float(x), float(y)) for x, y in waypoints) or None
+            ),
         ),
     )
     result = _reroute(doc)
@@ -1665,6 +1830,7 @@ def reflow(
     edges: bool = True,
     containers: bool = True,
     scope: list[str] | None = None,
+    _via: Mapping[str, Sequence[Point]] | None = None,
 ) -> Reflow:
     """Re-derive the diagram's derived geometry from what its nodes are doing NOW.
 
@@ -1686,6 +1852,14 @@ def reflow(
     reported in ``skipped`` (as the caller wrote it) and the rest of the scope still applies.
     An EMPTY ``scope`` is an explicit no-op — it names nothing, so nothing is re-derived; omit
     the argument entirely to reflow the whole document.
+
+    LANES ARE NOT PERSISTENT. ``layout_diagram`` threads the lanes it reserved for rank-spanning
+    edges into its own reflow through ``_via`` (an internal channel, one pass only — see the
+    recorded decision not to freeze layout scaffolding into the document). A LATER plain
+    ``reflow`` — after a ``translate_node``, say — therefore re-derives DIRECT routes with no
+    lanes at all, and a long edge may go back to crossing a box. That is the explicit-reflow
+    contract working as designed, not a regression: run ``layout_diagram`` again to get the lanes
+    back, or pin the route with ``edit_diagram_edge(waypoints=...)`` to make it survive anything.
     """
     ids: set[str] | None = None
     unresolved: list[str] = []
@@ -1696,7 +1870,7 @@ def reflow(
                 ids.add(str(doc.resolve(entry).get_id()))
             except SvgMcpError:
                 unresolved.append(entry)
-    result = _reroute(doc, scope=ids) if edges else Reflow()
+    result = _reroute(doc, scope=ids, via=_via) if edges else Reflow()
     result.skipped.extend(unresolved)
     if edges:
         # ``ops.annotate`` imports this module, not vice versa — hence the deferred import, the
