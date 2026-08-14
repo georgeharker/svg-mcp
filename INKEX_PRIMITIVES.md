@@ -37,9 +37,20 @@ Legend for **Tier**: **1** = expose first (core), **2** = next, **3** = advanced
   via the raw `define_filter` graph; guides (`add_guide`/`list_guides`) and pages
   (`add_page`/`list_pages`). Verified: displacement-map composition renders.
 
-**All three tiers implemented and wired** — 91 tools (incl. structural ops: ungroup, z-order,
-world-preserving reparent, duplicate), ruff/mypy clean, full test suite green. Drive it via the
-project `.mcp.json`, `fastmcp dev`, or `scripts/demo.py` (see README → Experiment with an LLM).
+**All three tiers implemented and wired** — 91 tools from this map (incl. structural ops:
+ungroup, z-order, world-preserving reparent, duplicate), ruff/mypy clean, full test suite green.
+Drive it via the project `.mcp.json`, `fastmcp dev`, or `scripts/demo.py` (see README →
+Experiment with an LLM).
+
+**Beyond this map** the server now carries **181 tools total**. The difference is not inkex
+mapping but the layers built on top of it, catalogued elsewhere: the **theme system**
+(load/apply/variants/residency — [`docs/themes.md`](./docs/themes.md)), the **diagram facades**
+(nodes, edges, containers, `layout_diagram`, `reflow`, `add_diagram_graph` ingest —
+[`docs/diagrams.md`](./docs/diagrams.md)), **charts** (`add_chart`/`edit_chart`, seven kinds),
+**annotations** (legend, callout, table, callout card), and supporting parametric shapes
+(squircle, rounded polygon, pill, superellipse), `boolean`, `offset_path`,
+`add_variable_width_path`, bulk constructors, and the composable effect stack. This document
+stays the source of truth for the inkex mapping only.
 
 ---
 
