@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import math
+from bisect import bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -60,8 +61,8 @@ from .themes import ServingTheme, attach_dressing, resolve_dressing, serving_the
 Style = dict[str, str]
 Point = tuple[float, float]
 
-ChartKind = Literal["bar", "line", "donut", "scatter", "sparkline"]
-"""The five plots this module draws. Closed — each one is a layout, not a configuration."""
+ChartKind = Literal["bar", "line", "donut", "scatter", "histogram", "sparkline"]
+"""The six plots this module draws. Closed — each one is a layout, not a configuration."""
 
 _DEFAULT_W, _DEFAULT_H = 320.0, 200.0
 _SPARK_W, _SPARK_H = 120.0, 32.0
@@ -158,8 +159,26 @@ class TickFormat(BaseModel):
     """Group the integer part: ``1204`` → ``1,204``."""
 
 
-Marker = Literal["circle", "square", "diamond", "triangle", "none"]
-"""The mark a line or scatter puts at a point. Closed — a shape has to be one this module draws."""
+Marker = Literal[
+    "circle", "square", "diamond", "triangle", "tri_down", "plus", "cross", "star", "none"
+]
+"""The mark a line or scatter puts at a point. Closed, and deliberately modest.
+
+Eight shapes plus ``none`` — not the forty a plotting library offers, because past about eight a
+reader is decoding a catalogue rather than reading a chart. ``plus`` and ``cross`` are the two
+with no area to fill: they are drawn as STROKED paths wearing the series class, which is exactly
+why every ``--series-N`` rule in a theme has to set a stroke as well as a fill.
+"""
+
+_STROKED_MARKERS: frozenset[str] = frozenset({"plus", "cross"})
+"""The marks that are line, not area. They take the series' STROKE and no fill at all."""
+
+_OPEN_STROKE = "1.5"
+"""What an unfilled mark is drawn with. Structural: it is what makes the ring read as a ring."""
+
+# A five-pointed star's inner radius, as a fraction of its outer one — the pentagram ratio, which
+# is the only one that puts the inner corners on the lines the outer points already make.
+_STAR_INNER = 0.382
 
 
 class Series(BaseModel):
@@ -178,6 +197,32 @@ class PointSeries(BaseModel):
 
     name: str
     points: list[tuple[float, float]]
+    sizes: list[float] | None = None
+    """A size per point — the bubble channel, one number per mark and never a different count.
+
+    What the numbers MEAN depends on the data model's ``marker_scale``. With one, these are raw
+    quantities: they are mapped across the whole chart's observed range so that a mark's AREA
+    carries the value (the radii go as the square root, which is the only mapping in which twice
+    the number looks like twice the quantity). Without one they are radii, in user units, already
+    decided by the caller.
+    """
+
+    @model_validator(mode="after")
+    def _sizes_match_points(self) -> PointSeries:
+        if self.sizes is None:
+            return self
+        if len(self.sizes) != len(self.points):
+            raise ValueError(
+                f"series {self.name!r} has {len(self.sizes)} sizes but {len(self.points)} "
+                "points — a bubble needs one size per point"
+            )
+        for size in self.sizes:
+            if not math.isfinite(size) or size < 0:
+                raise ValueError(
+                    f"series {self.name!r} carries a size of {size!r}; a mark cannot be smaller "
+                    "than nothing"
+                )
+        return self
 
 
 class Slice(BaseModel):
@@ -225,6 +270,26 @@ class BarData(BaseModel):
     """How the value labels are written. Omit and they follow the axis's own ``tick_format``."""
     order: CategoryOrder = "given"
     """The order the categories are drawn in — see :data:`CategoryOrder`."""
+    waterfall: bool = False
+    """Float each bar from the running total of the ones before it — how a number got from where
+    it started to where it ended. Positives climb, negatives descend, and a dashed connector runs
+    from each bar's end to the next bar's start so the eye can follow the ledger. ONE series only
+    (a waterfall is a single account being walked), and never stacked.
+
+    The running total follows the DRAWN order, so an ``order`` that moves the categories moves the
+    arithmetic with them — which is usually not what a ledger wants."""
+    total_label: str | None = None
+    """Append a final bar running from zero to the net total, captioned with this text. It wears
+    the SECOND series colour, because it is a different kind of statement from the steps that
+    produced it. Ignored unless ``waterfall``."""
+    normalized: bool = False
+    """Scale every category's stack to 100, so the categories compare by SHARE rather than by
+    size. Requires ``stacked``. Each value becomes its share of the category's total magnitude
+    (the sum of the absolute values, so a stack that crosses zero still normalizes to a span of
+    100). It pairs naturally with ``tick_format={"style": "percent"}`` — but the values really are
+    0..100 rather than 0..1, so the format to write them with is ``fixed``/``plain`` plus a ``%``
+    suffix. Nothing is set for you: a chart that silently reformatted its own axis would be
+    deciding what the numbers mean."""
 
     @model_validator(mode="after")
     def _values_match_categories(self) -> BarData:
@@ -234,7 +299,39 @@ class BarData(BaseModel):
                     f"series {entry.name!r} has {len(entry.values)} values but there are "
                     f"{len(self.categories)} categories — a bar chart needs one per category"
                 )
+        if self.waterfall:
+            if len(self.series) != 1:
+                raise ValueError(
+                    f"a waterfall walks ONE running total, but this chart has "
+                    f"{len(self.series)} series; drop the rest or drop `waterfall`"
+                )
+            if self.stacked:
+                raise ValueError(
+                    "a waterfall is already a stack laid end to end; `stacked` on top of it has "
+                    "nothing left to sum"
+                )
+        if self.normalized and not self.stacked:
+            raise ValueError(
+                "`normalized` scales each STACK to 100, so it needs `stacked` to have a stack "
+                "to scale"
+            )
         return self
+
+
+class SeriesBand(BaseModel):
+    """A filled region between two of the chart's own series — a range, not a reading.
+
+    ``between`` names them: a confidence interval's two edges, a min and a max, this year and
+    last. Both names have to belong to series ON THIS CHART, and in v1 the two series must share
+    an identical x sequence — a band between two differently-sampled lines is an interpolation,
+    and an interpolation a caller did not ask for is a lie about what was measured.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    between: tuple[str, str]
+    label: str | None = None
+    """Written inside the band, where it is at its widest. Omit for an unlabelled region."""
 
 
 class LineData(BaseModel):
@@ -249,16 +346,39 @@ class LineData(BaseModel):
     """What ``points`` draws at each datum. ``none`` suppresses the marks however it is set."""
     marker_size: float | None = Field(default=None, gt=0)
     """Half the mark's extent, in px — the radius of a circle. Defaults to 2.5 on a line."""
+    marker_scale: tuple[float, float] | None = None
+    """``(min_r, max_r)`` — what a series' ``sizes`` are mapped ONTO, making the marks a bubble
+    channel. The mapping is by area (radii go as the square root) across the range the whole
+    chart's sizes actually span, so two series' bubbles are comparable. Leave it out and a
+    ``sizes`` list is taken as radii in user units, already decided."""
+    open: bool = False
+    """Draw the marks unfilled: the series' stroke, a hollow middle. The second encoding a chart
+    needs to survive greyscale — shape and fill together tell two series apart where one hue
+    against another does not. ``plus``/``cross`` are stroked whatever this says."""
+    markevery: int | None = Field(default=None, ge=1)
+    """Put a mark on every nth point, counting from the first. What keeps a 400-point series
+    readable: the LINE stays complete, only the marks thin out. None (or 1) marks every point."""
     hatch: bool = False
     """Hatch the area wash instead of washing it flat. Ignored when ``area`` is false."""
-    step: Literal["none", "pre", "post"] = "none"
+    step: Literal["none", "pre", "post", "mid"] = "none"
     """Draw the series as a staircase rather than a slope — what a value that HOLDS between
     readings actually looks like. ``post`` holds the old value and rises at the next x; ``pre``
-    rises first and then holds. The area wash follows the same outline."""
+    rises first and then holds; ``mid`` changes halfway between the two, which is what to draw
+    when the reading is a period's value and neither end of it is the moment it changed. The area
+    wash follows the same outline."""
+    bands: list[SeriesBand] | None = None
+    """Filled regions between named pairs of these series — see :class:`SeriesBand`. Drawn BEHIND
+    every line, in the first named series' colour at a light fill-opacity, so the band reads as
+    that series' range rather than as a third series."""
     value_labels: bool = False
     """Write each point's y value above its mark."""
     value_format: TickFormat | None = None
     """How those labels are written. Omit and they follow the axis's own ``tick_format``."""
+
+    @model_validator(mode="after")
+    def _bands_name_series_that_line_up(self) -> LineData:
+        _validate_bands(self.bands, self.series)
+        return self
 
 
 class ScatterData(BaseModel):
@@ -271,10 +391,39 @@ class ScatterData(BaseModel):
     """The mark each datum is drawn as. ``none`` leaves a scatter with nothing to show."""
     marker_size: float | None = Field(default=None, gt=0)
     """Half the mark's extent, in px. Defaults to 3 on a scatter — a mark is all it has."""
+    marker_scale: tuple[float, float] | None = None
+    """``(min_r, max_r)`` for a series' ``sizes`` — see :attr:`LineData.marker_scale`. This is
+    what turns a scatter into a bubble chart."""
+    open: bool = False
+    """Draw the marks unfilled — see :attr:`LineData.open`. On a crowded scatter it is also what
+    lets overlapping marks stay countable."""
     value_labels: bool = False
     """Write each point's y value above its mark."""
     value_format: TickFormat | None = None
     """How those labels are written. Omit and they follow the axis's own ``tick_format``."""
+
+
+def _validate_bands(bands: Sequence[SeriesBand] | None, series: Sequence[PointSeries]) -> None:
+    """Both ends of every band must be a series here, and the two must be sampled alike. Pure."""
+    if not bands:
+        return
+    by_name = {entry.name: entry for entry in series}
+    for band in bands:
+        for name in band.between:
+            if name not in by_name:
+                have = ", ".join(repr(entry.name) for entry in series)
+                raise ValueError(
+                    f"a band names {name!r}, which is not a series on this chart; it has {have}"
+                )
+        low, high = (by_name[name] for name in band.between)
+        xs_low = [point[0] for point in low.points]
+        xs_high = [point[0] for point in high.points]
+        if xs_low != xs_high:
+            raise ValueError(
+                f"a band between {band.between[0]!r} and {band.between[1]!r} needs the two "
+                "series sampled at the SAME x values; filling between two differently-sampled "
+                "lines would interpolate readings nobody took"
+            )
 
 
 class DonutData(BaseModel):
@@ -300,6 +449,46 @@ class DonutData(BaseModel):
     """The order the slices are drawn in; a list names them by label. See :data:`CategoryOrder`."""
 
 
+class HistogramData(BaseModel):
+    """Raw observations, binned and counted — the one chart here that computes its own y.
+
+    That is a deliberate crossing of the "no statistical transforms" fence, and a narrow one:
+    binning is ARITHMETIC (which half-open interval does this number fall in, how many landed
+    there) with one answer, where a density estimate or a kernel has parameters that change the
+    shape of the picture. Density, cumulative counts and KDE stay out.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    values: list[float] = Field(min_length=1)
+    """The observations themselves — not counts. The chart does the counting."""
+    bins: int | list[float] = 10
+    """A COUNT of equal-width bins across the data's range, or the exact bin EDGES (ascending,
+    at least two — n edges make n-1 bins). A degenerate range (every value the same) becomes one
+    bin the width the axes use for a flat series: ``max(1, |v| × 0.1)``, centred on the value."""
+    hatch: bool = False
+    """Hatch the bars, for the same print/greyscale reason a bar chart hatches."""
+    value_labels: bool = False
+    """Write each bin's count above its bar."""
+    value_format: TickFormat | None = None
+    """How those counts are written. Omit and they follow the axis's own ``tick_format``."""
+
+    @model_validator(mode="after")
+    def _bins_are_a_count_or_an_ascending_ladder(self) -> HistogramData:
+        if isinstance(self.bins, int):
+            if self.bins < 1:
+                raise ValueError(f"a histogram needs at least one bin; {self.bins} is not a count")
+            return self
+        if len(self.bins) < 2:
+            raise ValueError(
+                "explicit bins are the EDGES, so there have to be at least two of them to make "
+                "one bin"
+            )
+        if any(b <= a for a, b in zip(self.bins, self.bins[1:], strict=False)):
+            raise ValueError(f"bin edges have to ascend; {self.bins!r} does not")
+        return self
+
+
 class SparklineData(BaseModel):
     """A bare shape-of-the-trend line: no axes, no ticks, no title, height-normalized."""
 
@@ -314,11 +503,16 @@ class SparklineData(BaseModel):
     """Draw a reference line across the line at this value — a target, a budget, last year."""
 
 
-ChartData = BarData | LineData | ScatterData | DonutData | SparklineData
+ChartData = BarData | LineData | ScatterData | DonutData | HistogramData | SparklineData
 """What a chart is drawn FROM. Which member is valid is decided by the chart's ``kind``."""
 
 ChartDataModel = (
-    type[BarData] | type[LineData] | type[ScatterData] | type[DonutData] | type[SparklineData]
+    type[BarData]
+    | type[LineData]
+    | type[ScatterData]
+    | type[DonutData]
+    | type[HistogramData]
+    | type[SparklineData]
 )
 
 _MODELS: dict[ChartKind, ChartDataModel] = {
@@ -326,6 +520,7 @@ _MODELS: dict[ChartKind, ChartDataModel] = {
     "line": LineData,
     "scatter": ScatterData,
     "donut": DonutData,
+    "histogram": HistogramData,
     "sparkline": SparklineData,
 }
 
@@ -410,12 +605,51 @@ class AxesSpec(BaseModel):
     """How a numeric x axis's labels are written. A bar's category names are never reformatted."""
     gridlines: Gridlines = "y"
     """Which sets of gridlines to draw. ``y`` (horizontal, at the value ticks) is the default."""
+    minor: int | None = Field(default=None, ge=1)
+    """How many minor ticks to put BETWEEN each pair of major ticks — ``4`` cuts every major
+    interval into five. They are positions, not decoration: nothing is drawn for them unless
+    ``tick_marks`` (minor marks, at half the major length) or ``minor_gridlines`` asks for it.
+
+    On a LOG scale the count is ignored and the minor positions are the classic 2..9 mantissa
+    points inside each decade — the only subdivision that is evenly spaced in what the axis
+    actually measures, and the one that makes a log axis readable at a glance."""
+    minor_gridlines: bool = False
+    """Draw gridlines at the minor positions too, fainter than the major ones. Follows the same
+    ``gridlines`` selection: a chart drawing only horizontal gridlines gets only horizontal
+    minor ones."""
     tick_marks: float | None = None
     """Length in px of a tick mark outside the plot rect. ``0``/absent draws no marks at all."""
+    tick_direction: Literal["out", "in", "inout"] = "out"
+    """Which side of the axis the tick marks stand on. ``in`` puts them inside the plot rect,
+    ``inout`` straddles it with ``tick_marks`` px each way. The MARGINS only ever reserve room
+    for the outward part — an inward tick costs the labels nothing, because it is drawn in space
+    the plot already owns."""
     x_tick_rotate: float = 0.0
     """Degrees to turn the BOTTOM axis's tick labels by, about their own anchor. Negative reads
     bottom-left to top-right, which is the usual way to fit long category names — and on
     horizontal bars the bottom axis is the value axis, so that is what turns."""
+    y_tick_rotate: float = 0.0
+    """Degrees to turn the LEFT axis's tick labels by, about their own anchor. The left margin
+    grows to the turned label's real horizontal extent, exactly as the bottom margin does for
+    ``x_tick_rotate`` — so turning long category names on horizontal bars narrows the indent
+    instead of clipping them."""
+    invert_x: bool = False
+    """Run the numeric x axis right-to-left. Ignored where x is categorical (a bar's categories
+    are ordered by ``order``, which says what it means; a flipped scale would not)."""
+    invert_y: bool = False
+    """Run the value axis top-to-bottom — depth below a surface, a golf score, a rank where 1 is
+    best. It lives inside the SCALE, so everything measured through it turns with it: bars still
+    grow from their baseline, and the baseline is now at the top of the plot."""
+    zero_spine: bool = False
+    """Draw the category axis LINE at value 0 rather than along the bottom of the plot, when zero
+    is inside the range. The tick labels and the tick marks STAY at the plot's edge.
+
+    That last half is a deliberate divergence from what matplotlib does with a spine moved to
+    zero, which drags the labels into the middle of the data with it. A reader scans a chart's
+    labels down one fixed edge; moving them to wherever zero happens to fall means re-finding the
+    ruler on every chart, and means the labels collide with the marks they are supposed to
+    measure. Here the SPINE moves — that is the statement, "these bars hang from zero" — and the
+    reading edge does not."""
     reference_lines: list[ReferenceLine] = Field(default_factory=list)
     """Thresholds and bands drawn across the plot. A line sits ABOVE the data (a threshold has to
     read over what it judges) and a band BEHIND it. A line whose value is off the axis is dropped
@@ -527,6 +761,51 @@ def _round_decade(mantissa: float, exponent: int) -> float:
     return round(mantissa * 10.0**exponent, max(0, -exponent + 1))
 
 
+# The mantissas a log decade is subdivided at. Not a count anybody chooses: they are where the
+# numbers between one decade and the next actually are.
+_LOG_MANTISSAS: tuple[float, ...] = (2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0)
+
+
+def minor_ticks(majors: Sequence[float], count: int, *, log: bool = False) -> list[float]:
+    """Where the minor ticks fall between the majors, in data units. Pure, and majors excluded.
+
+    Linear: ``count`` of them in every gap, evenly — ``count=4`` cuts each major interval into
+    five. Log: the count is ignored and the answer is the 2..9 mantissa points of every decade the
+    majors span, which is the only subdivision that is even in what a log axis measures.
+
+    Either way the positions stay INSIDE the majors' own span: minor ticks past the last major
+    would be a subdivision of an interval the axis never drew.
+    """
+    if len(majors) < 2 or count < 1:
+        return []
+    lo, hi = min(majors), max(majors)
+    if log:
+        if lo <= 0:
+            return []
+        found = [
+            _round_decade(mantissa, exponent)
+            for exponent in range(
+                math.floor(math.log10(lo) + 1e-9), math.floor(math.log10(hi) + 1e-9) + 1
+            )
+            for mantissa in _LOG_MANTISSAS
+        ]
+    else:
+        ordered = sorted(majors)
+        found = [
+            low + (high - low) * (index + 1) / (count + 1)
+            for low, high in zip(ordered, ordered[1:], strict=False)
+            for index in range(count)
+        ]
+    tolerance = max(abs(lo), abs(hi), 1.0) * 1e-9
+    kept = [
+        value
+        for value in found
+        if lo - tolerance <= value <= hi + tolerance
+        and not any(abs(value - major) <= tolerance for major in majors)
+    ]
+    return sorted(kept)
+
+
 # --- tick labels -------------------------------------------------------------
 
 _SI_STEPS: tuple[tuple[float, str], ...] = (
@@ -613,14 +892,22 @@ class Scale:
 
     Deliberately unclamped: :meth:`unit` will happily answer 1.4 for a datum above a pinned top,
     because the plot's job is to CLIP that mark to the rect, not to quietly move it inside.
+
+    ``invert`` is here rather than in the drawing for the same reason: turning the axis round is
+    one flip in ONE function, and every bar, wash, reference line and clip that ever asked this
+    scale where a number goes turns with it, with nothing to remember and nothing to miss.
     """
 
     lo: float
     hi: float
     log: bool = False
+    invert: bool = False
 
     def unit(self, value: float) -> float:
-        """``value`` as a fraction of the span — 0 at ``lo``, 1 at ``hi``, outside for outside."""
+        """``value`` as a fraction of the span — 0 at ``lo``, 1 at ``hi``, outside for outside.
+
+        Inverted, it is the same fraction counted from the other end: 1 at ``lo``, 0 at ``hi``.
+        """
         if self.log:
             low = math.log10(max(self.lo, _TINY))
             high = math.log10(max(self.hi, _TINY))
@@ -628,7 +915,8 @@ class Scale:
         else:
             low, high, at = self.lo, self.hi, value
         span = high - low
-        return 0.0 if abs(span) <= _EPS else (at - low) / span
+        fraction = 0.0 if abs(span) <= _EPS else (at - low) / span
+        return 1.0 - fraction if self.invert else fraction
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,6 +964,7 @@ def resolve_axis(
     log: bool = False,
     ticks: int | Sequence[float] | None = None,
     fmt: TickFormat | None = None,
+    invert: bool = False,
     axis: str = "y",
 ) -> Axis:
     """Turn data plus a caller's wishes into a span, a tick list and the labels for it. Pure.
@@ -713,7 +1002,7 @@ def resolve_axis(
     kept = [tick for tick in chosen if lo - tolerance <= tick <= hi + tolerance]
     labels = _tick_labels(kept, fmt=fmt, exact=explicit is None and not log)
     return Axis(
-        scale=Scale(lo=lo, hi=hi, log=log),
+        scale=Scale(lo=lo, hi=hi, log=log, invert=invert),
         ticks=tuple(kept),
         labels=tuple(labels),
         pinned=lo_pin is not None or hi_pin is not None,
@@ -869,6 +1158,85 @@ def stack_segments(values: Sequence[float]) -> list[Segment]:
     return segments
 
 
+def waterfall_segments(values: Sequence[float], total: bool = False) -> list[Segment]:
+    """Where each bar of a waterfall floats, in data units. Pure.
+
+    Each bar starts at the running total of everything before it and ends at the running total
+    including itself, so a positive climbs and a negative descends from wherever the previous one
+    left off. With ``total``, one more segment is appended running from zero to the net total —
+    the whole walk restated as a single bar from the ground.
+    """
+    segments: list[Segment] = []
+    running = 0.0
+    for value in values:
+        segments.append(Segment(min(running, running + value), max(running, running + value)))
+        running += value
+    if total:
+        segments.append(Segment(min(0.0, running), max(0.0, running)))
+    return segments
+
+
+def normalize_stacks(values: Sequence[Sequence[float]]) -> list[list[float]]:
+    """``[series][category]`` rescaled so every category's stack spans 100. Pure.
+
+    The denominator is the sum of the ABSOLUTE values, which is the only choice that leaves a
+    stack crossing zero occupying 100 of axis rather than blowing up as its parts cancel. A
+    category of all zeros has no total to take shares of and is left alone.
+    """
+    if not values:
+        return []
+    count = len(values[0])
+    scales = [
+        (100.0 / total if (total := sum(abs(row[index]) for row in values)) > 0 else 0.0)
+        for index in range(count)
+    ]
+    return [[value * scales[index] for index, value in enumerate(row)] for row in values]
+
+
+def histogram_edges(values: Sequence[float], bins: int | Sequence[float]) -> list[float]:
+    """The bin boundaries a histogram counts into. Pure, and ascending by construction.
+
+    A COUNT spreads equal-width bins across the data's own range. A range of nothing — every
+    value the same — is padded the way a flat axis is padded (``max(1, |v| × 0.1)``) into ONE bin
+    centred on the value, because a bin of zero width counts nothing however many of them there
+    are. An explicit list is taken as the edges themselves, verbatim.
+    """
+    if not isinstance(bins, int):
+        return [float(edge) for edge in bins]
+    lo, hi = min(values), max(values)
+    if hi - lo <= _EPS:
+        width = max(1.0, abs(lo) * 0.1)
+        return [lo - width / 2.0, lo + width / 2.0]
+    step = (hi - lo) / bins
+    return [lo + step * index for index in range(bins + 1)]
+
+
+def histogram_counts(values: Sequence[float], edges: Sequence[float]) -> list[int]:
+    """How many observations land in each bin. Pure.
+
+    Every bin is half-open ``[lo, hi)`` — a value sitting exactly on an edge belongs to the bin
+    ABOVE it — except the last, which closes at the top so the largest observation is counted
+    rather than falling off the end. Anything outside the edges is not counted at all, which only
+    happens when the caller named the edges: a derived ladder always covers its own data.
+    """
+    counts = [0] * (len(edges) - 1)
+    for value in values:
+        index = bisect_right(edges, value) - 1
+        if index == len(counts) and value == edges[-1]:
+            index -= 1  # the top edge closes the last bin rather than opening one past it
+        if 0 <= index < len(counts):
+            counts[index] += 1
+    return counts
+
+
+def widest_gap(low: Sequence[Point], high: Sequence[Point]) -> int:
+    """Which pair of points a band is widest between — where its label has room. Pure."""
+    if not low:
+        return 0
+    gaps = [abs(a[1] - b[1]) for a, b in zip(low, high, strict=True)]
+    return gaps.index(max(gaps))
+
+
 def stack_extents(values: Sequence[float]) -> tuple[float, float]:
     """How far down and how far up one stacked category reaches — what its axis must cover."""
     segments = stack_segments(values)
@@ -878,17 +1246,23 @@ def stack_extents(values: Sequence[float]) -> tuple[float, float]:
     )
 
 
-def step_points(points: Sequence[Point], mode: Literal["pre", "post"]) -> list[Point]:
+def step_points(points: Sequence[Point], mode: Literal["pre", "post", "mid"]) -> list[Point]:
     """A staircase through ``points``. Pure, and agnostic about the units it is handed.
 
     ``post`` HOLDS each value along to the next x and rises there — the shape of a reading that
-    stays put until it is next taken. ``pre`` rises at the current x and then holds.
+    stays put until it is next taken. ``pre`` rises at the current x and then holds. ``mid``
+    changes halfway between the two readings, which is what to draw when the number describes a
+    PERIOD and neither of its ends is the moment anything happened.
     """
     if len(points) < 2:
         return list(points)
     stepped: list[Point] = [points[0]]
     for (x0, y0), (x1, y1) in zip(points, points[1:], strict=False):
-        stepped.append((x1, y0) if mode == "post" else (x0, y1))
+        if mode == "mid":
+            middle = (x0 + x1) / 2.0
+            stepped.extend(((middle, y0), (middle, y1)))
+        else:
+            stepped.append((x1, y0) if mode == "post" else (x0, y1))
         stepped.append((x1, y1))
     return stepped
 
@@ -984,6 +1358,24 @@ def rotated_extent(width: float, height: float, degrees: float) -> float:
     return abs(width * math.sin(radians)) + abs(height * math.cos(radians))
 
 
+def rotated_width(width: float, height: float, degrees: float) -> float:
+    """The same for the HORIZONTAL room — what a turned y tick label costs the left margin."""
+    radians = math.radians(degrees)
+    return abs(width * math.cos(radians)) + abs(height * math.sin(radians))
+
+
+def tick_reach(length: float, direction: Literal["out", "in", "inout"]) -> tuple[float, float]:
+    """How far a tick mark of this length stands (outward, inward) from its axis. Pure.
+
+    Only the OUTWARD half is ever charged to the margins: an inward tick is drawn across the plot
+    rect, which is space the chart already owns.
+    """
+    reach = max(0.0, length)
+    if direction == "in":
+        return (0.0, reach)
+    return (reach, reach if direction == "inout" else 0.0)
+
+
 def plot_margins(
     y_tick_labels: Sequence[str],
     *,
@@ -995,16 +1387,23 @@ def plot_margins(
     tick_marks: float = 0.0,
     x_tick_labels: Sequence[str] = (),
     x_tick_rotate: float = 0.0,
+    y_tick_rotate: float = 0.0,
 ) -> Margins:
     """How much room the labels need — MEASURED, so a six-digit axis is not clipped or crowded.
 
     The left margin is the widest y tick label plus a gap, which is why a chart of thousands
     indents further than a chart of tens. Axis titles add their own line on the side they sit,
-    tick marks push the labels out by their own length, and turned x labels claim the height
-    their turned bounding box actually occupies rather than one line's worth.
+    tick marks push the labels out by their own length (the OUTWARD length — see
+    :func:`tick_reach`), and a turned label on either axis claims the room its turned bounding box
+    actually occupies rather than one line's worth.
     """
     widest = max(
-        (measure_label(text, font, sizes.tick)[0] for text in y_tick_labels),
+        (
+            rotated_width(*measure_label(text, font, sizes.tick), y_tick_rotate)
+            if y_tick_rotate
+            else measure_label(text, font, sizes.tick)[0]
+            for text in y_tick_labels
+        ),
         default=0.0,
     )
     tick_height = measure_label("0", font, sizes.tick)[1]
@@ -1276,41 +1675,67 @@ def _draw_frame(
     font: str,
     axes: AxesSpec,
     sizes: Sizes,
+    y_minor: Sequence[float] = (),
+    x_minor: Sequence[float] = (),
+    bottom_at: float | None = None,
+    left_at: float | None = None,
 ) -> None:
     """The scenery: gridlines, the two axes, the tick marks, the tick labels, the axis titles.
 
     Both tick lists arrive as POSITIONS in the chart's own frame, already mapped, paired with the
     text to write there. That is what lets horizontal bars swap the two over — the value ticks go
     along the bottom and the category names down the side — without a second copy of this routine.
-    ``axes.gridlines`` is read in the same screen terms: ``y`` is the set of horizontal lines.
+    ``axes.gridlines`` is read in the same screen terms: ``y`` is the set of horizontal lines, and
+    the minor positions (also already mapped) follow whichever sets it names.
 
-    Gridlines are drawn FIRST so the data is never hidden behind them, and the axes after, so
-    the baseline reads as a line rather than as the last gridline. Tick marks sit OUTSIDE the
-    rect, which is why they are the one part of the frame the margins had to make room for.
+    Gridlines are drawn FIRST so the data is never hidden behind them — minor before major, so a
+    major reads over its own subdivisions — and the axes after, so the baseline reads as a line
+    rather than as the last gridline. Tick marks sit outside the rect unless
+    ``axes.tick_direction`` says otherwise, which is why the margins make room for their outward
+    half alone.
+
+    ``bottom_at``/``left_at`` move an axis LINE off the edge of the plot (the zero spine); the
+    ticks and their labels stay where they were, which is the whole of that feature's argument.
     """
     frame = _group(doc, parent)
     frame_id = str(frame.get_id())
     grid = _hooks(doc, theme, "gridline")
-    if axes.gridlines in ("y", "both"):
+    minor_grid = [*grid, *_hooks(doc, theme, "gridline-minor")]
+    across = axes.gridlines in ("y", "both")
+    down = axes.gridlines in ("x", "both")
+    if axes.minor_gridlines:
+        for at in y_minor if across else ():
+            _line(doc, frame_id, (plot.x, at), (plot.x + plot.w, at), minor_grid)
+        for at in x_minor if down else ():
+            _line(doc, frame_id, (at, plot.y), (at, plot.y + plot.h), minor_grid)
+    if across:
         for at, _ in y_ticks:
             _line(doc, frame_id, (plot.x, at), (plot.x + plot.w, at), grid)
-    if axes.gridlines in ("x", "both"):
+    if down:
         for at, _ in x_ticks:
             _line(doc, frame_id, (at, plot.y), (at, plot.y + plot.h), grid)
     axis = _hooks(doc, theme, "axis")
-    _line(doc, frame_id, (plot.x, plot.y), (plot.x, plot.y + plot.h), axis)
-    _line(
-        doc, frame_id, (plot.x, plot.y + plot.h), (plot.x + plot.w, plot.y + plot.h), axis
-    )
+    spine_x = plot.x if left_at is None else left_at
+    spine_y = (plot.y + plot.h) if bottom_at is None else bottom_at
+    _line(doc, frame_id, (spine_x, plot.y), (spine_x, plot.y + plot.h), axis)
+    _line(doc, frame_id, (plot.x, spine_y), (plot.x + plot.w, spine_y), axis)
 
-    marks = max(0.0, axes.tick_marks or 0.0)
+    out, into = tick_reach(axes.tick_marks or 0.0, axes.tick_direction)
+    marks = max(out, into)
     if marks > 0:
         mark_class = _hooks(doc, theme, "tick")
+        minor_class = [*mark_class, *_hooks(doc, theme, "tick-minor")]
         base = plot.y + plot.h
         for at, _ in y_ticks:
-            _line(doc, frame_id, (plot.x - marks, at), (plot.x, at), mark_class)
+            _line(doc, frame_id, (plot.x - out, at), (plot.x + into, at), mark_class)
         for at, _ in x_ticks:
-            _line(doc, frame_id, (at, base), (at, base + marks), mark_class)
+            _line(doc, frame_id, (at, base - into), (at, base + out), mark_class)
+        # Half length, so the ruler's two orders of subdivision are told apart by size before
+        # anyone reads a number off either.
+        for at in y_minor:
+            _line(doc, frame_id, (plot.x - out / 2.0, at), (plot.x + into / 2.0, at), minor_class)
+        for at in x_minor:
+            _line(doc, frame_id, (at, base - into / 2.0), (at, base + out / 2.0), minor_class)
 
     tick_class = _hooks(doc, theme, "tick-label")
     for at, text in y_ticks:
@@ -1318,14 +1743,15 @@ def _draw_frame(
             doc,
             frame_id,
             text,
-            (plot.x - 4.0 - marks, at),
+            (plot.x - 4.0 - out, at),
             anchor="end",
             baseline="central",
             classes=tick_class,
+            rotate=axes.y_tick_rotate or None,
         )
     tick_height = measure_label("0", font, sizes.tick)[1]
     anchor, baseline = _rotated_anchor(axes.x_tick_rotate)
-    drop = marks + (tick_height * 0.85 if not axes.x_tick_rotate else tick_height * 0.5)
+    drop = out + (tick_height * 0.85 if not axes.x_tick_rotate else tick_height * 0.5)
     for at, text in x_ticks:
         _text(
             doc,
@@ -1383,7 +1809,8 @@ def _draw_title(
 
 
 def marker_points(shape: Marker, cx: float, cy: float, size: float) -> list[Point]:
-    """The corners of a polygonal mark, from the top clockwise. Round and absent marks have none.
+    """The corners of a polygonal mark, from the top clockwise. Round, stroked and absent marks
+    have none: a circle has no corners, and ``plus``/``cross`` are :func:`marker_strokes`.
 
     ``size`` is the half-extent — the radius of the circle the mark would replace — so swapping a
     shape never changes how much ink a point carries.
@@ -1397,18 +1824,107 @@ def marker_points(shape: Marker, cx: float, cy: float, size: float) -> list[Poin
         ]
     if shape == "diamond":
         return [(cx, cy - size), (cx + size, cy), (cx, cy + size), (cx - size, cy)]
-    if shape == "triangle":
+    if shape in ("triangle", "tri_down"):
+        turn = math.pi / 2.0 if shape == "tri_down" else -math.pi / 2.0
         return [
-            (cx + size * math.cos(angle), cy + size * math.sin(angle))
-            for angle in (-math.pi / 2.0, math.pi / 6.0, 5.0 * math.pi / 6.0)
+            (cx + size * math.cos(turn + step), cy + size * math.sin(turn + step))
+            for step in (0.0, math.tau / 3.0, 2.0 * math.tau / 3.0)
+        ]
+    if shape == "star":
+        # Ten corners, alternating out and in on the pentagram ratio: the inner ones have to sit
+        # where the outer points' own edges already cross, or the star reads as a lumpy flower.
+        corners: list[Point] = []
+        for index in range(10):
+            angle = -math.pi / 2.0 + index * math.tau / 10.0
+            radius = size if index % 2 == 0 else size * _STAR_INNER
+            corners.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+        return corners
+    return []
+
+
+def marker_strokes(shape: Marker, cx: float, cy: float, size: float) -> list[tuple[Point, Point]]:
+    """The two strokes of a mark that is LINE rather than area, or nothing for the rest. Pure.
+
+    ``plus`` and ``cross`` have no inside to fill, which is the point of them: on a chart printed
+    in one colour they are the two marks that stay legible on top of another series. ``cross``
+    reaches the same distance as the others — its arms are the diagonals of the square inscribed
+    in the circle of radius ``size``, not that square's sides.
+    """
+    if shape == "plus":
+        return [((cx, cy - size), (cx, cy + size)), ((cx - size, cy), (cx + size, cy))]
+    if shape == "cross":
+        arm = size * math.sqrt(0.5)
+        return [
+            ((cx - arm, cy - arm), (cx + arm, cy + arm)),
+            ((cx - arm, cy + arm), (cx + arm, cy - arm)),
         ]
     return []
 
 
-def _draw_mark(doc: Document, parent: str, shape: Marker, at: Point, size: float) -> None:
-    """One data point's mark. It carries no class: the series group above it paints it."""
+def marker_radii(
+    sizes: Sequence[float], scale: tuple[float, float] | None, observed: tuple[float, float]
+) -> list[float]:
+    """One radius per datum, from the caller's numbers. Pure — the bubble channel's whole rule.
+
+    Without a ``scale`` the numbers ARE radii and come back untouched. With one they are
+    quantities, and what has to carry the quantity is the mark's AREA: a bubble twice the radius
+    is four times the ink, so a linear radius mapping would quadruple what the reader sees for a
+    doubled number. Interpolating the SQUARE of the radius across ``observed`` — which is the
+    range the whole chart's sizes span, not one series' — is what makes two bubbles' areas stand
+    in the same ratio as the two numbers' distances up that range.
+
+    Every value the same leaves no range to map across; those all come out at ``max_r``, because a
+    size that carries no information should at least be visible.
+    """
+    if scale is None:
+        return [float(size) for size in sizes]
+    min_r, max_r = scale
+    low, high = observed
+    span = high - low
+    return [
+        math.sqrt(
+            min_r**2
+            + (1.0 if abs(span) <= _EPS else (size - low) / span) * (max_r**2 - min_r**2)
+        )
+        for size in sizes
+    ]
+
+
+def _draw_mark(
+    doc: Document,
+    parent: str,
+    shape: Marker,
+    at: Point,
+    size: float,
+    *,
+    unfilled: bool = False,
+    classes: Sequence[str] = (),
+) -> None:
+    """One data point's mark.
+
+    A FILLED mark carries no class: the series group above it paints it, and it takes a structural
+    ``stroke: none`` so the fill is the whole of the number. A mark that is drawn by its stroke
+    instead — ``plus``/``cross``, which have no area, or any shape asked to draw ``open`` — inverts
+    that, and wears the series class itself, because reading the markup should show at a glance
+    which half of the series' paint is doing the work.
+    """
     cx, cy = at
     if shape == "none":
+        return
+    strokes = marker_strokes(shape, cx, cy, size)
+    if strokes:
+        steps = " ".join(
+            f"M {_num(a[0])} {_num(a[1])} L {_num(b[0])} {_num(b[1])}" for a, b in strokes
+        )
+        _part(
+            doc,
+            inkex.PathElement.new(steps),
+            prefix="path",
+            category="shape",
+            parent=parent,
+            style={"fill": "none"},
+            classes=classes,
+        )
         return
     if shape == "circle":
         element: BaseElement = inkex.Circle.new((cx, cy), size)
@@ -1427,8 +1943,12 @@ def _draw_mark(doc: Document, parent: str, shape: Marker, at: Point, size: float
         prefix=prefix,
         category="shape",
         parent=parent,
-        style={"stroke": "none"},  # a mark is a fill (see the bars)
-        classes=(),
+        style=(
+            {"fill": "none", "stroke-width": _OPEN_STROKE}
+            if unfilled
+            else {"stroke": "none"}  # a mark is a fill (see the bars)
+        ),
+        classes=classes if unfilled else (),
     )
 
 
@@ -1530,18 +2050,32 @@ class BarLayout:
     values: tuple[tuple[float, ...], ...]
     """``[series][category]``, in drawing order."""
     segments: tuple[tuple[Segment, ...], ...]
-    """``[category][series]`` — where each series sits in that category's stack."""
+    """``[category][series]`` — where each series sits in that category's stack, or where that
+    category's single bar floats when this is a waterfall."""
     bands: tuple[tuple[Band, ...], ...]
     y_ticks: tuple[tuple[float, str], ...]
     x_ticks: tuple[tuple[float, str], ...]
+    waterfall: bool = False
+    """Each bar floats from the running total rather than growing from the origin."""
+    y_minor: tuple[float, ...] = ()
+    x_minor: tuple[float, ...] = ()
+    bottom_at: float | None = None
+    """Where the bottom axis LINE goes, if not along the bottom of the plot (the zero spine)."""
+    left_at: float | None = None
+    """The same for the left axis line — which is the one that moves on horizontal bars."""
+
+    @property
+    def floating(self) -> bool:
+        """Whether a bar's two ends come from its segment rather than from the origin."""
+        return self.stacked or self.waterfall
 
     def band(self, category: int, series: int) -> Band:
         """The slot one bar occupies. A stack's series all share the category's single band."""
-        return self.bands[category][0 if self.stacked else series]
+        return self.bands[category][0 if self.floating else series]
 
     def span(self, category: int, series: int) -> tuple[float, float]:
-        """The two VALUES one bar runs between — its segment's ends when it is in a stack."""
-        if self.stacked:
+        """The two VALUES one bar runs between — its segment's ends when it floats."""
+        if self.floating:
             piece = self.segments[category][series]
             return (piece.lo, piece.hi)
         value = self.values[series][category]
@@ -1618,13 +2152,31 @@ def _bar_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> BarLayout:
     order = order_indices(data.categories, keys, data.order)
     categories = [data.categories[index] for index in order]
     values = [[row[index] for index in order] for row in rows]
-    columns = [[row[index] for row in values] for index in range(count)]
-    segments = [stack_segments(column) for column in columns]
+    if data.normalized:
+        values = normalize_stacks(values)
+    segments: list[tuple[Segment, ...]]
+    if data.waterfall:
+        segments = [
+            (piece,)
+            for piece in waterfall_segments(values[0], total=data.total_label is not None)
+        ]
+        if data.total_label is not None:
+            # The net total is one more bar, and one more addressable datum: giving it the index
+            # it would have had as a category is what lets a callout point at "the total" at all.
+            categories = [*categories, data.total_label]
+            values = [[*values[0], sum(values[0])]]
+            order = [*order, count]
+    else:
+        segments = [
+            tuple(stack_segments([row[index] for row in values]))
+            for index in range(len(categories))
+        ]
     # A stack's AXIS is scaled to the totals, not to the parts: the tallest thing on the page is
-    # the tallest stack, and an axis measured from the parts would let it out of the plot.
+    # the tallest stack, and an axis measured from the parts would let it out of the plot. A
+    # waterfall's bars float, so its axis is scaled to where they float BETWEEN.
     flat = (
-        [value for column in columns for value in stack_extents(column)]
-        if data.stacked
+        [value for column in segments for piece in column for value in (piece.lo, piece.hi)]
+        if data.stacked or data.waterfall
         else [value for row in values for value in row]
     )
     y_axis = resolve_axis(
@@ -1635,6 +2187,7 @@ def _bar_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> BarLayout:
         log=log,
         ticks=axes.ticks,
         fmt=axes.tick_format,
+        invert=axes.invert_y,
     )
     horizontal = data.orientation == "horizontal"
     # Horizontal bars put the CATEGORY names down the side, so they are what the left margin is
@@ -1648,26 +2201,29 @@ def _bar_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> BarLayout:
         x_label=bool(spec.x_label),
         y_label=bool(spec.y_label),
         sizes=sizes,
-        tick_marks=max(0.0, axes.tick_marks or 0.0),
+        tick_marks=tick_reach(axes.tick_marks or 0.0, axes.tick_direction)[0],
         x_tick_labels=foot_labels,
         x_tick_rotate=axes.x_tick_rotate,
+        y_tick_rotate=axes.y_tick_rotate,
     )
     plot = _plot_rect(spec.w, spec.h, margins)
     bands = bar_bands(
-        plot.h if horizontal else plot.w, count, 1 if data.stacked else len(values)
+        plot.h if horizontal else plot.w,
+        len(categories),
+        1 if data.stacked or data.waterfall else len(values),
     )
-    value_ticks = [
-        (
-            plot.map_x(tick, y_axis.scale) if horizontal else plot.map_y(tick, y_axis.scale),
-            text,
-        )
-        for tick, text in y_axis.pairs()
-    ]
+
+    def _map(value: float) -> float:
+        return plot.map_x(value, y_axis.scale) if horizontal else plot.map_y(value, y_axis.scale)
+
+    value_ticks = [(_map(tick), text) for tick, text in y_axis.pairs()]
+    value_minor = [_map(tick) for tick in _minor_of(axes, y_axis)]
     along = plot.y if horizontal else plot.x
     category_ticks = [
         (along + (row[0].x + row[-1].x + row[-1].w) / 2.0, name)
         for row, name in zip(bands, categories, strict=True)
     ]
+    spine = _map(0.0) if _spine_at_zero(axes, y_axis) else None
     return BarLayout(
         plot=plot,
         axis=y_axis,
@@ -1678,16 +2234,23 @@ def _bar_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> BarLayout:
         ),
         horizontal=horizontal,
         stacked=data.stacked,
+        waterfall=data.waterfall,
         # A bar measures from zero, because that is what makes its LENGTH the number. On a log
         # axis there is no zero to measure from, so it measures from the bottom of the axis.
         origin=y_axis.scale.lo if log else 0.0,
         categories=tuple(categories),
         order=tuple(order),
         values=tuple(tuple(row) for row in values),
-        segments=tuple(tuple(row) for row in segments),
+        segments=tuple(segments),
         bands=tuple(tuple(row) for row in bands),
         y_ticks=tuple(category_ticks if horizontal else value_ticks),
         x_ticks=tuple(value_ticks if horizontal else category_ticks),
+        y_minor=() if horizontal else tuple(value_minor),
+        x_minor=tuple(value_minor) if horizontal else (),
+        # The value axis runs along x when the bars are turned, so the spine that stands at zero
+        # is the LEFT one there and the bottom one otherwise.
+        bottom_at=None if horizontal else spine,
+        left_at=spine if horizontal else None,
     )
 
 
@@ -1702,6 +2265,23 @@ class PointLayout:
     """``[series][point]`` — the marks' screen positions, before any stepping."""
     y_ticks: tuple[tuple[float, str], ...]
     x_ticks: tuple[tuple[float, str], ...]
+    radii: tuple[tuple[float, ...], ...] = ()
+    """``[series][point]`` — each mark's radius, once the bubble channel has had its say."""
+    y_minor: tuple[float, ...] = ()
+    x_minor: tuple[float, ...] = ()
+    bottom_at: float | None = None
+
+    def radius(self, series: int, index: int) -> float:
+        """One mark's radius, or 0 where this chart draws no marks at all."""
+        if series >= len(self.radii) or index >= len(self.radii[series]):
+            return 0.0
+        return self.radii[series][index]
+
+
+def _sizes_span(series: Sequence[PointSeries]) -> tuple[float, float]:
+    """The range the whole chart's ``sizes`` cover — one range, so two series' bubbles compare."""
+    found = [size for entry in series if entry.sizes for size in entry.sizes]
+    return (min(found), max(found)) if found else (0.0, 1.0)
 
 
 def _points_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> PointLayout:
@@ -1721,6 +2301,7 @@ def _points_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> PointLayout:
         log=log,
         ticks=axes.ticks,
         fmt=axes.tick_format,
+        invert=axes.invert_y,
     )
     x_axis = resolve_axis(
         [x_lo, x_hi],
@@ -1728,6 +2309,7 @@ def _points_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> PointLayout:
         hi_pin=axes.x_max,
         ticks=axes.x_ticks,
         fmt=axes.x_tick_format,
+        invert=axes.invert_x,
         axis="x",
     )
     margins = plot_margins(
@@ -1737,11 +2319,14 @@ def _points_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> PointLayout:
         x_label=bool(spec.x_label),
         y_label=bool(spec.y_label),
         sizes=sizes,
-        tick_marks=max(0.0, axes.tick_marks or 0.0),
+        tick_marks=tick_reach(axes.tick_marks or 0.0, axes.tick_direction)[0],
         x_tick_labels=x_axis.labels,
         x_tick_rotate=axes.x_tick_rotate,
+        y_tick_rotate=axes.y_tick_rotate,
     )
     plot = _plot_rect(spec.w, spec.h, margins)
+    flat = data.marker_size or (_SCATTER_R if isinstance(data, ScatterData) else _MARKER_R)
+    observed = _sizes_span(data.series)
     return PointLayout(
         plot=plot,
         x_axis=x_axis,
@@ -1753,8 +2338,116 @@ def _points_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> PointLayout:
             )
             for entry in data.series
         ),
+        radii=tuple(
+            tuple(
+                marker_radii(entry.sizes, data.marker_scale, observed)
+                if entry.sizes is not None
+                else [flat] * len(entry.points)
+            )
+            for entry in data.series
+        ),
         y_ticks=tuple((plot.map_y(tick, y_axis.scale), text) for tick, text in y_axis.pairs()),
         x_ticks=tuple((plot.map_x(tick, x_axis.scale), text) for tick, text in x_axis.pairs()),
+        y_minor=tuple(plot.map_y(tick, y_axis.scale) for tick in _minor_of(axes, y_axis)),
+        x_minor=tuple(plot.map_x(tick, x_axis.scale) for tick in _minor_of(axes, x_axis)),
+        bottom_at=plot.map_y(0.0, y_axis.scale) if _spine_at_zero(axes, y_axis) else None,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class HistogramLayout:
+    """A histogram's arithmetic: the bins it counted into, and where each bar landed."""
+
+    plot: Plot
+    x_axis: Axis
+    y_axis: Axis
+    edges: tuple[float, ...]
+    counts: tuple[int, ...]
+    y_ticks: tuple[tuple[float, str], ...]
+    x_ticks: tuple[tuple[float, str], ...]
+    y_minor: tuple[float, ...] = ()
+    x_minor: tuple[float, ...] = ()
+    bottom_at: float | None = None
+
+    def rect(self, index: int) -> tuple[float, float, float, float]:
+        """One bin's bar as ``(x, y, w, h)``. Its width is the BIN's, which is why the bars touch:
+        a histogram's x is continuous, and a gap between two bars would be a range nothing fell in.
+        """
+        left, right = sorted(
+            (
+                self.plot.map_x(self.edges[index], self.x_axis.scale),
+                self.plot.map_x(self.edges[index + 1], self.x_axis.scale),
+            )
+        )
+        near, far = sorted(
+            (
+                self.plot.map_y(0.0, self.y_axis.scale),
+                self.plot.map_y(self.counts[index], self.y_axis.scale),
+            )
+        )
+        return (left, near, right - left, far - near)
+
+    def datum_point(self, index: int) -> Point:
+        """Where a leader lands on one bin: the middle of the end its bar grows to."""
+        x, y, w, h = self.rect(index)
+        base = self.plot.map_y(0.0, self.y_axis.scale)
+        return (x + w / 2.0, y if abs(y + h - base) < abs(y - base) else y + h)
+
+
+def _histogram_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> HistogramLayout:
+    """Bin the observations, then resolve the two axes and the plot rect around the counts."""
+    data = spec.data
+    if not isinstance(data, HistogramData):
+        raise InvalidArgument("a histogram needs a list of observations")
+    axes = spec.axes or _DEFAULT_AXES
+    log = axes.scale == "log"
+    edges = histogram_edges(data.values, data.bins)
+    counts = histogram_counts(data.values, edges)
+    y_axis = resolve_axis(
+        [float(count) for count in counts],
+        lo_pin=axes.y_min,
+        hi_pin=axes.y_max,
+        zero=not log,
+        log=log,
+        ticks=axes.ticks,
+        fmt=axes.tick_format,
+        invert=axes.invert_y,
+    )
+    # The x axis is the MEASUREMENT, not the bins: its ticks are round numbers off the usual
+    # ladder, which is what lets a reader say where a bar sits rather than only how tall it is.
+    x_axis = resolve_axis(
+        [edges[0], edges[-1]],
+        lo_pin=axes.x_min,
+        hi_pin=axes.x_max,
+        ticks=axes.x_ticks,
+        fmt=axes.x_tick_format,
+        invert=axes.invert_x,
+        axis="x",
+    )
+    margins = plot_margins(
+        y_axis.labels,
+        font=font,
+        title=bool(spec.title),
+        x_label=bool(spec.x_label),
+        y_label=bool(spec.y_label),
+        sizes=sizes,
+        tick_marks=tick_reach(axes.tick_marks or 0.0, axes.tick_direction)[0],
+        x_tick_labels=x_axis.labels,
+        x_tick_rotate=axes.x_tick_rotate,
+        y_tick_rotate=axes.y_tick_rotate,
+    )
+    plot = _plot_rect(spec.w, spec.h, margins)
+    return HistogramLayout(
+        plot=plot,
+        x_axis=x_axis,
+        y_axis=y_axis,
+        edges=tuple(edges),
+        counts=tuple(counts),
+        y_ticks=tuple((plot.map_y(tick, y_axis.scale), text) for tick, text in y_axis.pairs()),
+        x_ticks=tuple((plot.map_x(tick, x_axis.scale), text) for tick, text in x_axis.pairs()),
+        y_minor=tuple(plot.map_y(tick, y_axis.scale) for tick in _minor_of(axes, y_axis)),
+        x_minor=tuple(plot.map_x(tick, x_axis.scale) for tick in _minor_of(axes, x_axis)),
+        bottom_at=plot.map_y(0.0, y_axis.scale) if _spine_at_zero(axes, y_axis) else None,
     )
 
 
@@ -1931,6 +2624,10 @@ def _draw_bar(
         font=font,
         axes=layout.frame_axes,
         sizes=sizes,
+        y_minor=layout.y_minor,
+        x_minor=layout.x_minor,
+        bottom_at=layout.bottom_at,
+        left_at=layout.left_at,
     )
     _draw_references(
         doc,
@@ -1947,28 +2644,45 @@ def _draw_bar(
     )
 
     clip = _clip_to_plot(doc, group, plot) if y_axis.pinned else None
-    for index in range(len(data.series)):
-        series = _group(doc, group)
-        series_id = str(series.get_id())
-        classes = _series_class(doc, theme, index)
-        for class_name in classes:
-            series.set("class", class_name)
-        if clip is not None:
-            series.set("clip-path", f"url(#{clip})")
+    # The net-total bar is the last "category" and is NOT one of the steps: it wears the second
+    # series colour, because "where this ended up" is a different statement from "what moved it".
+    total_slot = len(layout.categories) - 1 if layout.waterfall and data.total_label else None
+
+    def _bars(
+        parent: str, *, geom: int, paint: int, only: int | None = None, skip: int | None = None
+    ) -> None:
+        classes = _series_class(doc, theme, paint)
         fill = _fill_of(_hatch(doc, group, classes) if data.hatch else None)
         for category in range(len(layout.categories)):
-            x, y, w, h = layout.rect(category, index)
+            if category == skip or (only is not None and category != only):
+                continue
+            x, y, w, h = layout.rect(category, geom)
             _part(
                 doc,
                 inkex.Rectangle.new(x, y, w, h),
                 prefix="rect",
                 category="shape",
-                parent=series_id,
+                parent=parent,
                 # A mark that is a FILL takes no stroke: the series class sets both, and the
                 # stroke would make every bar a hairline wider than the number it stands for.
                 style={"stroke": "none", **fill},
                 classes=(),
             )
+
+    def _series_group(slot: int) -> str:
+        series = _group(doc, group)
+        for class_name in _series_class(doc, theme, slot):
+            series.set("class", class_name)
+        if clip is not None:
+            series.set("clip-path", f"url(#{clip})")
+        return str(series.get_id())
+
+    for index in range(len(data.series)):
+        _bars(_series_group(index), geom=index, paint=index, skip=total_slot)
+    if total_slot is not None:
+        _bars(_series_group(1), geom=0, paint=1, only=total_slot)
+    if layout.waterfall:
+        _draw_waterfall_connectors(doc, group, theme, layout, clip=clip)
     _draw_references(
         doc,
         group,
@@ -1985,6 +2699,62 @@ def _draw_bar(
     if data.value_labels or (data.stacked and data.stack_total_labels):
         _draw_bar_labels(doc, group, theme, data, layout, font=font, sizes=sizes)
     return plot
+
+
+def _draw_waterfall_connectors(
+    doc: Document,
+    group: str,
+    theme: str | None,
+    layout: BarLayout,
+    *,
+    clip: str | None,
+) -> None:
+    """The dashed rules joining each bar's end to the next bar's start.
+
+    A waterfall's bars float, so nothing in the picture says that the top of one IS the bottom of
+    the next — the connectors are what turn a row of detached rectangles back into one running
+    total. They are drawn from the running sum after each step, which is why the last one lands on
+    the total bar's far end rather than on its base.
+    """
+    values = layout.values[0]
+    steps = len(layout.categories) - 1
+    running = 0.0
+    classes = _hooks(doc, theme, "waterfall-connector")
+    joined = _group(doc, group)
+    joined_id = str(joined.get_id())
+    if clip is not None:
+        joined.set("clip-path", f"url(#{clip})")
+    along = layout.plot.y if layout.horizontal else layout.plot.x
+    for index in range(steps):
+        running += values[index]
+        at = layout.map_value(running)
+        band, following = layout.band(index, 0), layout.band(index + 1, 0)
+        _line(
+            doc,
+            joined_id,
+            layout.across(at, along + band.x + band.w),
+            layout.across(at, along + following.x),
+            classes,
+        )
+
+
+def _minor_of(axes: AxesSpec, axis: Axis) -> list[float]:
+    """The minor tick positions one axis asks for, in data units — none unless ``minor`` is set."""
+    if axes.minor is None:
+        return []
+    return minor_ticks(axis.ticks, axes.minor, log=axis.scale.log)
+
+
+def _spine_at_zero(axes: AxesSpec, axis: Axis) -> bool:
+    """Whether the category axis line moves to value zero: only if asked, and only if 0 is there.
+
+    A log axis never qualifies — it has no zero — and neither does a range that does not contain
+    zero, where the "spine" would be a line drawn outside the plot it belongs to.
+    """
+    if not axes.zero_spine or axis.scale.log:
+        return False
+    lo, hi = min(axis.scale.lo, axis.scale.hi), max(axis.scale.lo, axis.scale.hi)
+    return lo <= 0.0 <= hi
 
 
 def _draw_bar_labels(
@@ -2108,6 +2878,9 @@ def _draw_points(
         font=font,
         axes=axes,
         sizes=sizes,
+        y_minor=layout.y_minor,
+        x_minor=layout.x_minor,
+        bottom_at=layout.bottom_at,
     )
     _draw_references(
         doc,
@@ -2124,9 +2897,9 @@ def _draw_points(
     )
 
     clip = _clip_to_plot(doc, group, plot) if y_axis.pinned or x_axis.pinned else None
-    size = data.marker_size or (
-        _SCATTER_R if isinstance(data, ScatterData) else _MARKER_R
-    )
+    stride = data.markevery or 1 if isinstance(data, LineData) else 1
+    if isinstance(data, LineData) and data.bands:
+        _draw_series_bands(doc, group, theme, data, layout, step=step, clip=clip)
     for index in range(len(data.series)):
         series = _group(doc, group)
         series_id = str(series.get_id())
@@ -2162,8 +2935,18 @@ def _draw_points(
         if isinstance(data, LineData) and len(outline) > 1:
             _polyline(doc, series_id, outline, ())
         if markers:
-            for at in placed:
-                _draw_mark(doc, series_id, data.marker, at, size)
+            for where, at in enumerate(placed):
+                if where % stride:
+                    continue
+                _draw_mark(
+                    doc,
+                    series_id,
+                    data.marker,
+                    at,
+                    layout.radius(index, where),
+                    unfilled=data.open,
+                    classes=classes,
+                )
     _draw_references(
         doc,
         group,
@@ -2187,8 +2970,75 @@ def _draw_points(
             fmt=data.value_format or axes.tick_format,
             font=font,
             sizes=sizes,
+            # A label clears the mark it names — which on a bubble chart is a different distance
+            # at every point, and no distance at all where no mark was drawn.
+            radii=tuple(
+                tuple(
+                    layout.radius(index, where) if markers and where % stride == 0 else 0.0
+                    for where in range(len(row))
+                )
+                for index, row in enumerate(layout.placed)
+            ),
         )
     return plot
+
+
+def _draw_series_bands(
+    doc: Document,
+    group: str,
+    theme: str | None,
+    data: LineData,
+    layout: PointLayout,
+    *,
+    step: Literal["none", "pre", "post", "mid"],
+    clip: str | None,
+) -> None:
+    """The filled regions between named pairs of series, drawn BEHIND every line.
+
+    The two series are known to share an x sequence (:func:`_validate_bands` refuses anything
+    else), so the region is just the one polyline out and the other back. It wears the FIRST named
+    series' class at a light fill-opacity: a band is that series' range, and painting it in a
+    colour of its own would put a third series on a chart that has two.
+
+    A label goes at the band's WIDEST point rather than through the annotation module's placement
+    scoring: the widest gap is the one place inside a band that is guaranteed to have room for
+    text, and it is also the place a reader is already looking.
+    """
+    slots = {entry.name: index for index, entry in enumerate(data.series)}
+    parent = _group(doc, group)
+    parent_id = str(parent.get_id())
+    if clip is not None:
+        parent.set("clip-path", f"url(#{clip})")
+    for band in data.bands or ():
+        first, second = (slots[name] for name in band.between)
+        low = list(layout.placed[first])
+        high = list(layout.placed[second])
+        if len(low) < 2:
+            continue
+        out = low if step == "none" else step_points(low, step)
+        back = high if step == "none" else step_points(high, step)
+        outline = [*out, *reversed(back)]
+        steps = " L ".join(f"{_num(px)} {_num(py)}" for px, py in outline)
+        _part(
+            doc,
+            inkex.PathElement.new(f"M {steps} Z"),
+            prefix="path",
+            category="shape",
+            parent=parent_id,
+            style={"stroke": "none", "fill-opacity": _AREA_OPACITY},
+            classes=_series_class(doc, theme, first),
+        )
+        if band.label:
+            where = widest_gap(low, high)
+            _text(
+                doc,
+                parent_id,
+                band.label,
+                (low[where][0], (low[where][1] + high[where][1]) / 2.0),
+                anchor="middle",
+                baseline="central",
+                classes=_hooks(doc, theme, "value-label"),
+            )
 
 
 def _draw_point_labels(
@@ -2201,19 +3051,27 @@ def _draw_point_labels(
     fmt: TickFormat | None,
     font: str,
     sizes: Sizes,
+    radii: Sequence[Sequence[float]] = (),
 ) -> None:
     """Each point's y value, written above its mark. Outside the clip, like every other caption.
 
     "Above" flips to "below" for a point sitting at the top of the plot, by the same rule a bar's
     label follows — and the topmost point of an unpinned axis is ALWAYS at the top of the plot,
     so without the flip the one number a reader looks for first is the one written over the title.
+
+    The gap is measured from the EDGE of the mark, not from its centre: on a bubble chart every
+    mark is a different size, and a label placed a fixed distance from the centre would sit on top
+    of the big ones. A point with no mark drawn on it clears nothing, which is the old behaviour.
     """
     parent = str(_group(doc, group).get_id())
     classes = _hooks(doc, theme, "value-label")
     plot = layout.plot
     line = measure_label("0", font, sizes.value_label)[1]
     for index, entry in enumerate(data.series):
-        for (_, py), (x, y) in zip(entry.points, layout.placed[index], strict=True):
+        row = radii[index] if index < len(radii) else ()
+        for where, ((_, py), (x, y)) in enumerate(
+            zip(entry.points, layout.placed[index], strict=True)
+        ):
             _text(
                 doc,
                 parent,
@@ -2223,7 +3081,7 @@ def _draw_point_labels(
                     label_centre(
                         y,
                         -1.0,
-                        gap=sizes.gap,
+                        gap=sizes.gap + (row[where] if where < len(row) else 0.0),
                         extent=line,
                         lo=plot.y,
                         hi=plot.y + plot.h,
@@ -2233,6 +3091,133 @@ def _draw_point_labels(
                 baseline="central",
                 classes=classes,
             )
+
+
+def _draw_histogram(
+    doc: Document, group: str, theme: str | None, spec: ChartSpec, font: str, sizes: Sizes
+) -> Plot:
+    """Contiguous bars over a numeric x — the one plot here that counts its own data.
+
+    It borrows the bar chart's paint (one series group, ``stroke: none`` on a mark that is a fill,
+    the same hatch) and none of its LAYOUT: a bar chart's bands divide a categorical axis into
+    equal slots, where a histogram's bars are as wide as the bins are, edge to edge.
+    """
+    data = spec.data
+    if not isinstance(data, HistogramData):
+        raise InvalidArgument("a histogram needs a list of observations")
+    axes = spec.axes or _DEFAULT_AXES
+    layout = _histogram_layout(spec, font=font, sizes=sizes)
+    plot = layout.plot
+    _draw_frame(
+        doc,
+        group,
+        theme,
+        plot=plot,
+        spec=spec,
+        y_ticks=layout.y_ticks,
+        x_ticks=layout.x_ticks,
+        font=font,
+        axes=axes,
+        sizes=sizes,
+        y_minor=layout.y_minor,
+        x_minor=layout.x_minor,
+        bottom_at=layout.bottom_at,
+    )
+    _draw_references(
+        doc,
+        group,
+        theme,
+        plot=plot,
+        axes=axes,
+        value=layout.y_axis.scale,
+        value_along_x=False,
+        numeric_x=layout.x_axis.scale,
+        font=font,
+        sizes=sizes,
+        bands=True,
+    )
+    series = _group(doc, group)
+    series_id = str(series.get_id())
+    classes = _series_class(doc, theme, 0)
+    for class_name in classes:
+        series.set("class", class_name)
+    if layout.y_axis.pinned or layout.x_axis.pinned:
+        series.set("clip-path", f"url(#{_clip_to_plot(doc, group, plot)})")
+    fill = _fill_of(_hatch(doc, group, classes) if data.hatch else None)
+    for index in range(len(layout.counts)):
+        x, y, w, h = layout.rect(index)
+        _part(
+            doc,
+            inkex.Rectangle.new(x, y, w, h),
+            prefix="rect",
+            category="shape",
+            parent=series_id,
+            style={"stroke": "none", **fill},
+            classes=(),
+        )
+    _draw_references(
+        doc,
+        group,
+        theme,
+        plot=plot,
+        axes=axes,
+        value=layout.y_axis.scale,
+        value_along_x=False,
+        numeric_x=layout.x_axis.scale,
+        font=font,
+        sizes=sizes,
+        bands=False,
+    )
+    if data.value_labels:
+        _draw_histogram_labels(
+            doc,
+            group,
+            theme,
+            layout,
+            fmt=data.value_format or axes.tick_format,
+            font=font,
+            sizes=sizes,
+        )
+    return plot
+
+
+def _draw_histogram_labels(
+    doc: Document,
+    group: str,
+    theme: str | None,
+    layout: HistogramLayout,
+    *,
+    fmt: TickFormat | None,
+    font: str,
+    sizes: Sizes,
+) -> None:
+    """Each bin's count, just beyond the end of its bar — flipping inside at the plot's edge."""
+    parent = str(_group(doc, group).get_id())
+    classes = _hooks(doc, theme, "value-label")
+    line = measure_label("0", font, sizes.value_label)[1]
+    base = layout.plot.map_y(0.0, layout.y_axis.scale)
+    for index, count in enumerate(layout.counts):
+        x, y, w, h = layout.rect(index)
+        end = y if abs(y - base) > abs(y + h - base) else y + h
+        _text(
+            doc,
+            parent,
+            format_tick(float(count), fmt),
+            (
+                x + w / 2.0,
+                label_centre(
+                    end,
+                    -1.0 if end <= base else 1.0,
+                    gap=sizes.gap,
+                    extent=line,
+                    lo=layout.plot.y,
+                    hi=layout.plot.y + layout.plot.h,
+                ),
+            ),
+            anchor="middle",
+            baseline="central",
+            classes=classes,
+        )
 
 
 def _polar(cx: float, cy: float, radius: float, angle: float) -> str:
@@ -2501,6 +3486,13 @@ def _datum_local(
         if not 0 <= datum.index < len(ring.labels):
             return None
         return ring.datum_point(ring.order.index(datum.index))
+    if isinstance(data, HistogramData):
+        bins = _histogram_layout(spec, font=font, sizes=sizes)
+        # `index` names the BIN, which is the only thing a histogram has to point at — the
+        # observations themselves were counted, not placed.
+        if not 0 <= datum.index < len(bins.counts):
+            return None
+        return bins.datum_point(datum.index)
     if not 0 <= datum.index < len(data.values):
         return None
     step = spec.w / max(1, len(data.values) - 1)
@@ -2554,11 +3546,12 @@ def _build(doc: Document, group: BaseElement, spec: ChartSpec) -> None:
         # The donut lays out its own title, sized around the ring rather than above a plot.
         _draw_donut(doc, group_id, dressing, spec, _hole(theme), font, sizes)
         return
-    plot = (
-        _draw_bar(doc, group_id, dressing, spec, font, sizes)
-        if spec.kind == "bar"
-        else _draw_points(doc, group_id, dressing, spec, font, sizes)
-    )
+    if spec.kind == "bar":
+        plot = _draw_bar(doc, group_id, dressing, spec, font, sizes)
+    elif spec.kind == "histogram":
+        plot = _draw_histogram(doc, group_id, dressing, spec, font, sizes)
+    else:
+        plot = _draw_points(doc, group_id, dressing, spec, font, sizes)
     _draw_title(doc, group_id, dressing, plot, spec.title, sizes)
 
 

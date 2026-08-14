@@ -20,13 +20,16 @@ from svg_mcp.ops.chart import (
     AxesSpec,
     BarData,
     DonutData,
+    HistogramData,
     LineData,
+    Marker,
     PointSeries,
     ReferenceLine,
     Scale,
     ScatterData,
     Segment,
     Series,
+    SeriesBand,
     Sizes,
     Slice,
     SparklineData,
@@ -34,12 +37,18 @@ from svg_mcp.ops.chart import (
     bar_bands,
     donut_angles,
     format_tick,
+    histogram_counts,
+    histogram_edges,
     include_zero,
     label_centre,
     log_ticks,
     marker_points,
+    marker_radii,
+    marker_strokes,
+    minor_ticks,
     nice_step,
     nice_ticks,
+    normalize_stacks,
     order_indices,
     plot_margins,
     read_chart_spec,
@@ -48,7 +57,9 @@ from svg_mcp.ops.chart import (
     stack_extents,
     stack_segments,
     step_points,
+    tick_reach,
     tick_text,
+    waterfall_segments,
 )
 from svg_mcp.query import get_params
 from svg_mcp.render import get_renderer
@@ -2177,3 +2188,687 @@ def test_a_stack_total_label_silences_the_segment_label_it_would_sit_on() -> Non
     assert "74" in " ".join(labels)  # the total is drawn
     assert "52" in " ".join(labels)  # the roomy bottom segment keeps its label
     assert "22" not in " ".join(labels)  # the one the total landed on is silenced
+
+
+# --- 21. the mark vocabulary --------------------------------------------------
+
+
+def _children(doc: Document, node_id: str) -> list[BaseElement]:
+    return [child for child in doc.resolve(node_id) if isinstance(child.tag, str)]
+
+
+def _circles(doc: Document, chart_id: str) -> list[BaseElement]:
+    return [
+        node
+        for node in doc.resolve(chart_id).iter()
+        if isinstance(node.tag, str) and str(node.tag).endswith("circle")
+    ]
+
+
+def _paths(doc: Document, chart_id: str) -> list[BaseElement]:
+    return [
+        node
+        for node in doc.resolve(chart_id).iter()
+        if isinstance(node.tag, str) and str(node.tag).endswith("path")
+    ]
+
+
+def test_a_downward_triangle_is_the_triangle_turned_over() -> None:
+    up = marker_points("triangle", 0.0, 0.0, 10.0)
+    down = marker_points("tri_down", 0.0, 0.0, 10.0)
+    assert len(up) == len(down) == 3
+    assert min(y for _, y in up) == pytest.approx(-10.0)
+    assert max(y for _, y in down) == pytest.approx(10.0)
+    assert sorted(round(-y, 6) for _, y in up) == sorted(round(y, 6) for _, y in down)
+
+
+def test_a_star_alternates_ten_corners_between_two_radii() -> None:
+    corners = marker_points("star", 0.0, 0.0, 10.0)
+    assert len(corners) == 10
+    radii = [math.hypot(x, y) for x, y in corners]
+    assert radii[0::2] == pytest.approx([10.0] * 5)
+    assert radii[1::2] == pytest.approx([3.82] * 5)
+    assert corners[0][1] == pytest.approx(-10.0)  # a star points up
+
+
+def test_the_marks_with_no_area_are_strokes_and_not_polygons() -> None:
+    stroked: tuple[Marker, ...] = ("plus", "cross")
+    for shape in stroked:
+        assert marker_points(shape, 0.0, 0.0, 5.0) == []
+        arms = marker_strokes(shape, 0.0, 0.0, 5.0)
+        assert len(arms) == 2
+        for start, end in arms:
+            # both arms reach as far as the circle they stand in for, so no shape carries
+            # visibly more ink than another at the same size
+            assert math.dist(start, end) == pytest.approx(10.0)
+    assert marker_strokes("circle", 0.0, 0.0, 5.0) == []
+    assert marker_strokes("square", 0.0, 0.0, 5.0) == []
+
+
+@pytest.mark.parametrize(
+    ("shape", "tag"), [("tri_down", "path"), ("star", "path"), ("square", "rect")]
+)
+def test_each_new_filled_glyph_draws_its_own_kind_of_element(shape: str, tag: str) -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="scatter",
+        data=ScatterData(
+            series=[PointSeries(name="s", points=[(1, 2), (2, 3), (3, 4)])],
+            marker=shape,  # type: ignore[arg-type]
+        ),
+    )
+    assert _tags_under(doc, placed.ref.id).count(tag) == 3
+
+
+def test_a_stroked_mark_is_one_unfilled_path_wearing_its_series() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="scatter",
+        data=ScatterData(series=[PointSeries(name="s", points=[(1, 2), (2, 3)])], marker="plus"),
+    )
+    marks = _paths(doc, placed.ref.id)
+    assert len(marks) == 2
+    for node in marks:
+        assert "fill:none" in str(node.get("style"))
+        assert "default-series-1" in str(node.get("class") or "").split()
+        assert str(node.get("d")).count("M") == 2  # two arms, one element
+
+
+def test_open_marks_are_hollow_and_painted_by_their_stroke() -> None:
+    doc = _doc()
+    hollow = ops.add_chart(
+        doc,
+        kind="scatter",
+        data=ScatterData(series=[PointSeries(name="s", points=[(1, 2), (2, 3)])], open=True),
+    )
+    marks = _circles(doc, hollow.ref.id)
+    assert len(marks) == 2
+    for node in marks:
+        style = str(node.get("style"))
+        assert "fill:none" in style and "stroke-width:1.5" in style
+        assert "default-series-1" in str(node.get("class") or "").split()
+
+    filled = ops.add_chart(
+        doc, kind="scatter", data=ScatterData(series=[PointSeries(name="s", points=[(1, 2)])])
+    )
+    solid = _circles(doc, filled.ref.id)
+    # ...where a filled mark takes the opposite deal: no stroke, and the group above paints it
+    assert [str(node.get("class") or "") for node in solid] == [""]
+    assert "stroke:none" in str(solid[0].get("style"))
+
+
+def test_a_bubble_maps_its_numbers_by_area_and_not_by_radius() -> None:
+    radii = marker_radii([0.0, 50.0, 100.0], (2.0, 10.0), (0.0, 100.0))
+    assert radii[0] == pytest.approx(2.0)
+    assert radii[-1] == pytest.approx(10.0)
+    # halfway up the range is halfway up the AREA, which is a radius of the root mean square
+    assert radii[1] == pytest.approx(math.sqrt((4.0 + 100.0) / 2.0))
+
+
+def test_sizes_with_no_scale_are_radii_already() -> None:
+    assert marker_radii([3.0, 7.0], None, (3.0, 7.0)) == [3.0, 7.0]
+
+
+def test_one_distinct_size_draws_every_bubble_at_the_top_of_the_range() -> None:
+    assert marker_radii([4.0, 4.0], (2.0, 9.0), (4.0, 4.0)) == pytest.approx([9.0, 9.0])
+
+
+def test_a_bubble_needs_one_size_per_point_and_none_of_them_negative() -> None:
+    with pytest.raises(ValidationError):
+        PointSeries(name="s", points=[(0, 1), (1, 2)], sizes=[3.0])
+    with pytest.raises(ValidationError):
+        PointSeries(name="s", points=[(0, 1)], sizes=[-1.0])
+
+
+def test_a_bubble_scatter_draws_visibly_different_radii() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="scatter",
+        data=ScatterData(
+            series=[PointSeries(name="s", points=[(1, 1), (2, 2), (3, 3)], sizes=[1, 4, 16])],
+            marker_scale=(3.0, 12.0),
+        ),
+        x=0,
+        y=0,
+        width=320,
+        height=200,
+    )
+    radii = [float(str(node.get("r"))) for node in _circles(doc, placed.ref.id)]
+    assert len(radii) == 3
+    assert radii == sorted(radii)
+    assert radii[0] == pytest.approx(3.0) and radii[-1] == pytest.approx(12.0)
+    assert radii[-1] - radii[0] > 5.0
+
+
+def test_a_bubble_pushes_its_value_label_clear_of_its_own_edge() -> None:
+    doc = _doc()
+    points = [PointSeries(name="s", points=[(1, 1), (2, 2)], sizes=[1.0, 1.0])]
+    small = ops.add_chart(
+        doc,
+        kind="scatter",
+        data=ScatterData(series=points, marker_scale=(2.0, 2.0), value_labels=True),
+        x=0,
+        y=0,
+    )
+    big = ops.add_chart(
+        doc,
+        kind="scatter",
+        data=ScatterData(series=points, marker_scale=(20.0, 20.0), value_labels=True),
+        x=0,
+        y=0,
+    )
+    # The plots are identical but for the marks' size, so the labels differ by exactly that.
+    assert _labels_at(doc, big.ref.id)["1"][1] == pytest.approx(
+        _labels_at(doc, small.ref.id)["1"][1] - 18.0
+    )
+
+
+def test_markevery_thins_the_marks_and_leaves_the_line_whole() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="line",
+        data=LineData(
+            series=[PointSeries(name="s", points=[(index, index % 3) for index in range(10)])],
+            points=True,
+            markevery=3,
+        ),
+    )
+    tags = _tags_under(doc, placed.ref.id)
+    assert tags.count("circle") == 4  # points 0, 3, 6 and 9
+    assert tags.count("polyline") == 1
+
+
+# --- 22. minor ticks, tick direction, inversion and the zero spine -------------
+
+
+def test_minor_ticks_cut_each_major_interval_into_the_count_plus_one() -> None:
+    assert minor_ticks([0.0, 10.0, 20.0], 4) == pytest.approx([2, 4, 6, 8, 12, 14, 16, 18])
+    assert minor_ticks([0.0, 10.0], 1) == pytest.approx([5.0])
+    assert minor_ticks([0.0], 4) == []  # nothing to subdivide between
+
+
+def test_a_log_axis_subdivides_by_mantissa_whatever_count_it_is_given() -> None:
+    found = minor_ticks([1.0, 10.0, 100.0], 4, log=True)
+    assert found == pytest.approx([2, 3, 4, 5, 6, 7, 8, 9, 20, 30, 40, 50, 60, 70, 80, 90])
+    assert minor_ticks([1.0, 10.0], 1, log=True) == minor_ticks([1.0, 10.0], 7, log=True)
+
+
+def test_minor_gridlines_and_marks_are_drawn_at_half_the_majors_length() -> None:
+    doc = _doc()
+    placed = _bar_chart(
+        doc,
+        [0.0, 100.0],
+        AxesSpec(
+            y_min=0,
+            y_max=100,
+            ticks=[0, 50, 100],
+            minor=1,
+            minor_gridlines=True,
+            tick_marks=6,
+        ),
+    )
+    grid = _wearing(doc, placed.ref.id, "default-gridline-minor")
+    assert len(grid) == 2  # 25 and 75
+    # a minor gridline is still a gridline: the extra class is what makes it the fainter one
+    assert all("default-gridline" in str(node.get("class") or "").split() for node in grid)
+    marks = _wearing(doc, placed.ref.id, "default-tick-minor")
+    assert len(marks) == 2
+    for node in marks:
+        assert abs(float(str(node.get("x2"))) - float(str(node.get("x1")))) == pytest.approx(3.0)
+
+
+def test_minor_positions_are_drawn_for_nobody_who_did_not_ask() -> None:
+    doc = _doc()
+    placed = _bar_chart(doc, [0.0, 100.0], AxesSpec(minor=4, tick_marks=6))
+    assert _wearing(doc, placed.ref.id, "default-gridline-minor") == []
+    assert _wearing(doc, placed.ref.id, "default-tick-minor") != []  # marks: tick_marks is set
+    bare = _bar_chart(doc, [0.0, 100.0], AxesSpec(minor=4, minor_gridlines=True))
+    assert _wearing(doc, bare.ref.id, "default-tick-minor") == []  # no tick_marks, no marks
+
+
+def test_a_tick_stands_out_in_or_both_ways() -> None:
+    assert tick_reach(6.0, "out") == (6.0, 0.0)
+    assert tick_reach(6.0, "in") == (0.0, 6.0)
+    assert tick_reach(6.0, "inout") == (6.0, 6.0)
+    assert tick_reach(-4.0, "out") == (0.0, 0.0)
+
+
+def test_an_inward_tick_is_drawn_inside_the_plot_and_costs_the_margin_nothing() -> None:
+    doc = _doc()
+    bare = _bar_chart(doc, [0.0, 100.0])
+    inward = _bar_chart(doc, [0.0, 100.0], AxesSpec(tick_marks=8, tick_direction="in"))
+    assert _axis_x(doc, inward.ref.id) == pytest.approx(_axis_x(doc, bare.ref.id))
+    axis_x = _axis_x(doc, inward.ref.id)
+    marks = [
+        node
+        for node in _wearing(doc, inward.ref.id, "default-tick")
+        if node.get("y1") == node.get("y2")
+    ]
+    assert marks
+    for node in marks:
+        assert float(str(node.get("x1"))) == pytest.approx(axis_x)
+        assert float(str(node.get("x2"))) == pytest.approx(axis_x + 8.0)
+
+
+def test_a_straddling_tick_reaches_both_ways_from_its_axis() -> None:
+    doc = _doc()
+    placed = _bar_chart(doc, [0.0, 100.0], AxesSpec(tick_marks=5, tick_direction="inout"))
+    axis_x = _axis_x(doc, placed.ref.id)
+    marks = [
+        node
+        for node in _wearing(doc, placed.ref.id, "default-tick")
+        if node.get("y1") == node.get("y2")
+    ]
+    for node in marks:
+        assert float(str(node.get("x1"))) == pytest.approx(axis_x - 5.0)
+        assert float(str(node.get("x2"))) == pytest.approx(axis_x + 5.0)
+
+
+def test_turning_the_y_tick_labels_turns_them_and_widens_the_margin() -> None:
+    doc = _doc()
+    level = _bar_chart(doc, [0.0, 100000.0])
+    turned = _bar_chart(doc, [0.0, 100000.0], AxesSpec(y_tick_rotate=-45))
+    assert _axis_x(doc, turned.ref.id) < _axis_x(doc, level.ref.id)
+    labels = [
+        node
+        for node in _wearing(doc, turned.ref.id, "default-tick-label")
+        if str(node.text or "") == "100000"
+    ]
+    assert labels and labels[0].get("transform") is not None
+
+
+def test_inverting_a_scale_counts_the_same_span_from_the_other_end() -> None:
+    up = Scale(lo=0.0, hi=10.0)
+    down = Scale(lo=0.0, hi=10.0, invert=True)
+    for value in (0.0, 2.5, 10.0, 12.0):
+        assert down.unit(value) == pytest.approx(1.0 - up.unit(value))
+    assert Scale(lo=1.0, hi=100.0, log=True, invert=True).unit(10.0) == pytest.approx(0.5)
+
+
+def test_an_inverted_value_axis_hangs_the_bars_from_the_top() -> None:
+    doc = _doc()
+    normal = _bar_chart(doc, [10.0, 80.0])
+    flipped = _bar_chart(doc, [10.0, 80.0], AxesSpec(invert_y=True))
+    tall = _series_rects(doc, normal.ref.id)[1]
+    hung = _series_rects(doc, flipped.ref.id)[1]
+    assert hung[1] == pytest.approx(_plot_box(doc, flipped.ref.id)[1])  # starts at the plot top
+    assert hung[3] == pytest.approx(tall[3])  # the same length, the other way up
+
+
+def test_the_zero_spine_stands_on_zero_only_when_zero_is_on_the_axis() -> None:
+    doc = _doc()
+    crossing = _bar_chart(doc, [12.0, -14.0], AxesSpec(zero_spine=True))
+    lines = _wearing(doc, crossing.ref.id, "default-axis")
+    base = next(node for node in lines if node.get("y1") == node.get("y2"))
+    zero = next(
+        node
+        for node in _wearing(doc, crossing.ref.id, "default-tick-label")
+        if str(node.text or "") == "0"
+    )
+    assert float(str(base.get("y1"))) == pytest.approx(float(str(zero.get("y"))))
+    # ...and the reading edge did not move with it: the labels are still down the left side
+    _, top, _, height = _plot_box(doc, crossing.ref.id)
+    assert top < float(str(base.get("y1"))) < top + height
+
+    above = _bar_chart(doc, [10.0, 80.0], AxesSpec(zero_spine=True, y_min=5.0, y_max=90.0))
+    edge = next(
+        node
+        for node in _wearing(doc, above.ref.id, "default-axis")
+        if node.get("y1") == node.get("y2")
+    )
+    box_top, box_height = _plot_box(doc, above.ref.id)[1], _plot_box(doc, above.ref.id)[3]
+    assert float(str(edge.get("y1"))) == pytest.approx(box_top + box_height)
+
+
+# --- 23. line composition: mid steps and bands --------------------------------
+
+
+def test_a_mid_step_changes_halfway_between_the_two_readings() -> None:
+    assert step_points([(0.0, 1.0), (2.0, 5.0)], "mid") == [
+        (0.0, 1.0),
+        (1.0, 1.0),
+        (1.0, 5.0),
+        (2.0, 5.0),
+    ]
+
+
+def test_a_band_has_to_name_series_this_chart_has() -> None:
+    with pytest.raises(ValidationError) as caught:
+        LineData(
+            series=[PointSeries(name="a", points=[(0, 1)])],
+            bands=[SeriesBand(between=("a", "b"))],
+        )
+    assert "'b'" in str(caught.value)
+
+
+def test_a_band_needs_the_two_series_sampled_at_the_same_x() -> None:
+    with pytest.raises(ValidationError) as caught:
+        LineData(
+            series=[
+                PointSeries(name="a", points=[(0, 1), (1, 2)]),
+                PointSeries(name="b", points=[(0, 3), (2, 4)]),
+            ],
+            bands=[SeriesBand(between=("a", "b"))],
+        )
+    assert "SAME x" in str(caught.value)
+
+
+def _banded(doc: Document) -> ops.PlacedChart:
+    return ops.add_chart(
+        doc,
+        kind="line",
+        data=LineData(
+            series=[
+                PointSeries(name="lo", points=[(0, 1), (1, 2), (2, 1.5)]),
+                PointSeries(name="hi", points=[(0, 4), (1, 6), (2, 3)]),
+            ],
+            bands=[SeriesBand(between=("lo", "hi"), label="range")],
+        ),
+        x=0,
+        y=0,
+        width=320,
+        height=200,
+    )
+
+
+def test_a_band_is_drawn_behind_both_of_the_lines_it_lies_between() -> None:
+    doc = _doc()
+    placed = _banded(doc)
+    kids = _children(doc, placed.ref.id)
+    classes = [str(child.get("class") or "") for child in kids]
+    first_series = next(
+        index for index, name in enumerate(classes) if name.startswith("default-series")
+    )
+    band_group = kids[first_series - 1]
+    filled = [node for node in band_group.iter() if str(node.tag).endswith("path")]
+    assert len(filled) == 1  # one region, before the first series group
+    assert "fill-opacity:0.15" in str(filled[0].get("style"))
+    # it wears the FIRST named series' class, so it reads as that family's range
+    assert "default-series-1" in str(filled[0].get("class") or "").split()
+
+
+def test_a_bands_label_sits_where_the_band_is_widest() -> None:
+    doc = _doc()
+    placed = _banded(doc)
+    labels = _labels_at(doc, placed.ref.id)
+    assert set(labels) == {"range"}
+    # the widest gap is at x=1 (2 to 6), which is the middle of the three x positions
+    left, _, width, _ = _plot_box(doc, placed.ref.id)
+    assert labels["range"][0] == pytest.approx(left + width / 2.0, abs=0.01)
+
+
+# --- 24. waterfalls, normalized stacks and pyramids ---------------------------
+
+
+def test_a_waterfall_floats_each_bar_from_the_running_total() -> None:
+    assert waterfall_segments([100.0, 45.0, -30.0]) == [
+        Segment(0.0, 100.0),
+        Segment(100.0, 145.0),
+        Segment(115.0, 145.0),
+    ]
+
+
+def test_a_waterfall_total_is_one_more_bar_from_the_ground() -> None:
+    assert waterfall_segments([10.0, -4.0], total=True)[-1] == Segment(0.0, 6.0)
+    assert waterfall_segments([-10.0, 4.0], total=True)[-1] == Segment(-6.0, 0.0)
+
+
+def test_a_waterfall_is_one_series_and_never_a_stack() -> None:
+    with pytest.raises(ValidationError):
+        BarData(
+            categories=["a"],
+            series=[Series(name="x", values=[1]), Series(name="y", values=[2])],
+            waterfall=True,
+        )
+    with pytest.raises(ValidationError):
+        BarData(
+            categories=["a"],
+            series=[Series(name="x", values=[1])],
+            waterfall=True,
+            stacked=True,
+        )
+
+
+def test_a_waterfall_draws_its_steps_its_total_and_the_connectors_between() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["open", "up", "down"],
+            series=[Series(name="arr", values=[100.0, 40.0, -25.0])],
+            waterfall=True,
+            total_label="close",
+        ),
+        x=0,
+        y=0,
+        width=360,
+        height=240,
+    )
+    steps = _series_rects(doc, placed.ref.id, 0)
+    total = _series_rects(doc, placed.ref.id, 1)
+    assert len(steps) == 3 and len(total) == 1
+    assert steps[1][1] + steps[1][3] == pytest.approx(steps[0][1])  # starts where 1 ended
+    assert steps[2][1] == pytest.approx(steps[1][1])  # the fall hangs off the run's top
+    assert total[0][3] == pytest.approx(steps[0][3] + steps[1][3] - steps[2][3])
+    connectors = _wearing(doc, placed.ref.id, "default-waterfall-connector")
+    assert len(connectors) == 3  # between the four bars
+    for node in connectors:
+        assert node.get("y1") == node.get("y2")
+    assert float(str(connectors[0].get("y1"))) == pytest.approx(steps[0][1])
+
+
+def test_a_waterfall_writes_the_signed_step_on_each_bar() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["open", "down"],
+            series=[Series(name="arr", values=[100.0, -25.0])],
+            waterfall=True,
+            total_label="close",
+            value_labels=True,
+        ),
+        x=0,
+        y=0,
+        width=360,
+        height=240,
+    )
+    assert set(_labels_at(doc, placed.ref.id)) == {"100", "-25", "75"}
+
+
+def test_a_horizontal_waterfall_walks_along_x_instead() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["open", "up"],
+            series=[Series(name="arr", values=[10.0, 5.0])],
+            waterfall=True,
+            orientation="horizontal",
+        ),
+        x=0,
+        y=0,
+        width=360,
+        height=240,
+    )
+    bars = _series_rects(doc, placed.ref.id)
+    assert bars[1][0] == pytest.approx(bars[0][0] + bars[0][2])  # the second starts where 1 ended
+    connectors = _wearing(doc, placed.ref.id, "default-waterfall-connector")
+    assert len(connectors) == 1
+    assert connectors[0].get("x1") == connectors[0].get("x2")  # a vertical join, turned with it
+
+
+def test_normalizing_gives_every_stack_the_same_hundred_to_share() -> None:
+    scaled = normalize_stacks([[10.0, 1.0], [30.0, 3.0]])
+    assert [sum(row[index] for row in scaled) for index in range(2)] == pytest.approx([100.0] * 2)
+    assert scaled[0] == pytest.approx([25.0, 25.0])
+
+
+def test_a_stack_that_crosses_zero_normalizes_by_its_own_magnitude() -> None:
+    scaled = normalize_stacks([[3.0], [-1.0]])
+    assert scaled[0] == pytest.approx([75.0]) and scaled[1] == pytest.approx([-25.0])
+
+
+def test_a_stack_of_nothing_has_no_total_to_take_shares_of() -> None:
+    assert normalize_stacks([[0.0], [0.0]]) == [[0.0], [0.0]]
+
+
+def test_normalizing_needs_a_stack_to_normalize() -> None:
+    with pytest.raises(ValidationError):
+        BarData(categories=["a"], series=[Series(name="s", values=[1.0])], normalized=True)
+
+
+def test_normalized_stacks_all_reach_the_same_line() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["a", "b"],
+            series=[Series(name="x", values=[10, 30]), Series(name="y", values=[30, 10])],
+            stacked=True,
+            normalized=True,
+            value_labels=True,
+        ),
+        x=0,
+        y=0,
+        width=320,
+        height=200,
+    )
+    lower = _series_rects(doc, placed.ref.id, 0)
+    upper = _series_rects(doc, placed.ref.id, 1)
+    assert lower[0][3] + upper[0][3] == pytest.approx(lower[1][3] + upper[1][3])
+    assert upper[0][1] == pytest.approx(upper[1][1])  # both stacks top out on the same line
+    assert set(_labels_at(doc, placed.ref.id)) == {"25", "75"}
+
+
+def test_a_population_pyramid_mirrors_two_series_about_zero() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="bar",
+        data=BarData(
+            categories=["0-9", "10-19"],
+            series=[
+                Series(name="men", values=[-5.0, -6.0]),
+                Series(name="women", values=[5.0, 6.0]),
+            ],
+            orientation="horizontal",
+            stacked=True,
+        ),
+        x=0,
+        y=0,
+        width=360,
+        height=240,
+        axes=AxesSpec(zero_spine=True),
+    )
+    left = _series_rects(doc, placed.ref.id, 0)
+    right = _series_rects(doc, placed.ref.id, 1)
+    for men, women in zip(left, right, strict=True):
+        assert men[0] + men[2] == pytest.approx(women[0])  # they meet at zero
+        assert men[2] == pytest.approx(women[2])  # and mirror each other's width
+        assert men[1] == pytest.approx(women[1])  # in one band per age group
+    spine = next(
+        node
+        for node in _wearing(doc, placed.ref.id, "default-axis")
+        if node.get("x1") == node.get("x2")
+    )
+    assert float(str(spine.get("x1"))) == pytest.approx(left[0][0] + left[0][2])
+
+
+# --- 25. histograms -----------------------------------------------------------
+
+
+def test_an_integer_bin_count_spreads_equal_bins_across_the_data() -> None:
+    assert histogram_edges([0.0, 10.0, 5.0], 5) == pytest.approx([0.0, 2.0, 4.0, 6.0, 8.0, 10.0])
+
+
+def test_explicit_edges_are_taken_exactly_as_written() -> None:
+    assert histogram_edges([1.0], [0.0, 1.0, 4.0]) == [0.0, 1.0, 4.0]
+
+
+def test_a_value_on_an_edge_goes_to_the_bin_above_it_and_the_last_edge_closes() -> None:
+    edges = [0.0, 1.0, 2.0]
+    assert histogram_counts([0.0, 1.0, 2.0], edges) == [1, 2]
+    assert histogram_counts([-0.5, 2.5], edges) == [0, 0]  # nothing outside the edges is counted
+
+
+def test_a_histogram_of_one_repeated_value_still_gets_a_bin_to_stand_in() -> None:
+    edges = histogram_edges([7.0, 7.0, 7.0], 10)
+    assert len(edges) == 2 and edges[1] - edges[0] == pytest.approx(1.0)
+    assert histogram_counts([7.0, 7.0, 7.0], edges) == [3]
+    wide = histogram_edges([40.0, 40.0], 4)
+    assert wide[1] - wide[0] == pytest.approx(4.0)  # the axes' own degenerate rule
+
+
+def test_bins_have_to_be_a_count_or_an_ascending_ladder() -> None:
+    ladders: tuple[int | list[float], ...] = (0, [1.0], [2.0, 1.0], [1.0, 1.0])
+    for bins in ladders:
+        with pytest.raises(ValidationError):
+            HistogramData(values=[1.0], bins=bins)
+
+
+def _histogram(doc: Document, **kwargs: object) -> ops.PlacedChart:
+    return ops.add_chart(
+        doc,
+        kind="histogram",
+        data=HistogramData(values=[1, 2, 2, 3, 3, 3, 4, 5, 5, 9], bins=4, **kwargs),  # type: ignore[arg-type]
+        x=0,
+        y=0,
+        width=360,
+        height=240,
+        title="h",
+    )
+
+
+def test_a_histogram_draws_one_contiguous_bar_per_bin() -> None:
+    doc = _doc()
+    placed = _histogram(doc)
+    rects = _series_rects(doc, placed.ref.id)
+    assert len(rects) == 4
+    for left, right in zip(rects, rects[1:], strict=False):
+        assert abs((left[0] + left[2]) - right[0]) < 0.5  # they touch: x is continuous
+    assert all(rect[3] > 0 for rect in rects)
+
+
+def test_a_histogram_counts_its_own_observations() -> None:
+    doc = _doc()
+    placed = _histogram(doc, value_labels=True)
+    assert sorted(_labels_at(doc, placed.ref.id)) == ["1", "2", "3", "4"]
+
+
+def test_a_histogram_ticks_its_x_axis_in_round_numbers_and_not_in_edges() -> None:
+    doc = _doc()
+    placed = _histogram(doc)
+    ticks = _texts(doc, placed.ref.id, "default-tick-label")
+    assert "0" in ticks and "10" in ticks  # 1..9 of data, ticked 0/2/4/6/8/10
+    assert "1" not in ticks or "9" not in ticks  # the bin edges are not what is labelled
+
+
+def test_a_histogram_takes_the_hatch_and_the_axes_like_any_other_chart() -> None:
+    doc = _doc()
+    placed = ops.add_chart(
+        doc,
+        kind="histogram",
+        data=HistogramData(values=[1, 2, 3, 4], bins=[0.0, 2.0, 4.0], hatch=True),
+        x=0,
+        y=0,
+        axes=AxesSpec(gridlines="both", tick_marks=4),
+    )
+    assert "<pattern" in export_svg(doc)
+    assert len(_series_rects(doc, placed.ref.id)) == 2
+    assert _wearing(doc, placed.ref.id, "default-tick") != []
+
+
+def test_a_histogram_is_not_a_sparkline_however_alike_the_payloads_look() -> None:
+    doc = _doc()
+    placed = ops.add_chart(doc, kind="histogram", data=HistogramData(values=[1.0, 2.0, 3.0]))
+    spec = read_chart_spec(doc.resolve(placed.ref.id))
+    assert spec is not None and isinstance(spec.data, HistogramData)

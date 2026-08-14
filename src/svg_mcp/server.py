@@ -197,7 +197,8 @@ DIAGRAMS (box-arrow)
   label/kind/route/members; `get_params` reads any facade's spec back.
 
 CHARTS
-- For ANY plot of numbers — bar, line, donut, scatter, sparkline — use `add_chart(kind, data)`,
+- For ANY plot of numbers — bar, line, donut, scatter, histogram, sparkline — use
+  `add_chart(kind, data)`,
   NOT hand-placed rects and polylines. It picks round tick values, MEASURES the margins from
   the tick labels so nothing is clipped, and paints each series from the theme's palette in
   series order. It works with no theme loaded: charts are the one category the bundled default
@@ -217,8 +218,17 @@ CHARTS
   (negatives stack DOWNWARD from zero, the axis follows the TOTALS, `stack_total_labels` writes
   them); `orientation="horizontal"` swaps the axes so long category names get the left margin —
   which is then measured from THEM; `order` = "value_desc"/"value_asc"/"label"/an explicit list;
-  `step="post"|"pre"` on a line draws a staircase; a donut takes `center_text`/`center_subtext`
-  (the KPI-in-the-hole idiom), `slice_labels` and `start_angle`.
+  `step="post"|"pre"|"mid"` on a line draws a staircase; a donut takes `center_text`/
+  `center_subtext` (the KPI-in-the-hole idiom), `slice_labels` and `start_angle`.
+- The parity batch, in one line each: marks are circle/square/diamond/triangle/tri_down/plus/
+  cross/star (`open` draws them hollow, `markevery` thins them, `sizes` + `marker_scale` makes
+  them bubbles sized by AREA); `axes.minor`/`minor_gridlines` subdivide the ruler (2..9 mantissas
+  on a log axis) and `tick_direction`/`y_tick_rotate` finish it; `invert_x`/`invert_y` turn a
+  scale round and `zero_spine` stands the axis line at 0 with the labels left at the edge;
+  `bands=[{between:[a,b], label}]` on a line fills between two identically-sampled series;
+  `waterfall` (+ `total_label`) walks a running total with dashed connectors and `normalized`
+  turns a stack into shares of 100; `kind="histogram"` takes RAW values and bins them itself
+  (`bins` = a count or explicit edges) into contiguous bars.
 - Still out of scope: statistical transforms, a second y axis, colormaps. If you need one, the
   answer is a different picture, not a hack.
 - `edit_chart(target, data=…)` re-derives the whole plot in place, keeping the group's id,
@@ -3869,7 +3879,7 @@ def reflow(
 def add_chart(
     *,
     document_id: str | None = None,
-    kind: Literal["bar", "line", "donut", "scatter", "sparkline"],
+    kind: Literal["bar", "line", "donut", "scatter", "histogram", "sparkline"],
     data: ops.ChartData,
     x: float | None = None,
     y: float | None = None,
@@ -3894,17 +3904,21 @@ def add_chart(
 
     The shape of `data` depends on `kind`:
       - bar: {categories: [str], series: [{name, values: [float]}], hatch: bool,
-        orientation: "vertical"|"horizontal", stacked: bool, value_labels: bool,
-        stack_total_labels: bool, value_format: {...}, order: "given"|"value_desc"|"value_asc"|
-        "label"|[str]} — one value per category per series; more than one series draws them side
-        by side, or summed when `stacked`.
-      - line: {series: [{name, points: [[x, y]]}], points: bool, area: bool, hatch: bool,
-        marker: "circle"|"square"|"diamond"|"triangle"|"none", marker_size: float,
-        step: "none"|"pre"|"post", value_labels: bool, value_format: {...}}
-      - scatter: {series: [{name, points: [[x, y]]}], marker, marker_size, value_labels,
-        value_format}
+        orientation: "vertical"|"horizontal", stacked: bool, normalized: bool, waterfall: bool,
+        total_label: str, value_labels: bool, stack_total_labels: bool, value_format: {...},
+        order: "given"|"value_desc"|"value_asc"|"label"|[str]} — one value per category per
+        series; more than one series draws them side by side, or summed when `stacked`.
+      - line: {series: [{name, points: [[x, y]], sizes: [float]}], points: bool, area: bool,
+        hatch: bool, marker: "circle"|"square"|"diamond"|"triangle"|"tri_down"|"plus"|"cross"|
+        "star"|"none", marker_size: float, marker_scale: [min_r, max_r], open: bool,
+        markevery: int, step: "none"|"pre"|"post"|"mid", bands: [{between: [name, name], label}],
+        value_labels: bool, value_format: {...}}
+      - scatter: {series: [{name, points: [[x, y]], sizes: [float]}], marker, marker_size,
+        marker_scale, open, value_labels, value_format}
       - donut: {slices: [{label, value}], hatch: bool, slice_labels: bool, center_text: str,
         center_subtext: str, start_angle: float, order, value_format} — values must be positive.
+      - histogram: {values: [float], bins: int|[float], hatch: bool, value_labels: bool,
+        value_format: {...}} — the RAW observations; it bins and counts them itself.
       - sparkline: {values: [float], last_point: bool, extremes: bool, baseline: float} — a bare
         trend line, no axes/ticks/title, 120x32 by default.
 
@@ -3935,9 +3949,13 @@ def add_chart(
             target COUNT or an explicit list of values (out-of-range ones are dropped);
             `tick_format`/`x_tick_format` = {style: "plain"|"percent"|"currency"|"si"|"fixed",
             decimals, prefix, suffix, thousands}; `gridlines: "x"|"y"|"both"|"none"`;
-            `tick_marks` in px; `x_tick_rotate` in degrees (negative reads bottom-left up, and
-            turns whichever axis is along the bottom); `reference_lines` = [{value, label, axis,
-            to, kind}] for thresholds (drawn over the data) and bands (`to` set, drawn behind it).
+            `minor` (subdivisions between majors — 2..9 mantissas on a log axis) with
+            `minor_gridlines`; `tick_marks` in px with `tick_direction: "out"|"in"|"inout"`;
+            `x_tick_rotate`/`y_tick_rotate` in degrees (negative reads bottom-left up, and
+            x_tick_rotate turns whichever axis is along the bottom); `invert_x`/`invert_y` to run
+            a scale backwards; `zero_spine` to stand the category axis LINE at value 0 (the tick
+            labels stay at the plot's edge); `reference_lines` = [{value, label, axis, to, kind}]
+            for thresholds (drawn over the data) and bands (`to` set, drawn behind it).
             Ignored by `donut` and `sparkline`.
         parent: Group/layer id (or name); omit for the document root.
         name: Friendly label for the group.

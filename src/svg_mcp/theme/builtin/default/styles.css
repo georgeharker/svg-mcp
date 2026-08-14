@@ -570,6 +570,31 @@
   fill: none;
 }
 
+/** A MINOR tick mark: the subdivision between two majors, drawn at half the major's length. It
+ * wears `.tick` as well, so it is the same ink by default — the length is what tells the two
+ * apart, because a minor tick is the same ruler at a finer reading and not a different statement.
+ * Lightened here so a dense subdivision does not out-weigh the numbers it sits under. */
+.tick-minor {
+  stroke-opacity: 0.55;
+}
+
+/** A gridline at a MINOR tick. Fainter than the major grid it subdivides — it has to be readable
+ * as spacing without ever competing with the line that carries a label. */
+.gridline-minor {
+  stroke-opacity: 0.5;
+}
+
+/** The dashed rule joining one waterfall bar's end to the next one's start: what says the bars
+ * are one running total rather than five unrelated floats. Dashed and faint, like a reference
+ * line, because it is scenery the bars are read along and not a quantity of its own. */
+.waterfall-connector {
+  stroke: var(--ink);
+  stroke-opacity: 0.45;
+  stroke-width: var(--stroke-width-hairline);
+  stroke-dasharray: 3 2;
+  fill: none;
+}
+
 /** A tick label: the number on the y axis, the category on the x. Small and muted. */
 .tick-label {
   fill: var(--ink-muted);
