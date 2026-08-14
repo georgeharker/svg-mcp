@@ -61,3 +61,42 @@ width into a filled ribbon, with butt/round caps and optional cubic (Catmull-Rom
 `define_arrow_marker` builds an endpoint head from a preset (triangle / barbed / stealth / diamond /
 open / dot); `apply_marker` attaches it at the start, middle, or end. Heads are `orient="auto"`, so
 they follow the path's tangent — note each arrow above points along its curve.
+
+## Diagrams
+
+![A themed box-arrow diagram: services, a datastore, a queue, containers, and routed edges.](img/facade-diagram.png)
+
+Box-arrow diagrams are **declared, not drawn**: `add_diagram_node` places a labeled, themed box
+(kind picks the shape, role picks the style), `add_diagram_edge` connects two nodes *by id* and
+routes itself around the boxes, `add_diagram_container` frames a group by reference. Move a node
+and `reflow` re-routes every edge. `layout_diagram` computes positions outright — grid, tree, or
+layered (Sugiyama) — with pinning for the boxes you've placed by hand. The look comes from a
+[theme](themes.md); switch it (or its dark variant) and the whole diagram restyles.
+
+## Charts
+
+![Bar, line, donut, scatter, histogram, radar, and waterfall charts sharing one theme.](img/facade-charts.png)
+
+`add_chart` renders seven kinds — bar (grouped / stacked / waterfall), line (steps, bands,
+markers), donut, scatter (bubbles), histogram, sparkline, and radar — from data, with
+matplotlib-grade axis control: tick formats, minor ticks, log scales, reference lines, inverted
+axes. Every mark carries the theme's series palette, and each datum stays addressable for
+callouts.
+
+## Legends, callouts, tables
+
+![A legend, an anchored callout, a measured table, and a callout card.](img/facade-annotate.png)
+
+The annotation family: `add_legend` builds its entries by scanning what's actually on the canvas,
+`add_callout` anchors a wrapped note to a node — or to a single chart datum — and re-anchors on
+`reflow`, `add_table` measures its columns and right-aligns numbers, `add_callout_card` is a
+titled, accent-striped panel. All of them dress from the resident theme like everything else.
+
+## Ingesting a graph
+
+![svg-mcp's own module graph, ingested and laid out in one call.](img/facade-architecture.png)
+
+`add_diagram_graph` turns a graph you already have — nodes, edges, groups, as JSON straight from a
+code-index export — into a laid-out, routed, themed diagram in **one call**. The self-portrait
+above is svg-mcp's own module graph: seven `collapse` groups, boxes scaled by symbol count, no
+coordinates anywhere in the input. See [diagrams.md](diagrams.md) for the spec it consumes.
