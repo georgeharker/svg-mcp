@@ -90,10 +90,12 @@ const SVG_MCP_TOOL_VERSION = "0.2.6"
 // ── the diagram-authoring directive ────────────────────────────────
 // Appended to the system prompt so the agent reaches for svg-mcp's tools instead of
 // hand-writing SVG XML (the analogue of the Claude Code plugin's SessionStart
-// additionalContext). Canonical source: CLAUDE.md.example at the repo root
-// (plugins/claude/instructions.txt symlinks it). A release-time `prepack` copies that
-// file to this package's root as instructions.txt (see package.json `prepack`/`files`);
-// we read the copy ONCE here so the published npm package is self-contained without
+// additionalContext). Canonical source: CLAUDE.md.example at the repo root.
+// instructions.txt at this package's root is a committed real copy of it — never a
+// symlink (a ../../ link dangles in install caches that copy only the plugin subtree)
+// — re-synced by scripts/bump-version.sh at every release, with the npm `prepack`
+// copy step kept as a belt for ad-hoc publishes (see package.json `prepack`/`files`).
+// We read the copy ONCE here so the published npm package is self-contained without
 // duplicating the text in source. A dev/unbuilt run (no copy present) falls back to an
 // empty string and simply injects nothing.
 const SVG_DIAGRAM_DIRECTIVE: string = (() => {

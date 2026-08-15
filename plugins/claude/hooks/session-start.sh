@@ -40,6 +40,12 @@ URL="http://127.0.0.1:${PORT}/mcp"
 # hand-writing raw SVG XML. Emitted as SessionStart additionalContext on EVERY exit path
 # (the combiner and missing-binary branches exit early, so a trap is used instead of a
 # tail fall-through), mirroring the sibling cribsheet plugin's instructions.txt pattern.
+# Canonical source: CLAUDE.md.example at the repo root. instructions.txt is a
+# committed COPY of it, re-synced by scripts/bump-version.sh — never a symlink:
+# marketplace installs copy the plugin subtree into a cache with no repo root,
+# where a ../../ symlink dangles and this hook silently emits nothing (that bit
+# mcp-companion 0.10.x; whether an install dereferences or preserves the link is
+# undocumented copy behavior).
 # stdout IS the SessionStart payload, so it must carry exactly ONE JSON object.
 # Warnings go inside it as `systemMessage`: printing them separately produced two
 # concatenated objects and one was silently dropped. (SessionStart stderr is invisible
