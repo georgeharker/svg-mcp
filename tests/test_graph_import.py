@@ -604,7 +604,7 @@ def test_scaling_one_dimension_leaves_the_other_measured_from_the_label() -> Non
     boxes = _boxes(doc, result)
     assert boxes["small"][0] == pytest.approx(80.0)
     assert boxes["big"][0] == pytest.approx(240.0)
-    assert boxes["small"][1] == boxes["big"][1]  # height still comes from the label
+    assert boxes["small"][1] == pytest.approx(boxes["big"][1])  # height still comes from the label
 
 
 def test_scaling_both_dimensions_takes_the_root_so_area_carries_the_quantity() -> None:

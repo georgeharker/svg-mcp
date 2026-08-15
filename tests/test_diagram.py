@@ -549,8 +549,9 @@ def test_nodes_auto_place_by_stacking_under_the_previous_one() -> None:
     second = ops.add_diagram_node(doc, kind="service", label="two")
     third = ops.add_diagram_node(doc, kind="service", label="three")
     assert (first.x, first.y) == (20.0, 20.0)
-    assert second.x == 20.0 and second.y == pytest.approx(first.y + first.h + 24.0)
-    assert third.y == pytest.approx(second.y + second.h + 24.0)
+    # Placed coordinates are stored rounded to 3 decimals; the recomputed sum is not.
+    assert second.x == 20.0 and second.y == pytest.approx(first.y + first.h + 24.0, abs=2e-3)
+    assert third.y == pytest.approx(second.y + second.h + 24.0, abs=2e-3)
 
 
 def test_stacking_is_per_parent() -> None:

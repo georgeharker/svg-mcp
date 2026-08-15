@@ -1440,7 +1440,12 @@ def auto_size(doc: Document, kind: str, label: str, *, shape: str | None = None)
     theme = serving_theme(doc, kind)
     drawn = shape if shape is not None else _shape_for(theme, kind)
     pad = _token(theme, "--pad-node", _DEFAULT_PAD)
-    text_w, text_h = measure_label(label, _label_font(theme), _LABEL_SIZE)
+    # A blank label reserves no text box: measuring "" still yields a full line-height,
+    # so the host's font metrics would leak into what should be exactly the minimum box.
+    if label.strip():
+        text_w, text_h = measure_label(label, _label_font(theme), _LABEL_SIZE)
+    else:
+        text_w, text_h = 0.0, 0.0
     if drawn == "polygon":  # a diamond's inscribed text box is half its extents
         return (
             max(_DIAMOND_MIN_W, text_w * 1.6 + 2 * pad),

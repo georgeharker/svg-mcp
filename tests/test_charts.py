@@ -2524,7 +2524,8 @@ def test_the_zero_spine_stands_on_zero_only_when_zero_is_on_the_axis() -> None:
         for node in _wearing(doc, crossing.ref.id, "default-tick-label")
         if str(node.text or "") == "0"
     )
-    assert float(str(base.get("y1"))) == pytest.approx(float(str(zero.get("y"))))
+    # The tick label's y is serialized at coarser precision than the axis line's y1.
+    assert float(str(base.get("y1"))) == pytest.approx(float(str(zero.get("y"))), abs=1e-2)
     # ...and the reading edge did not move with it: the labels are still down the left side
     _, top, _, height = _plot_box(doc, crossing.ref.id)
     assert top < float(str(base.get("y1"))) < top + height
