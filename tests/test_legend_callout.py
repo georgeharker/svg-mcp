@@ -296,9 +296,7 @@ def test_regenerating_picks_up_a_kind_added_since_the_legend_was_drawn() -> None
 def test_a_hand_written_legend_refuses_to_be_regenerated_over() -> None:
     doc = _doc()
     _scene(doc)
-    placed = ops.add_legend(
-        doc, entries=[LegendItem(label="runs", swatch="service")], x=420, y=40
-    )
+    placed = ops.add_legend(doc, entries=[LegendItem(label="runs", swatch="service")], x=420, y=40)
     with pytest.raises(InvalidArgument, match="nothing to regenerate"):
         ops.edit_legend(doc, placed.ref.id, regenerate=True)
 

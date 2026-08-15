@@ -307,9 +307,7 @@ def test_the_bars_of_one_category_sit_side_by_side_inside_its_band() -> None:
         [float(rect.get("x")) for rect in child if str(rect.tag).endswith("rect")]
         for child in series
     )
-    widths = [
-        float(rect.get("width")) for rect in series[0] if str(rect.tag).endswith("rect")
-    ]
+    widths = [float(rect.get("width")) for rect in series[0] if str(rect.tag).endswith("rect")]
     # Two bars per band, touching: the second starts exactly where the first ends.
     assert second[0] == pytest.approx(first[0] + widths[0])
     # ...and the bands themselves are evenly spaced.
@@ -603,9 +601,7 @@ def test_get_params_hands_back_the_axes_a_chart_was_given() -> None:
 def test_an_auto_placed_chart_stacks_under_the_diagram_node_above_it() -> None:
     doc = _doc()
     node = ops.add_diagram_node(doc, kind="service", label="Auth", x=20, y=20, width=80, height=40)
-    chart = ops.add_chart(
-        doc, kind="sparkline", data=SparklineData(values=[1.0, 2.0, 3.0])
-    )
+    chart = ops.add_chart(doc, kind="sparkline", data=SparklineData(values=[1.0, 2.0, 3.0]))
     assert chart.y > node.y + node.h
     # ...and the next node stacks under the CHART, not back under the node.
     following = ops.add_diagram_node(doc, kind="service", label="Next")
@@ -1053,9 +1049,7 @@ def test_turning_the_x_tick_labels_puts_a_rotate_on_each_of_them() -> None:
     placed = ops.add_chart(
         doc,
         kind="bar",
-        data=BarData(
-            categories=["alpha", "beta"], series=[Series(name="s", values=[1.0, 2.0])]
-        ),
+        data=BarData(categories=["alpha", "beta"], series=[Series(name="s", values=[1.0, 2.0])]),
         axes=AxesSpec(x_tick_rotate=-45),
     )
     labels = _wearing(doc, placed.ref.id, "default-tick-label")
@@ -1100,6 +1094,7 @@ def test_a_theme_that_sets_bigger_tick_type_indents_the_plot_further() -> None:
     small_x = _axis_x(doc, small.ref.id, "metricfree")
     big_x = _axis_x(doc, big.ref.id, "metricfree")
     assert big_x > small_x  # 16px labels are wider than 10px ones, and the margin knows it
+
     # ...which is the same thing as the plot getting narrower, since the box did not change.
     def width(chart_id: str) -> float:
         base = next(
@@ -1188,9 +1183,7 @@ def test_marker_size_is_the_half_extent_it_says_it_is() -> None:
     placed = ops.add_chart(
         doc,
         kind="scatter",
-        data=ScatterData(
-            series=[PointSeries(name="s", points=[(1, 2), (2, 3)])], marker_size=6.0
-        ),
+        data=ScatterData(series=[PointSeries(name="s", points=[(1, 2), (2, 3)])], marker_size=6.0),
     )
     radii = {
         float(node.get("r"))
@@ -1241,9 +1234,7 @@ def test_a_sparkline_can_mark_its_extremes_its_last_point_and_a_baseline() -> No
     placed = ops.add_chart(
         doc,
         kind="sparkline",
-        data=SparklineData(
-            values=[3, 9, 4, 6], last_point=True, extremes=True, baseline=5.0
-        ),
+        data=SparklineData(values=[3, 9, 4, 6], last_point=True, extremes=True, baseline=5.0),
     )
     tags = _tags_under(doc, placed.ref.id)
     assert tags.count("circle") == 3  # the min, the max, and the last value
@@ -1598,10 +1589,14 @@ def test_value_labels_live_outside_the_window_the_data_is_clipped_to() -> None:
 def test_a_line_and_a_scatter_write_their_values_above_their_marks() -> None:
     doc = _doc()
     for kind, data in (
-        ("line", LineData(series=[PointSeries(name="s", points=[(0, 1), (1, 4)])],
-                          value_labels=True)),
-        ("scatter", ScatterData(series=[PointSeries(name="s", points=[(0, 1), (1, 4)])],
-                                value_labels=True)),
+        (
+            "line",
+            LineData(series=[PointSeries(name="s", points=[(0, 1), (1, 4)])], value_labels=True),
+        ),
+        (
+            "scatter",
+            ScatterData(series=[PointSeries(name="s", points=[(0, 1), (1, 4)])], value_labels=True),
+        ),
     ):
         placed = ops.add_chart(doc, kind=kind, data=data, x=0, y=0)  # type: ignore[arg-type]
         labels = _labels_at(doc, placed.ref.id)
@@ -1639,8 +1634,13 @@ def test_a_reference_line_lands_on_the_value_it_names_on_a_log_axis_too() -> Non
     placed = _bar_chart(
         doc,
         [1.0, 100.0],
-        AxesSpec(scale="log", y_min=1, y_max=100, ticks=[1, 10, 100],
-                 reference_lines=[ReferenceLine(value=10)]),
+        AxesSpec(
+            scale="log",
+            y_min=1,
+            y_max=100,
+            ticks=[1, 10, 100],
+            reference_lines=[ReferenceLine(value=10)],
+        ),
     )
     line = next(node for node in _references(doc, placed.ref.id) if str(node.tag).endswith("line"))
     # Halfway up a two-decade axis, which is what makes it a log scale and not a linear one.
@@ -1653,9 +1653,7 @@ def test_a_reference_label_is_right_aligned_at_the_end_of_its_line() -> None:
     placed = _bar_chart(
         doc, [10.0, 73.0], AxesSpec(reference_lines=[ReferenceLine(value=60, label="target")])
     )
-    label = next(
-        node for node in _wearing(doc, placed.ref.id, "default-reference-label")
-    )
+    label = next(node for node in _wearing(doc, placed.ref.id, "default-reference-label"))
     x, top, w, _ = _plot_box(doc, placed.ref.id)
     assert str(label.text) == "target"
     assert "text-anchor:end" in str(label.get("style")).replace(" ", "")
@@ -1825,9 +1823,7 @@ def _stacked(
 
 def test_a_stacked_segment_starts_where_the_one_below_it_ended() -> None:
     doc = _doc()
-    placed = _stacked(
-        doc, [Series(name="one", values=[10.0]), Series(name="two", values=[15.0])]
-    )
+    placed = _stacked(doc, [Series(name="one", values=[10.0]), Series(name="two", values=[15.0])])
     lower = _series_rects(doc, placed.ref.id, 0)[0]
     upper = _series_rects(doc, placed.ref.id, 1)[0]
     assert upper[1] + upper[3] == pytest.approx(lower[1])  # they touch, and do not overlap
@@ -1836,9 +1832,7 @@ def test_a_stacked_segment_starts_where_the_one_below_it_ended() -> None:
 
 def test_a_stack_scales_its_axis_to_the_totals_and_not_to_the_parts() -> None:
     doc = _doc()
-    stacked = _stacked(
-        doc, [Series(name="one", values=[60.0]), Series(name="two", values=[60.0])]
-    )
+    stacked = _stacked(doc, [Series(name="one", values=[60.0]), Series(name="two", values=[60.0])])
     grouped = _bar_chart(doc, [60.0])
     # The stack is 120 tall, so the axis has to reach past 120 — where the same numbers drawn
     # side by side need an axis of 60.
@@ -1848,9 +1842,7 @@ def test_a_stack_scales_its_axis_to_the_totals_and_not_to_the_parts() -> None:
 
 def test_a_negative_series_stacks_downward_from_zero() -> None:
     doc = _doc()
-    placed = _stacked(
-        doc, [Series(name="up", values=[10.0]), Series(name="down", values=[-5.0])]
-    )
+    placed = _stacked(doc, [Series(name="up", values=[10.0]), Series(name="down", values=[-5.0])])
     up = _series_rects(doc, placed.ref.id, 0)[0]
     down = _series_rects(doc, placed.ref.id, 1)[0]
     assert down[1] == pytest.approx(up[1] + up[3])  # it hangs off zero, under the positive bar
@@ -1990,18 +1982,14 @@ def test_ordering_by_a_category_the_chart_has_not_got_is_refused_by_name() -> No
         ops.add_chart(
             doc,
             kind="bar",
-            data=BarData(
-                categories=["a"], series=[Series(name="s", values=[1.0])], order=["nope"]
-            ),
+            data=BarData(categories=["a"], series=[Series(name="s", values=[1.0])], order=["nope"]),
             x=0,
             y=0,
         )
 
 
 def _polyline_points(doc: Document, chart_id: str) -> list[tuple[float, float]]:
-    line = next(
-        node for node in doc.resolve(chart_id).iter() if str(node.tag).endswith("polyline")
-    )
+    line = next(node for node in doc.resolve(chart_id).iter() if str(node.tag).endswith("polyline"))
     pairs = str(line.get("points")).replace(",", " ").split()
     return [(float(pairs[i]), float(pairs[i + 1])) for i in range(0, len(pairs), 2)]
 
@@ -2039,8 +2027,9 @@ def test_an_area_wash_follows_the_staircase_and_not_the_slope() -> None:
     placed = ops.add_chart(
         doc,
         kind="line",
-        data=LineData(series=[PointSeries(name="s", points=[(0, 1), (1, 4)])], step="post",
-                      area=True),
+        data=LineData(
+            series=[PointSeries(name="s", points=[(0, 1), (1, 4)])], step="post", area=True
+        ),
         x=0,
         y=0,
     )
@@ -2963,9 +2952,7 @@ def test_a_negative_radius_is_refused_and_the_axis_it_is_on_is_named() -> None:
     assert "'b'" in message and "cannot be negative" in message
 
 
-def _radar(
-    doc: Document, axes: list[str] | None = None, **kwargs: object
-) -> ops.PlacedChart:
+def _radar(doc: Document, axes: list[str] | None = None, **kwargs: object) -> ops.PlacedChart:
     names = axes if axes is not None else ["n", "e", "s", "w"]
     return ops.add_chart(
         doc,
@@ -2997,9 +2984,7 @@ def _wheel(doc: Document, chart_id: str) -> tuple[tuple[float, float], float]:
 
 def _polygons(doc: Document, chart_id: str, class_name: str) -> list[BaseElement]:
     return [
-        node
-        for node in _wearing(doc, chart_id, class_name)
-        if str(node.tag).endswith("polygon")
+        node for node in _wearing(doc, chart_id, class_name) if str(node.tag).endswith("polygon")
     ]
 
 
@@ -3076,9 +3061,7 @@ def test_a_profile_is_a_closed_polygon_of_one_corner_per_axis() -> None:
     centre, radius = _wheel(doc, placed.ref.id)
     first = _corners(outlines[0])
     assert len(first) == 6
-    assert [math.dist(centre, corner) for corner in first] == pytest.approx(
-        [radius] * 6, abs=0.01
-    )
+    assert [math.dist(centre, corner) for corner in first] == pytest.approx([radius] * 6, abs=0.01)
     # the second series is a fifth of the first, so its polygon is a fifth of the way out
     assert [math.dist(centre, corner) for corner in _corners(outlines[1])] == pytest.approx(
         [radius / 5.0] * 6, abs=0.01
@@ -3113,7 +3096,8 @@ def test_the_ruler_is_written_once_up_the_twelve_o_clock_spoke() -> None:
     ruler = {
         str(node.text): float(str(node.get("y")))
         for node in ticks
-        if float(str(node.get("x"))) < centre[0] and str(node.get("y")) is not None
+        if float(str(node.get("x"))) < centre[0]
+        and str(node.get("y")) is not None
         and abs(float(str(node.get("x"))) - centre[0]) < 5.0
     }
     assert sorted(ruler) == ["10", "5"]
@@ -3166,7 +3150,8 @@ def test_pinning_the_rim_of_a_drawn_radar_shrinks_what_the_data_reaches() -> Non
         if str(node.tag).endswith("polygon") and "fill:none" in str(node.get("style"))
     )
     assert [math.dist(centre, corner) for corner in _corners(outline)] == pytest.approx(
-        [radius / 2.0] * 4, abs=0.01  # ten of a rim pinned at twenty
+        [radius / 2.0] * 4,
+        abs=0.01,  # ten of a rim pinned at twenty
     )
     assert _wheel(doc, loose.ref.id)[1] == pytest.approx(radius)  # the same wheel, either way
 
@@ -3193,9 +3178,7 @@ def test_a_bar_and_a_radar_are_told_apart_by_what_they_name_their_columns() -> N
         ops.add_chart(
             doc,
             kind="bar",
-            data=RadarData(
-                axes=["a", "b", "c"], series=[Series(name="s", values=[1.0, 2.0, 3.0])]
-            ),
+            data=RadarData(axes=["a", "b", "c"], series=[Series(name="s", values=[1.0, 2.0, 3.0])]),
         )
 
 

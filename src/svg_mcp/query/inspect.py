@@ -230,6 +230,7 @@ _PARAM_SHAPES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("data-pill", "pill", ("x", "y", "width", "height", "smoothness")),
 )
 
+
 # Facade groups (ops.diagram, ops.chart, ops.annotate). Their spec IS the node — read it back to
 # see what an add_diagram_* / add_chart / add_table call means. A chart's `data` and a table's
 # `rows` are the things too structured to flatten, so they come back as the objects they went in
@@ -350,10 +351,7 @@ def _read_facade(element: inkex.BaseElement) -> tuple[str, ShapeParams] | None:
             spec = json.loads(raw)
             groups = (facade.text, facade.numbers, facade.lists, facade.json, facade.bools)
             if any(
-                key not in spec
-                for group in groups
-                for key in group
-                if key not in facade.optional
+                key not in spec for group in groups for key in group if key not in facade.optional
             ):
                 return None  # a structural key is missing: this spec is not readable
             params: ShapeParams = {key: str(spec[key]) for key in facade.text if key in spec}

@@ -31,10 +31,18 @@ EXPORT_NODES: list[Wire] = [
     {"id": "src/svg_mcp/ops/themes.py", "file": "src/svg_mcp/ops/themes.py", "symbols": 92},
 ]
 EXPORT_EDGES: list[Wire] = [
-    {"from": "src/svg_mcp/ops/annotate.py", "to": "src/svg_mcp/ops/diagram.py",
-     "kind": "calls", "weight": 49},
-    {"from": "src/svg_mcp/ops/diagram.py", "to": "src/svg_mcp/ops/themes.py",
-     "kind": "calls", "weight": 12},
+    {
+        "from": "src/svg_mcp/ops/annotate.py",
+        "to": "src/svg_mcp/ops/diagram.py",
+        "kind": "calls",
+        "weight": 49,
+    },
+    {
+        "from": "src/svg_mcp/ops/diagram.py",
+        "to": "src/svg_mcp/ops/themes.py",
+        "kind": "calls",
+        "weight": 12,
+    },
 ]
 
 
@@ -424,10 +432,14 @@ def test_dotted_fqname_ids_are_split_on_the_dot_not_read_as_a_file_extension() -
             {"id": "svg_mcp.model.errors.InvalidArgument", "kind": "class"},
         ),
         edges=_edges(
-            {"from": "svg_mcp.ops.graph.add_diagram_graph",
-             "to": "svg_mcp.ops.graph._shared_prefix"},
-            {"from": "svg_mcp.ops.graph.add_diagram_graph",
-             "to": "svg_mcp.model.errors.InvalidArgument"},
+            {
+                "from": "svg_mcp.ops.graph.add_diagram_graph",
+                "to": "svg_mcp.ops.graph._shared_prefix",
+            },
+            {
+                "from": "svg_mcp.ops.graph.add_diagram_graph",
+                "to": "svg_mcp.model.errors.InvalidArgument",
+            },
         ),
     )
     # A symbol export's node kinds are a taxonomy too, and they default like an edge's does.
@@ -757,9 +769,7 @@ def test_the_same_id_declared_twice_is_refused_before_anything_is_drawn() -> Non
 def test_a_default_kind_no_theme_serves_is_the_caller_s_error_and_raises() -> None:
     doc = _doc()
     with pytest.raises(InvalidArgument, match="no theme defines a style"):
-        ops.add_diagram_graph(
-            doc, nodes=_nodes({"id": "a"}), edges=[], default_node_kind="bureau"
-        )
+        ops.add_diagram_graph(doc, nodes=_nodes({"id": "a"}), edges=[], default_node_kind="bureau")
     assert not _node_names(doc)
 
 

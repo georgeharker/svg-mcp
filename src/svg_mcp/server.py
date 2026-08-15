@@ -3460,9 +3460,7 @@ def edit_diagram_node(
     Returns:
         {id, tag, name, remeasured, shape_unchanged}.
     """
-    result = ops.edit_diagram_node(
-        _doc(document_id), target, label=label, kind=kind, pinned=pinned
-    )
+    result = ops.edit_diagram_node(_doc(document_id), target, label=label, kind=kind, pinned=pinned)
     return {
         **result.ref.as_dict(),
         "remeasured": result.remeasured,

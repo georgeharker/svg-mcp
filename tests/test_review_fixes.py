@@ -691,9 +691,7 @@ def test_two_export_import_load_cycles_do_not_grow_the_stylesheet() -> None:
 def test_a_hand_authored_rule_survives_every_theme_move_around_it() -> None:
     doc = _doc()
     ops.load_theme(doc, "house", search_paths=[FIXTURES])
-    exported = export_svg(doc).replace(
-        "</style>", ".hand-authored { fill:#abcdef }</style>", 1
-    )
+    exported = export_svg(doc).replace("</style>", ".hand-authored { fill:#abcdef }</style>", 1)
 
     reopened = ops.load_svg_document(svg=exported)
     assert ".hand-authored" in reopened.imported_css
@@ -866,12 +864,8 @@ def test_an_explicit_callout_position_means_what_it_means_for_a_rect() -> None:
     doc = _doc(600, 400)
     layer = ops.create_group(doc, name="shifted", transform="translate(100,50)")
     node = ops.add_diagram_node(doc, kind="service", label="API", x=20, y=20, parent=layer.id)
-    callout = ops.add_callout(
-        doc, target=node.ref.id, text="a note", parent=layer.id, x=250, y=150
-    )
-    card = next(
-        child for child in doc.resolve(callout.ref.id) if str(child.TAG) == "rect"
-    )
+    callout = ops.add_callout(doc, target=node.ref.id, text="a note", parent=layer.id, x=250, y=150)
+    card = next(child for child in doc.resolve(callout.ref.id) if str(child.TAG) == "rect")
     box = _box(doc, str(card.get_id()))
     assert abs(box[0] - 350.0) <= 0.5 and abs(box[1] - 200.0) <= 0.5
 
@@ -901,9 +895,7 @@ def test_a_container_refits_around_its_members_after_its_rect_is_translated() ->
     doc = _doc(600, 400)
     one = ops.add_diagram_node(doc, kind="service", label="A", x=20, y=20)
     two = ops.add_diagram_node(doc, kind="service", label="B", x=250, y=20)
-    placed = ops.add_diagram_container(
-        doc, members=[one.ref.id, two.ref.id], label="Zone"
-    )
+    placed = ops.add_diagram_container(doc, members=[one.ref.id, two.ref.id], label="Zone")
     rect = next(child for child in doc.resolve(placed.ref.id) if str(child.TAG) == "rect")
 
     ops.translate_node(doc, str(rect.get_id()), dx=40, dy=30)

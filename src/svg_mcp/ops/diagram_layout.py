@@ -340,9 +340,7 @@ def _break_cycles(
     return back
 
 
-def _longest_path_ranks(
-    order: Sequence[str], edges: Sequence[tuple[str, str]]
-) -> dict[str, int]:
+def _longest_path_ranks(order: Sequence[str], edges: Sequence[tuple[str, str]]) -> dict[str, int]:
     """Longest-path layering: sources at rank 0, everyone else one past their deepest source."""
     successors: dict[str, list[str]] = {node_id: [] for node_id in order}
     indegree = dict.fromkeys(order, 0)
@@ -384,9 +382,7 @@ def _barycenter_sweep(
                 for other in neighbours[node_id]
                 if rank[other] == adjacent and other in reference
             ]
-            keys[node_id] = (
-                sum(over_there) / len(over_there) if over_there else float(position)
-            )
+            keys[node_id] = sum(over_there) / len(over_there) if over_there else float(position)
         layers[index].sort(key=lambda node_id: keys[node_id])
 
 
@@ -757,16 +753,11 @@ def layout_layered(
     # Where a lane crosses each rank: the middle of that rank's band, so the waypoint sits level
     # with the nodes it is threading past rather than in the gap on one side of them.
     band_centers = [
-        offset + max(band, default=0.0) / 2.0
-        for offset, band in zip(offsets, bands, strict=True)
+        offset + max(band, default=0.0) / 2.0 for offset, band in zip(offsets, bands, strict=True)
     ]
 
     holds = pinned or {}
-    held = {
-        node_id: _axes(at, direction)[1]
-        for node_id, at in holds.items()
-        if node_id in rank
-    }
+    held = {node_id: _axes(at, direction)[1] for node_id, at in holds.items() if node_id in rank}
     cross_at = _pack_ranks(
         layers,
         slots,

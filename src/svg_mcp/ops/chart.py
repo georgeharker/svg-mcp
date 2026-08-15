@@ -573,9 +573,7 @@ class RadarData(BaseModel):
         return self
 
 
-ChartData = (
-    BarData | LineData | ScatterData | DonutData | HistogramData | SparklineData | RadarData
-)
+ChartData = BarData | LineData | ScatterData | DonutData | HistogramData | SparklineData | RadarData
 """What a chart is drawn FROM. Which member is valid is decided by the chart's ``kind``."""
 
 ChartDataModel = (
@@ -619,9 +617,7 @@ def parse_chart_data(kind: ChartKind, data: ChartData) -> ChartData:
     try:
         return model.model_validate(data.model_dump(exclude_defaults=True))
     except ValidationError as exc:
-        raise InvalidArgument(
-            f"this data does not fit a {kind} chart: {exc}"
-        ) from exc
+        raise InvalidArgument(f"this data does not fit a {kind} chart: {exc}") from exc
 
 
 # --- the axes model ----------------------------------------------------------
@@ -1224,9 +1220,7 @@ def radar_anchor(angle: float) -> str:
 # --- ordering, stacking, steps and the furniture ------------------------------
 
 
-def order_indices(
-    labels: Sequence[str], keys: Sequence[float], order: CategoryOrder
-) -> list[int]:
+def order_indices(labels: Sequence[str], keys: Sequence[float], order: CategoryOrder) -> list[int]:
     """The permutation ``order`` asks for, as indices into ``labels``. Pure.
 
     ``value_*`` sorts by ``keys`` (stably, so equal values keep their given order) and ``label``
@@ -1421,9 +1415,7 @@ def label_centre(
     return end - outward * (gap + extent / 2.0)
 
 
-def reference_extent(
-    value: float, to: float | None, scale: Scale
-) -> tuple[float, float] | None:
+def reference_extent(value: float, to: float | None, scale: Scale) -> tuple[float, float] | None:
     """What a reference occupies on ``scale``, in data units, or None if it draws nothing. Pure.
 
     A LINE outside the axis is DROPPED — it is furniture, and furniture jammed against the frame
@@ -1754,9 +1746,7 @@ def _text(
     element.set("y", _num(at[1]))
     element.text = content
     style: Style = {"text-anchor": anchor, "dominant-baseline": baseline}
-    _part(
-        doc, element, prefix="text", category="text", parent=parent, style=style, classes=classes
-    )
+    _part(doc, element, prefix="text", category="text", parent=parent, style=style, classes=classes)
     if rotate is not None:
         element.set("transform", f"rotate({_num(rotate)} {_num(at[0])} {_num(at[1])})")
 
@@ -2020,8 +2010,7 @@ def marker_radii(
     span = high - low
     return [
         math.sqrt(
-            min_r**2
-            + (1.0 if abs(span) <= _EPS else (size - low) / span) * (max_r**2 - min_r**2)
+            min_r**2 + (1.0 if abs(span) <= _EPS else (size - low) / span) * (max_r**2 - min_r**2)
         )
         for size in sizes
     ]
@@ -2294,8 +2283,7 @@ def _bar_layout(spec: ChartSpec, *, font: str, sizes: Sizes) -> BarLayout:
     segments: list[tuple[Segment, ...]]
     if data.waterfall:
         segments = [
-            (piece,)
-            for piece in waterfall_segments(values[0], total=data.total_label is not None)
+            (piece,) for piece in waterfall_segments(values[0], total=data.total_label is not None)
         ]
         if data.total_label is not None:
             # The net total is one more bar, and one more addressable datum: giving it the index
@@ -2650,9 +2638,7 @@ def _donut_layout(spec: ChartSpec, *, hole: float, font: str, sizes: Sizes) -> D
         labels=tuple(piece.label for piece in pieces),
         values=tuple(piece.value for piece in pieces),
         order=tuple(order),
-        angles=tuple(
-            donut_angles([piece.value for piece in pieces], data.start_angle)
-        ),
+        angles=tuple(donut_angles([piece.value for piece in pieces], data.start_angle)),
     )
 
 
@@ -2775,9 +2761,7 @@ def _draw_references(
         extent = reference_extent(reference.value, reference.to, scale)
         if extent is None:
             continue
-        at = [
-            (plot.map_x(edge, scale) if along_x else plot.map_y(edge, scale)) for edge in extent
-        ]
+        at = [(plot.map_x(edge, scale) if along_x else plot.map_y(edge, scale)) for edge in extent]
         near, far = min(at), max(at)
         classes = _hooks(doc, theme, reference.kind)
         if bands:
@@ -3042,9 +3026,11 @@ def _draw_bar_labels(
                 if room < _extent(text):
                     continue
                 middle = layout.map_value(piece.middle)
-                if total_at is not None and abs(middle - total_at) < (
-                    _extent(text) + total_room
-                ) / 2.0 + sizes.gap / 2.0:
+                if (
+                    total_at is not None
+                    and abs(middle - total_at)
+                    < (_extent(text) + total_room) / 2.0 + sizes.gap / 2.0
+                ):
                     continue
                 _write(text, middle, along)
                 continue
@@ -3502,7 +3488,13 @@ def _draw_donut(
         )
         if data.slice_labels:
             _draw_slice_label(
-                doc, wedge_id, theme, layout, index, value=value, fmt=data.value_format,
+                doc,
+                wedge_id,
+                theme,
+                layout,
+                index,
+                value=value,
+                fmt=data.value_format,
                 sizes=sizes,
             )
     _draw_donut_centre(doc, group, theme, layout, data, sizes=sizes, font=font)

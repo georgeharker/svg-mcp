@@ -330,9 +330,10 @@ def test_a_label_leaves_the_segment_that_runs_through_a_box() -> None:
     plain = place_label(points, size, LabelContext())
     at, dy = place_label(points, size, LabelContext(boxes=(blocker,)))
     assert (at, dy) != plain
-    assert _rect_of(at, dy, size).x >= blocker.x + blocker.w or _rect_of(
-        at, dy, size
-    ).y >= blocker.y + blocker.h
+    assert (
+        _rect_of(at, dy, size).x >= blocker.x + blocker.w
+        or _rect_of(at, dy, size).y >= blocker.y + blocker.h
+    )
 
 
 def test_a_segment_shorter_than_the_label_is_not_a_candidate() -> None:
@@ -649,8 +650,9 @@ def test_a_node_spec_round_trips_through_get_params() -> None:
 
 def test_a_pinned_node_round_trips_through_get_params() -> None:
     doc = _doc()
-    placed = ops.add_diagram_node(doc, kind="service", label="Fixed", width=80, height=40,
-                                  pinned=True)
+    placed = ops.add_diagram_node(
+        doc, kind="service", label="Fixed", width=80, height=40, pinned=True
+    )
     params = get_params(doc, placed.ref.id)["params"]
     assert isinstance(params, dict)
     assert params["pinned"] is True
@@ -901,8 +903,9 @@ def _through(d: str, at: Point) -> bool:
         span = math.dist(start, end)
         if span <= 1e-9:
             continue
-        along = ((at[0] - start[0]) * (end[0] - start[0])
-                 + (at[1] - start[1]) * (end[1] - start[1])) / span**2
+        along = (
+            (at[0] - start[0]) * (end[0] - start[0]) + (at[1] - start[1]) * (end[1] - start[1])
+        ) / span**2
         held = min(1.0, max(0.0, along))
         nearest = (start[0] + held * (end[0] - start[0]), start[1] + held * (end[1] - start[1]))
         if _close(nearest, at):

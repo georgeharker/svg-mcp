@@ -491,8 +491,9 @@ def _spline_path(points: Sequence[Point], sa: Side, sb: Side) -> str:
     """
     na, nb = _NORMALS[sa], _NORMALS[sb]
     tangents: list[Point] = [na]
-    tangents.extend(_towards(before, after) for before, after in zip(points, points[2:],
-                                                                     strict=False))
+    tangents.extend(
+        _towards(before, after) for before, after in zip(points, points[2:], strict=False)
+    )
     tangents.append((-nb[0], -nb[1]))
     parts = [f"M {_pair(points[0])}"]
     for index, (start, end) in enumerate(zip(points, points[1:], strict=False)):
@@ -531,9 +532,7 @@ def draw_route(
 ) -> str:
     """Path data for a settled polyline, in whichever of the three styles was asked for."""
     if route == "straight":
-        return " ".join(
-            [f"M {_pair(points[0])}", *(f"L {_pair(point)}" for point in points[1:])]
-        )
+        return " ".join([f"M {_pair(points[0])}", *(f"L {_pair(point)}" for point in points[1:])])
     if route == "spline":
         return _spline_path(points, sa, sb)
     return rounded_path(points, radius)
@@ -688,9 +687,7 @@ def label_candidates(points: Sequence[Point], size: Point) -> list[tuple[Point, 
     return out
 
 
-def place_label(
-    points: Sequence[Point], size: Point, context: LabelContext
-) -> tuple[Point, float]:
+def place_label(points: Sequence[Point], size: Point, context: LabelContext) -> tuple[Point, float]:
     """Where an edge's label goes and by how much it is nudged: the cheapest candidate.
 
     Deterministic by construction — the candidates are generated in a fixed order and the winner
@@ -794,9 +791,7 @@ def collinear_runs(routes: Mapping[str, Sequence[Point]]) -> list[Corridor]:
     return out
 
 
-def corridor_groups(
-    runs: Sequence[Corridor], tol: float = _CORRIDOR_TOL
-) -> list[list[Corridor]]:
+def corridor_groups(runs: Sequence[Corridor], tol: float = _CORRIDOR_TOL) -> list[list[Corridor]]:
     """The runs of DIFFERENT edges that share a corridor, grouped; groups of one are dropped.
 
     Sharing means the same axis, the same cross-axis coordinate within ``tol``, and intervals
@@ -879,9 +874,7 @@ def _no_worse(
     twin would leave the reader with one line through the box instead of two. What the offset
     must never do is take a run that was clear and put it through a node.
     """
-    return not (
-        _run_offends(shifted, run, boxes) - _run_offends(before, run, boxes)
-    )
+    return not (_run_offends(shifted, run, boxes) - _run_offends(before, run, boxes))
 
 
 def separate_corridors(
@@ -1051,9 +1044,7 @@ def read_edge_spec(element: BaseElement) -> EdgeSpec | None:
             themed=bool(spec.get("themed", True)),
             # An empty list reads as "no pinned route" — that is what clearing one writes, and
             # what an edge that never had one means.
-            waypoints=(
-                None if not pinned else tuple((float(x), float(y)) for x, y in pinned)
-            ),
+            waypoints=(None if not pinned else tuple((float(x), float(y)) for x, y in pinned)),
         )
     except (ValueError, TypeError, KeyError):
         return None
@@ -1387,9 +1378,7 @@ def _set_label(
 
 def _stackable(parent: BaseElement) -> Iterator[BaseElement]:
     return (
-        child
-        for child in parent
-        if any(child.get(attr) is not None for attr in _STACKABLE_ATTRS)
+        child for child in parent if any(child.get(attr) is not None for attr in _STACKABLE_ATTRS)
     )
 
 
@@ -1776,13 +1765,12 @@ def _bounds(points: Sequence[Point], margin: Point) -> Box:
 
 
 def _touches(a: Box, b: Box) -> bool:
-    return (
-        a.x <= b.x + b.w and b.x <= a.x + a.w and a.y <= b.y + b.h and b.y <= a.y + a.h
-    )
+    return a.x <= b.x + b.w and b.x <= a.x + a.w and a.y <= b.y + b.h and b.y <= a.y + a.h
 
 
-def _write_route(doc: Document, leg: _Leg, points: Sequence[Point], label_at: Point,
-                 label_dy: float) -> None:
+def _write_route(
+    doc: Document, leg: _Leg, points: Sequence[Point], label_at: Point, label_dy: float
+) -> None:
     """Draw one settled route and put its label where the scorer said it should go."""
     theme = serving_theme(doc, leg.spec.kind)
     drawn = draw_route(
@@ -2391,9 +2379,7 @@ def edit_diagram_container(
     elif label is not None:
         box = _container_box(group)
         if box is not None:
-            _set_container_label(
-                doc, group, updated.label, box, _container_pad(doc, updated.kind)
-            )
+            _set_container_label(doc, group, updated.label, box, _container_pad(doc, updated.kind))
     return ContainerEdit(
         ref=NodeRef(id=str(group.get_id()), tag=str(group.TAG), name=getattr(group, "label", None)),
         members=list(current),

@@ -134,8 +134,9 @@ def passes_through(points: Sequence[Point], at: Point, tolerance: float) -> bool
         if span <= 1e-12:
             near = start
         else:
-            along = ((at[0] - start[0]) * (end[0] - start[0])
-                     + (at[1] - start[1]) * (end[1] - start[1])) / span**2
+            along = (
+                (at[0] - start[0]) * (end[0] - start[0]) + (at[1] - start[1]) * (end[1] - start[1])
+            ) / span**2
             held = min(1.0, max(0.0, along))
             near = (start[0] + held * (end[0] - start[0]), start[1] + held * (end[1] - start[1]))
         if math.dist(near, at) <= tolerance:
@@ -179,8 +180,9 @@ def edges_avoid_boxes(doc: Document) -> list[str]:
         if path is None:
             continue
         points = path_points(str(path.get("d")))
-        obstacles = [box for node_id, box in boxes.items() if node_id not in (spec.source,
-                                                                              spec.target)]
+        obstacles = [
+            box for node_id, box in boxes.items() if node_id not in (spec.source, spec.target)
+        ]
         if any(
             _enters(start, end, box)
             for start, end in zip(points, points[1:], strict=False)
@@ -195,9 +197,7 @@ def edges_avoid_boxes(doc: Document) -> list[str]:
 
 def test_a_grid_defaults_to_a_square_of_columns_and_fills_row_major() -> None:
     nodes = [LayoutNode(id="wide", w=80.0, h=30.0), *_nodes("b", "c", "d", "e", w=40.0, h=20.0)]
-    placement = layout_grid(
-        nodes, spacing_main=10.0, spacing_cross=5.0, origin_x=0.0, origin_y=0.0
-    )
+    placement = layout_grid(nodes, spacing_main=10.0, spacing_cross=5.0, origin_x=0.0, origin_y=0.0)
     # 5 nodes → ceil(sqrt(5)) = 3 columns, cells sized to the largest node (80 x 30).
     assert placement.ranks == 2
     assert placement.positions["wide"] == (0.0, 0.0)
@@ -385,6 +385,7 @@ def test_nodes_sharing_a_container_are_pulled_together_within_their_rank() -> No
         origin_x=0.0,
         origin_y=0.0,
     )
+
     # The rank the container constrains, read in cross order. Root is left out of the comparison
     # because it is not in that rank: the coordinate pass centers it on its children's median, so
     # WHERE it sorts relative to them is a fact about parents, not about containers.
@@ -567,8 +568,10 @@ def _staircase(depth: int, width: int = 3) -> tuple[list[LayoutNode], list[tuple
     """
     letters = "abcdefgh"[:depth]
     nodes = [LayoutNode(id=f"{rank}{i}", w=80.0, h=40.0) for rank in letters for i in range(width)]
-    edges = [(f"{rank}{width - 1}", f"{after}0") for rank, after in zip(letters, letters[1:],
-                                                                       strict=False)]
+    edges = [
+        (f"{rank}{width - 1}", f"{after}0")
+        for rank, after in zip(letters, letters[1:], strict=False)
+    ]
     edges += [
         (f"{rank}{i}", f"{after}{i}")
         for rank, after in zip(letters, letters[1:], strict=False)
@@ -596,9 +599,9 @@ def _spreads(
         )
         for members in ranks.values()
     ]
-    total = max(
-        placement[node.id][1] + node.h for node in nodes
-    ) - min(placement[node.id][1] for node in nodes)
+    total = max(placement[node.id][1] + node.h for node in nodes) - min(
+        placement[node.id][1] for node in nodes
+    )
     return per_rank, total
 
 
@@ -788,11 +791,7 @@ def test_explicit_spacing_overrides_the_theme() -> None:
 def test_a_layout_pass_reroutes_the_edges_it_moved_the_nodes_of() -> None:
     doc = _doc()
     ids = _diamond(doc)
-    edge = next(
-        child
-        for child in doc.svg
-        if ids[0] in str(child.get("data-diagram-edge") or "")
-    )
+    edge = next(child for child in doc.svg if ids[0] in str(child.get("data-diagram-edge") or ""))
     before = str(edge[0].get("d"))
     ops.layout_diagram(doc)
     assert str(edge[0].get("d")) != before
@@ -817,8 +816,9 @@ def test_a_layout_pass_refits_the_containers_around_what_it_moved() -> None:
 
 def test_scope_limits_the_layout_to_one_parent_s_direct_children() -> None:
     doc = _doc()
-    outside = ops.add_diagram_node(doc, kind="service", label="out", x=500, y=500, width=80,
-                                   height=40)
+    outside = ops.add_diagram_node(
+        doc, kind="service", label="out", x=500, y=500, width=80, height=40
+    )
     group = ops.create_group(doc, name="col")
     inside = _diamond(doc, parent=group.id)
     result = ops.layout_diagram(doc, scope=group.id)
@@ -911,9 +911,7 @@ def test_pulling_shared_corridors_apart_never_walks_a_route_into_a_box() -> None
 def test_a_pinned_route_wins_over_the_lane_the_layout_would_have_used() -> None:
     doc = _doc()
     ids = _chain(doc, 4)
-    long_edge = ops.add_diagram_edge(
-        doc, source=ids[0], target=ids[3], waypoints=[(300.0, 300.0)]
-    )
+    long_edge = ops.add_diagram_edge(doc, source=ids[0], target=ids[3], waypoints=[(300.0, 300.0)])
     ops.layout_diagram(doc)
     d = str(doc.resolve(long_edge.ref.id)[0].get("d"))
     # It still goes where it was told, not down the lane the layout reserved for it (which runs
@@ -1039,11 +1037,25 @@ def test_lanes_charge_the_lane_pitch_not_the_node_gap() -> None:
     # lane pitch. Observed before the fix: 3752u wide where 792u was right.
     nodes = _nodes("a", "b", "c", "d", "e", "f", w=60.0, h=30.0)
     # a fans out to everything two ranks down: four rank-spanning edges thread rank 1.
-    edges = [("a", "b"), ("b", "c"), ("a", "d"), ("a", "e"), ("a", "f"),
-             ("b", "d"), ("b", "e"), ("b", "f")]
+    edges = [
+        ("a", "b"),
+        ("b", "c"),
+        ("a", "d"),
+        ("a", "e"),
+        ("a", "f"),
+        ("b", "d"),
+        ("b", "e"),
+        ("b", "f"),
+    ]
     placement = layout_layered(
-        nodes, edges, {}, direction="TB",
-        spacing_main=90.0, spacing_cross=40.0, origin_x=0.0, origin_y=0.0,
+        nodes,
+        edges,
+        {},
+        direction="TB",
+        spacing_main=90.0,
+        spacing_cross=40.0,
+        origin_x=0.0,
+        origin_y=0.0,
     )
     xs = [at[0] for at in placement.positions.values()]
     spread = max(xs) - min(xs)

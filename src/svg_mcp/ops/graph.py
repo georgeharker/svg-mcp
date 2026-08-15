@@ -178,9 +178,7 @@ class GraphEdge(BaseModel):
     both ``{"from": …, "to": …}`` and ``{"source": …, "target": …}`` parse to the same edge.
     """
 
-    model_config = ConfigDict(
-        extra="ignore", populate_by_name=True, use_attribute_docstrings=True
-    )
+    model_config = ConfigDict(extra="ignore", populate_by_name=True, use_attribute_docstrings=True)
 
     source: str = Field(alias="from")
     """The node id the edge leaves. Accepts ``from`` (the producer's spelling) or ``source``."""
