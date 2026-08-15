@@ -16,7 +16,7 @@ def _doc() -> Document:
 def _child_ids(node: OutlineNode) -> list[str]:
     kids = node.get("children")
     assert isinstance(kids, list)
-    return [c["id"] for c in kids if isinstance(c, dict) and isinstance(c.get("id"), str)]
+    return [cid for c in kids if isinstance(c, dict) and isinstance(cid := c.get("id"), str)]
 
 
 def test_ungroup_preserves_world_position() -> None:

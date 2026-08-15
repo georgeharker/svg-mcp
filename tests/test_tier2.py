@@ -108,7 +108,9 @@ def test_find_and_get_subtree() -> None:
     by_name = find(doc, name="box1")
     assert by_name[0]["id"] == r1.id
     sub = get_subtree(doc, layer.id)
-    assert sub["svg"].startswith("<") and isinstance(sub["outline"], dict)
+    svg_text = sub["svg"]
+    assert isinstance(svg_text, str) and svg_text.startswith("<")
+    assert isinstance(sub["outline"], dict)
 
 
 def test_extract_image() -> None:
