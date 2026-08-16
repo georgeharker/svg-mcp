@@ -7,6 +7,9 @@ on:
 
 jobs:
   check:
+    # Explicit name: the check-run context is what branch protection matches on, and
+    # the bare job id "check" collides with the vendored-drift job of the same name.
+    name: lint, types, tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
