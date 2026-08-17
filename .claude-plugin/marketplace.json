@@ -10,7 +10,7 @@
       "name": "svg-mcp",
       "source": "./plugins/claude",
       "description": "Structured, hierarchical SVG authoring for an LLM with a render-and-see feedback loop \u2014 CSS-native themes (design language + variants), declarative box-arrow diagrams with auto-layout, data-parametric charts, and annotation facades, backed by an inkex document model.",
-      "version": "0.6.1"
+      "version": "0.6.2"
     }
   ]
 }

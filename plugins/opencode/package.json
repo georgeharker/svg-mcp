@@ -1,6 +1,6 @@
 {
     "name": "@geohar/opencode-svg-mcp",
-    "version": "0.6.1",
+    "version": "0.6.2",
     "description": "OpenCode plugin: run the svg-mcp MCP server via sharedserver and register its endpoint with OpenCode. Stands down when a combiner already serves svg-mcp.",
     "type": "module",
     "main": "dist/index.js",
