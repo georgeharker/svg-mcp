@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "svg-mcp": {
+      "url": "http://127.0.0.1:7731/mcp"
+    }
+  }
+}

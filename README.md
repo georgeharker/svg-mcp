@@ -356,6 +356,21 @@ server behind it. Full options (`port`, `gracePeriod`, `dev`, `manage`, …) are
 plugin's [README](https://github.com/georgeharker/svg-mcp/blob/main/plugins/opencode/README.md). The same `MCP_COMBINER` /
 `MCP_COMBINER_SERVES_SVG_MCP` switch below applies — the OpenCode plugin honours it too.
 
+## Install as a Pi extension
+
+[Pi](https://pi.dev) has no MCP of its own, so it needs **[`pi-mcp-adapter`](https://pi.dev/packages/pi-mcp-adapter)**
+(`pi install npm:pi-mcp-adapter`) plus the `@geohar/pi-svg-mcp` extension in
+[`plugins/pi`](https://github.com/georgeharker/svg-mcp/tree/main/plugins/pi). The extension runs the same warm
+`sharedserver`-managed server (same `uvx svg-mcp@<version>` pin) and injects the
+diagram-authoring directive on `before_agent_start`; point the adapter at svg-mcp with a
+one-line `mcp.json` ([`plugins/pi/mcp.json.example`](https://github.com/georgeharker/svg-mcp/tree/main/plugins/pi/mcp.json.example)).
+Load the extension by symlink into `~/.pi/agent/extensions/`, a local path under
+`settings.json` `extensions`, or the published package under `packages`. Full options
+(`SVG_MCP_PORT` / `_VERSION` / `_DEV`, `PI_SVG_MCP_*`) are in the plugin's
+[README](https://github.com/georgeharker/svg-mcp/blob/main/plugins/pi/README.md). The same `MCP_COMBINER` /
+`MCP_COMBINER_SERVES_SVG_MCP` stand-down applies — when combiner-served the extension
+injects the directive only (no `mcp.json` needed; you register the combiner instead).
+
 ### If a combiner already serves svg-mcp
 
 **The plugin writes to your user-scope MCP config** (`claude mcp add|remove`) rather than

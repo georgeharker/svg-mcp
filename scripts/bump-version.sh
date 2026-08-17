@@ -75,6 +75,11 @@ if [ ! -f "$OPENCODE_PKG" ]; then
 fi
 MANIFESTS+=("$OPENCODE_PKG"); TARGETS+=("json")
 
+# The Pi extension's package.json — same lockstep role as the OpenCode one. Optional so
+# an older checkout without the Pi plugin still bumps.
+PI_PKG="$ROOT/plugins/pi/package.json"
+if [ -f "$PI_PKG" ]; then MANIFESTS+=("$PI_PKG"); TARGETS+=("json"); fi
+
 # The repo marketplace listing (.claude-plugin/marketplace.json) pins the Claude
 # plugin's version in its plugins[] entry — it advertises the installable
 # version to `/plugin marketplace`, so it must move in lockstep too. Its single
@@ -201,7 +206,7 @@ echo "updated ${#MANIFESTS[@]} manifests -> $new"
 # copy step as a belt for ad-hoc publishes. (rm first: cp onto a symlink would
 # write THROUGH it instead.)
 INSTRS=()
-for _plugdir in "$ROOT/plugins/claude" "$ROOT/plugins/opencode"; do
+for _plugdir in "$ROOT/plugins/claude" "$ROOT/plugins/opencode" "$ROOT/plugins/pi"; do
   [ -d "$_plugdir" ] && [ -f "$ROOT/CLAUDE.md.example" ] || continue
   rm -f "$_plugdir/instructions.txt"
   cp "$ROOT/CLAUDE.md.example" "$_plugdir/instructions.txt"

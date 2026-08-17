@@ -1,0 +1,56 @@
+# Diagrams & SVGs (svg-mcp)
+
+<!-- Canonical reach-for-svg-mcp directive. Copy into your global
+     $CLAUDE_CONFIG_DIR/CLAUDE.md, or let an svg-mcp plugin inject it each session
+     (the plugins symlink this file). It directs *approach*; the MCP tool
+     descriptions carry the mechanics. -->
+
+Three rules. Each fires on a **cue you can catch yourself in the middle of**, not on a
+topic you have to remember to think about. That's deliberate: you will not remember to
+"use the tools" — but you can notice yourself about to type a `<` .
+
+### 1. About to write `<svg`, or hand-edit XML inside one? That's the cue.
+
+Writing markup by hand is the wrong move **even when the shape looks trivial** — that's
+exactly when it feels justified, and it skips the only part that matters: seeing the
+result. At that exact moment:
+
+| your next move was | do this instead |
+|---|---|
+| write `<svg>`/`<path>`/`<rect>` markup for something new | `create_document`, then the `add_*` primitives — `boolean` for union/difference/intersection, plus gradients / filters / transforms |
+| hand-patch the markup of an SVG you have | `import_svg` → `find` / `describe_node` to locate → `edit_*` / `apply_*` / `delete_node` |
+| hand a result back after building it | `export_render` (or `render_document`) and **actually look at the image** first |
+
+Construct → render → see → iterate. **The loop is the product, not the XML.** One pass
+without rendering isn't a faster version of this — it's a different, worse thing.
+
+**Catch yourself:** if you're about to show or save SVG source you have never rendered,
+you are guessing at your own output. Render it, look, *then* hand it over.
+
+### 2. About to place boxes, arrows, bars, or rows by coordinate? Declare, don't draw.
+
+Hand-computing positions for structured content is the diagram version of hand-writing
+markup — it feels precise and produces drift, overlaps, and arrows through boxes. The
+cue is reaching for `add_rect` + `add_line` to represent *things and relationships*:
+
+| you're about to | do this instead |
+|---|---|
+| draw an architecture / flowchart / pipeline from rects and lines | `add_diagram_node(kind, label)` + `add_diagram_edge(source, target, kind)` + `add_diagram_container(members)`, then `layout_diagram` — zero coordinates |
+| hand-place bars, axes, tick labels (or shell out to matplotlib for a small figure) | `add_chart(kind, data)` — bar/line/donut/scatter/sparkline, scales and margins derived from the data |
+| lay out rows of text as a grid | `add_table(rows, header)` — column widths measured, numerics right-aligned |
+| pick colors and fonts shape by shape | `load_theme` first and say what things ARE (`role=`, `kind=`); the theme paints them. Read the guidance the load returns — it's the house style speaking |
+| annotate or key the result | `add_callout(target, text)` (points at ids, survives reflow), `add_legend()` (generated from what the document uses) |
+
+After moving, resizing, or deleting diagram nodes: **`reflow()`** — one call re-routes
+edges, re-anchors callouts, and re-fits containers. Layout is opt-in; it never reruns
+behind your back.
+
+### 3. More than a couple of tool calls? Start the preview and say so.
+
+Cue: you can tell the build will take more than two or three calls. Call `start_preview`
+**at the start**, not when you're done, and put the exact URL in your reply unprompted:
+"Live preview: <url> — it refreshes on every change."
+
+The reason is timing, not courtesy. Someone watching the drawing take shape can redirect
+you mid-build; the same person handed a finished image can only accept it or ask for the
+whole thing again. A preview URL shared at the end has none of that value.

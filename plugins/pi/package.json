@@ -1,0 +1,56 @@
+{
+    "name": "@geohar/pi-svg-mcp",
+    "version": "0.6.1",
+    "description": "Pi extension: run the svg-mcp MCP server via sharedserver and inject the diagram-authoring directive. Pairs with pi-mcp-adapter, which makes svg-mcp's tools reachable from Pi.",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "pi": {
+        "extensions": [
+            "./src/index.ts"
+        ]
+    },
+    "files": [
+        "src",
+        "dist",
+        "instructions.txt",
+        "mcp.json.example",
+        "README.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "build": "tsc",
+        "clean": "rm -rf dist",
+        "typecheck": "tsc --noEmit",
+        "prepack": "node -e \"require('fs').copyFileSync('../../CLAUDE.md.example', './instructions.txt')\"",
+        "prepublishOnly": "npm run clean && npm run build"
+    },
+    "keywords": [
+        "pi",
+        "pi-extension",
+        "pi-mono",
+        "mcp",
+        "svg-mcp",
+        "svg",
+        "diagram",
+        "sharedserver",
+        "extension"
+    ],
+    "author": "George Harker <george@georgeharker.com>",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/georgeharker/svg-mcp.git",
+        "directory": "plugins/pi"
+    },
+    "publishConfig": {
+        "access": "public"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "typescript": "^5.6.0"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}
