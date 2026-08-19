@@ -6522,10 +6522,24 @@ def main() -> None:
         # connection stays open; FastMCP currently overrides it to 0, but pin it ourselves so we
         # don't depend on that default holding across versions. Override via SVG_MCP_SHUTDOWN_GRACE.
         grace = int(os.environ.get("SVG_MCP_SHUTDOWN_GRACE", "0"))
+        # Optional inbound bearer auth on /mcp (off unless SVG_MCP_AUTH_TOKEN is
+        # set). inbound_auth.py is vendored byte-identical from mcp-companion's
+        # combiner — no dependency on it. /health stays open.
+        from starlette.middleware import Middleware
+
+        from svg_mcp.inbound_auth import BearerAuthMiddleware, resolve_auth_token
+
+        _mw: list[Middleware] = []
+        _tok = resolve_auth_token("SVG_MCP_AUTH_TOKEN")
+        if _tok:
+            _mw.append(
+                Middleware(BearerAuthMiddleware, token=_tok, is_protected=lambda p: p != "/health")
+            )
         mcp.run(
             transport=args.transport,
             host=args.host,
             port=args.port,
+            middleware=_mw,
             uvicorn_config={"timeout_graceful_shutdown": grace},
         )
 

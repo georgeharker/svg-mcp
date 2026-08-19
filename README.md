@@ -504,11 +504,23 @@ All settings are env vars prefixed `SVG_MCP_` (or a `.env` file):
 | `SVG_MCP_RENDER_TIMEOUT_S` | `30` | Per-render subprocess timeout |
 | `SVG_MCP_TRANSPORT` | `stdio` | Server transport: `stdio` · `http` · `streamable-http` · `sse` |
 | `SVG_MCP_HOST` / `SVG_MCP_PORT` | `127.0.0.1` / `8000` | Bind address for the http transports |
+| `SVG_MCP_AUTH_TOKEN` | unset | Optional inbound bearer token for the http `/mcp` endpoint (see [Authentication](#authentication)) |
 | `SVG_MCP_PREVIEW` | unset | Auto-start the [live preview](#live-preview) web server on boot (`1`/`true`) |
 | `SVG_MCP_PREVIEW_HOST` / `SVG_MCP_PREVIEW_PORT` | `127.0.0.1` / `8808` | Bind address for the live preview |
 
 Transport, host, and port can also be set with CLI flags (which take precedence over the env
 vars): `svg-mcp --transport streamable-http --host 127.0.0.1 --port 7731`.
+
+### Authentication
+
+The http `/mcp` endpoint is **unauthenticated by default** — fine on loopback, but open the
+moment you bind beyond `127.0.0.1`. Set **`SVG_MCP_AUTH_TOKEN`** and every request to `/mcp`
+must present `Authorization: Bearer <token>`; a missing/wrong token gets a plain `401` (no
+`WWW-Authenticate`, so standards clients don't drift into OAuth). Unset ⇒ open (unchanged);
+`/health` stays open. When svg-mcp runs behind the
+[mcp-combiner](https://github.com/georgeharker/mcp-companion), give the combiner the token in
+this server's `servers.json` entry: `{"auth": {"bearer": "${SVG_MCP_AUTH_TOKEN}"}}`. (The gate
+is `inbound_auth.py`, vendored byte-identical from the combiner.)
 
 ## Develop
 
