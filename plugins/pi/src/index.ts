@@ -27,7 +27,8 @@
 // combiner-served. The sharedserver resolution is ported from plugins/opencode.
 
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type {
@@ -171,15 +172,20 @@ export default function svgMcp(pi: ExtensionAPI): void {
 
     // ── /svg-mcp command: inspect the extension (verb: system-prompt) ──
     pi.registerCommand("svg-mcp", {
-        description: "svg-mcp extension — verb: system-prompt (show the injected directive)",
+        description:
+            "svg-mcp extension — verbs: system-prompt (show the injected directive), install-config [path] (write mcp.json)",
         getArgumentCompletions: (prefix) => completeVerbs(prefix),
         handler: (args, ctx) => {
-            const verb = args.trim()
+            const [verb, ...rest] = args.trim().split(/\s+/)
             if (verb === "" || verb === "system-prompt") {
                 showDirective(ctx, "svg-mcp", SVG_DIAGRAM_DIRECTIVE, wantInstructions)
                 return
             }
-            ctx.ui?.notify?.(`svg-mcp: unknown verb "${verb}". Try: system-prompt`, "warn")
+            if (verb === "install-config") {
+                installConfig(ctx, rest.join(" ") || undefined)
+                return
+            }
+            ctx.ui?.notify?.(`svg-mcp: unknown verb "${verb}". Try: system-prompt, install-config`, "warn")
         },
     })
 
@@ -256,11 +262,96 @@ export default function svgMcp(pi: ExtensionAPI): void {
 // directive this extension injects — the show-command pattern from pi-custom-system-prompt,
 // since `before_agent_start` injections are per-turn and never appear in Pi's own
 // `/system-prompt` (which reports the base prompt only).
-const COMMAND_VERBS = ["system-prompt"]
+const COMMAND_VERBS = ["system-prompt", "install-config"]
 function completeVerbs(prefix: string): AutocompleteItem[] | null {
     const p = prefix.trim()
     const matches = COMMAND_VERBS.filter((v) => v.startsWith(p))
     return matches.length ? matches.map((v) => ({ value: v, label: v })) : null
+}
+
+// ── /svg-mcp install-config: write the pi-mcp-adapter mcp.json entry ──
+// A USER-INVOKED write — on request, merge the svg-mcp entry into pi-mcp-adapter's
+// mcp.json, wired for svg-mcp's optional inbound bearer auth:
+//
+//   { "url": "…/mcp", "auth": "bearer", "bearerTokenEnv": "SVG_MCP_AUTH_TOKEN" }
+//
+// - auth:"bearer" → the adapter attaches `Authorization: Bearer <token>` (it gates the
+//   header on `auth === "bearer"`, NOT on bearerTokenEnv alone), AND makes
+//   supportsOAuth() false so a wrong/missing token surfaces as an honest 401 rather
+//   than a Dynamic-Client-Registration 404.
+// - bearerTokenEnv → names the env var the token is read from at connect (nothing
+//   written to disk). The backend enforces only when SVG_MCP_AUTH_TOKEN is set on ITS
+//   side; unset ⇒ open, the env var is unset here too so no header is sent. The one
+//   shape is correct whether or not auth is enabled. Ported from mcp-companion's
+//   /mcp-combiner install-config.
+
+function expandHome(p: string): string {
+    if (p === "~") return homedir()
+    if (p.startsWith("~/")) return join(homedir(), p.slice(2))
+    return p
+}
+
+/** The URL the adapter should reach svg-mcp at — 127.0.0.1:<port>/mcp with the same
+ *  port defaults the backend serves on ($SVG_MCP_PORT, else 7731). */
+function defaultSvgUrl(): string {
+    let port = DEFAULT_PORT
+    const raw = env("SVG_MCP_PORT")
+    if (raw !== undefined) {
+        const n = Number(raw)
+        if (Number.isInteger(n) && n > 0) port = n
+    }
+    return `http://127.0.0.1:${port}/mcp`
+}
+
+function installConfig(ctx: ExtensionCommandContext, pathArg?: string): void {
+    const target = pathArg ? expandHome(pathArg) : join(homedir(), ".config", "mcp", "mcp.json")
+    const key = DEFAULT_NAME
+
+    // Read + parse existing (tolerate absence; refuse to clobber non-JSON).
+    let doc: Record<string, unknown> = {}
+    if (existsSync(target)) {
+        try {
+            const parsed = JSON.parse(readFileSync(target, "utf8"))
+            if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+                ctx.ui?.notify?.(`svg-mcp: ${target} is not a JSON object; not overwriting`, "error")
+                return
+            }
+            doc = parsed as Record<string, unknown>
+        } catch (e) {
+            ctx.ui?.notify?.(`svg-mcp: ${target} is not valid JSON; not overwriting (${e})`, "error")
+            return
+        }
+    }
+
+    const servers = (doc.mcpServers ??= {}) as Record<string, Record<string, unknown>>
+    const prev = (servers[key] ?? {}) as Record<string, unknown>
+    const before = JSON.stringify(prev)
+    // Preserve any existing url and other fields; only ensure the auth-wiring keys.
+    servers[key] = {
+        ...prev,
+        url: typeof prev.url === "string" && prev.url ? prev.url : defaultSvgUrl(),
+        auth: "bearer",
+        bearerTokenEnv: "SVG_MCP_AUTH_TOKEN",
+    }
+    const existed = before !== "{}" && Object.keys(prev).length > 0
+    const changed = before !== JSON.stringify(servers[key])
+
+    try {
+        mkdirSync(dirname(target), { recursive: true })
+        writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8")
+    } catch (e) {
+        ctx.ui?.notify?.(`svg-mcp: failed to write ${target} (${e})`, "error")
+        return
+    }
+
+    const what = !existed ? "added" : changed ? "updated" : "already configured"
+    ctx.ui?.notify?.(
+        `svg-mcp: ${what} "${key}" in ${target}\n` +
+            `Sends "Authorization: Bearer $SVG_MCP_AUTH_TOKEN" when that env var is set ` +
+            `(auth:"bearer" both sends the token and suppresses OAuth probing). ` +
+            `Run /reload so pi-mcp-adapter re-reads mcp.json.`,
+        "info",
+    )
 }
 
 const SHOW_LIMIT = 1600

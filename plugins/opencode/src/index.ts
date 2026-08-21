@@ -362,8 +362,14 @@ const SvgMcpPlugin: Plugin = async ({ client }, options) => {
             log("info", `a combiner serves "${mcpName}"; not registering a standalone entry`)
             return
         }
-        cfg.mcp[mcpName] = { type: "remote", url, enabled: true }
-        log("info", `registered mcp "${mcpName}" → ${url}`)
+        // Present the inbound-auth bearer when SVG_MCP_AUTH_TOKEN is set — the backend
+        // (server.py) enforces the same token. This hook runs in-process, so unlike a
+        // Claude Code headersHelper it reads the token from the env directly. Unset ⇒
+        // no header, open exactly as before.
+        const authToken = env.SVG_MCP_AUTH_TOKEN?.trim()
+        const headers = authToken ? { Authorization: `Bearer ${authToken}` } : undefined
+        cfg.mcp[mcpName] = { type: "remote", url, enabled: true, ...(headers ? { headers } : {}) }
+        log("info", `registered mcp "${mcpName}" → ${url}${headers ? " (bearer auth)" : ""}`)
     }
 
     // The directive: appended to the system prompt each session (analogue of the CC

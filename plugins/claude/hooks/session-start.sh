@@ -199,9 +199,71 @@ if combiner_serves "$NAME"; then
   exit 0
 fi
 
-# Standalone: ensure we are registered, and keep one warm svg-mcp behind the URL.
-if ! _registered; then
-  claude mcp add --transport http "$NAME" "$URL" --scope user >/dev/null 2>&1 || true
+# Standalone: ensure we are registered (with the inbound-auth bearer when
+# SVG_MCP_AUTH_TOKEN is set), and keep one warm svg-mcp behind the URL.
+#
+# This hook runs with the FULL environment — SessionStart hooks are NOT subject to
+# Claude Code's headersHelper env-redaction (which strips *TOKEN*-named vars from a
+# per-connection helper) — so it can read SVG_MCP_AUTH_TOKEN and bake a STATIC
+# `Authorization: Bearer <token>` header into the user-scope entry via `claude mcp
+# add -H`. No headersHelper, so the redaction that bites the combiner does not apply.
+# The backend enforces the SAME token (server.py resolves SVG_MCP_AUTH_TOKEN and gates
+# /mcp), and sharedserver inherits this hook's env — so set the token before launching
+# `claude` and the client header and the server gate light up together; unset it and
+# both stay open. Steady state is zero-write; a mismatch (first run, token rotated,
+# toggled on/off) reconciles with one remove+add, which is also the only path that
+# reloads MCP.
+_desired_auth="${SVG_MCP_AUTH_TOKEN:-}"
+
+_svg_register() {
+  if [ -n "$_desired_auth" ]; then
+    claude mcp add --transport http "$NAME" "$URL" \
+      -H "Authorization: Bearer $_desired_auth" --scope user >/dev/null 2>&1 || true
+  else
+    claude mcp add --transport http "$NAME" "$URL" --scope user >/dev/null 2>&1 || true
+  fi
+}
+
+# 0 = registered with matching url AND Authorization (do nothing); 1 = needs
+# (re)register; 2 = can't tell (fall back to a presence-only check). Comparing the
+# header is what makes token rotation/toggle converge without re-adding every session.
+_in_sync() {
+  python3 -c '
+import json, os, sys
+name, url, want = sys.argv[1], sys.argv[2], sys.argv[3]
+cands = []
+cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+if cfg:
+    cands.append(os.path.join(os.path.expanduser(cfg), ".claude.json"))
+cands += [os.path.expanduser("~/.claude.json"),
+          os.path.expanduser("~/.config/claude/.claude.json")]
+for p in cands:
+    if os.path.exists(p):
+        try:
+            with open(p) as fh:
+                d = json.load(fh)
+        except Exception:
+            sys.exit(2)
+        srv = (d.get("mcpServers") or {}).get(name)
+        if not srv:
+            sys.exit(1)
+        if srv.get("url") != url:
+            sys.exit(1)
+        cur = (srv.get("headers") or {}).get("Authorization") or ""
+        sys.exit(0 if cur == want else 1)
+sys.exit(2)
+' "$NAME" "$URL" "${_desired_auth:+Bearer $_desired_auth}"
+}
+
+# NB: `set -e` is in effect — capture the non-zero return via `||`, never a bare
+# `_in_sync; rc=$?` (that would exit the hook before rc is read).
+_sync_rc=0
+_in_sync || _sync_rc=$?
+if [ "$_sync_rc" -eq 1 ]; then
+  claude mcp remove "$NAME" --scope user >/dev/null 2>&1 || true
+  _svg_register
+elif [ "$_sync_rc" -eq 2 ]; then
+  _registered || _svg_register
 fi
 
 # bin/sharedserver resolves $SHAREDSERVER_BIN -> PATH -> standard dirs and downloads a
