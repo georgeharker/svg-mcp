@@ -522,6 +522,20 @@ must present `Authorization: Bearer <token>`; a missing/wrong token gets a plain
 this server's `servers.json` entry: `{"auth": {"bearer": "${SVG_MCP_AUTH_TOKEN}"}}`. (The gate
 is `inbound_auth.py`, vendored byte-identical from the combiner.)
 
+When svg-mcp runs **standalone** — its plugins register it directly with the client, no
+combiner — setting `SVG_MCP_AUTH_TOKEN` in the environment you launch the client from is all
+you need: each plugin presents the bearer automatically (since **v0.7.1**), gated on the token
+(unset ⇒ no header, exactly as before):
+
+- **Claude Code** — the SessionStart hook registers with `claude mcp add … -H "Authorization:
+  Bearer $SVG_MCP_AUTH_TOKEN"`. The hook runs with the full environment (unlike a
+  `headersHelper`, which Claude Code strips `*TOKEN*`-named vars from), so it bakes a static
+  header — no per-connection helper. It reconciles url+header on every start, so rotating or
+  unsetting the token converges without re-adding when nothing changed.
+- **OpenCode** — the plugin's config hook adds the `Authorization` header to its `mcp` entry.
+- **Pi** — run `/svg-mcp install-config` to write a pi-mcp-adapter `mcp.json` entry wired with
+  `auth:"bearer", bearerTokenEnv:"SVG_MCP_AUTH_TOKEN"` (pi-mcp-adapter has no runtime hook).
+
 ## Develop
 
 ```bash
