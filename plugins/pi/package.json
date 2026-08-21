@@ -1,6 +1,6 @@
 {
     "name": "@geohar/pi-svg-mcp",
-    "version": "0.7.0",
+    "version": "0.7.1",
     "description": "Pi extension: run the svg-mcp MCP server via sharedserver and inject the diagram-authoring directive. Pairs with pi-mcp-adapter, which makes svg-mcp's tools reachable from Pi.",
     "type": "module",
     "main": "dist/index.js",
