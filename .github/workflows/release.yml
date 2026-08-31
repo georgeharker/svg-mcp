@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write          # required for option A (Trusted Publishing / OIDC)
+      id-token: write # required for option A (Trusted Publishing / OIDC)
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -61,9 +61,9 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     permissions:
-      contents: write          # required to create the GitHub Release
+      contents: write # required to create the GitHub Release
     steps:
-      - uses: actions/checkout@v6   # for --generate-notes (needs the tag + history)
+      - uses: actions/checkout@v6 # for --generate-notes (needs the tag + history)
       - uses: actions/download-artifact@v4
         with:
           name: dist

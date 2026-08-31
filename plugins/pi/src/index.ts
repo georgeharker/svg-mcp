@@ -216,7 +216,10 @@ export default function svgMcp(pi: ExtensionAPI): void {
         const port = env("SVG_MCP_PORT") ?? String(DEFAULT_PORT)
         const { argv, missing } = resolveServeArgv(port)
         if (missing) {
-            log("error", `\`${missing}\` not on PATH; install uv (https://docs.astral.sh/uv/), or PI_SVG_MCP_MANAGE=false`)
+            log(
+                "error",
+                `\`${missing}\` not on PATH; install uv (https://docs.astral.sh/uv/), or PI_SVG_MCP_MANAGE=false`,
+            )
             return
         }
 
