@@ -27,7 +27,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install uv
         uses: astral-sh/setup-uv@v6
       - name: Build sdist + wheel
@@ -63,7 +63,7 @@ jobs:
     permissions:
       contents: write          # required to create the GitHub Release
     steps:
-      - uses: actions/checkout@v4   # for --generate-notes (needs the tag + history)
+      - uses: actions/checkout@v6   # for --generate-notes (needs the tag + history)
       - uses: actions/download-artifact@v4
         with:
           name: dist

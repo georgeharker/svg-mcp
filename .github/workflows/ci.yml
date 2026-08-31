@@ -12,7 +12,7 @@ jobs:
     name: lint, types, tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # On Linux there are no wheels for pycairo/PyGObject (pulled in transitively by inkex),
       # so they build from source and need the C headers below. lxml may also build from source.
