@@ -28,3 +28,6 @@ scratch/
 /.quarto/
 
 **/*.quarto_ipynb
+
+# packaged pi.dev gallery card
+!plugins/pi/assets/preview.png
