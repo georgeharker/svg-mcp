@@ -1,12 +1,13 @@
-"""In-process resvg renderer via the optional ``resvg-py`` binding.
+"""In-process resvg renderer via the ``resvg-py`` binding.
 
 Same engine as the ``resvg`` CLI — verified pixel-identical output — but with **no external
-binary**: it's a pure pip dependency installed by the ``resvg`` extra (``pip install
-'svg-mcp[resvg]'``). That makes the package self-contained for ``uvx`` / pip installs, so a
-``brew install resvg`` step isn't required.
+binary**: ``resvg-py`` is a core dependency of svg-mcp (installed automatically with the
+package), so a bare install renders with no ``brew install`` step. The binding is faster
+than the CLI for small renders (no process startup) but slower for large/document-scale
+renders; ``resvg_renderer()`` below picks accordingly.
 
 ``resvg_renderer()`` is the smart default used everywhere: prefer the CLI when it's on PATH
-(slightly faster, no per-call binding overhead), otherwise fall back to this in-process binding.
+(parallel rendering wins on big canvases), otherwise fall back to this in-process binding.
 """
 
 from __future__ import annotations
@@ -34,8 +35,9 @@ class ResvgPyRenderer:
             import resvg_py
         except Exception as exc:
             raise RenderError(
-                "resvg-py not installed — add the in-process renderer with the 'resvg' extra "
-                "(pip install 'svg-mcp[resvg]'), or install the resvg CLI."
+                "resvg-py not installed (it is a core svg-mcp dependency — the environment "
+                "looks corrupt). Reinstall svg-mcp (pip install svg-mcp), or install the "
+                "resvg CLI (`brew install resvg`) as a fallback renderer."
             ) from exc
 
         start = time.perf_counter()

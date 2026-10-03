@@ -158,7 +158,10 @@ class PreviewServer:
             bucket.active = active_id
             bucket.sources.update(sources)
             bucket.index_json = index_json
-            live = {d.get("id") for d in json.loads(index_json).get("documents", [])}
+            try:
+                live = {d.get("id") for d in json.loads(index_json).get("documents", [])}
+            except ValueError as exc:
+                raise ValueError(f"preview publish got malformed index_json: {exc}") from exc
             bucket.sources = {k: v for k, v in bucket.sources.items() if k in live}
             bucket.gen += 1
             gen = bucket.gen
@@ -218,7 +221,7 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
         preview = owner
         protocol_version = "HTTP/1.1"
 
-        def log_message(self, *_args: object) -> None:  # silence stderr access logs
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002  # silence stderr access logs; mirror the base signature
             pass
 
         # -- response helpers --------------------------------------------

@@ -1759,7 +1759,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cairocffi", marker = "extra == 'cairo'", specifier = ">=1.6" },
-    { name = "fastmcp", specifier = ">=2.3" },
+    { name = "fastmcp", specifier = ">=3.2" },
     { name = "fonttools", specifier = ">=4.50" },
     { name = "inkex", specifier = ">=1.4.1" },
     { name = "lxml", specifier = ">=5.0" },

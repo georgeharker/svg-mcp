@@ -21,7 +21,7 @@ from weakref import WeakKeyDictionary
 from fastmcp import Context, FastMCP
 from fastmcp.apps.config import AppConfig
 from fastmcp.server.dependencies import get_context
-from fastmcp.tools.tool import ToolResult
+from fastmcp.tools import ToolResult
 from mcp.server.session import ServerSession
 from pydantic import AnyUrl, BaseModel
 
@@ -59,7 +59,7 @@ from .render import (
     get_renderer,
     rsvg_available,
 )
-from .render.base import RenderRequest
+from .render.base import RenderError, RenderRequest
 from .render.feedback import MCPImage
 from .schemas import FilterPrimitive, GradientStop, ShapeStyle
 from .serialize import export_svg as _export_svg
@@ -6279,7 +6279,18 @@ def export_render(
     svg = _export_svg(_doc(document_id))
     data = export_bytes(svg, format, scale=scale, background=background)
     out = Path(path) if path else Path(f"render.{format.lower()}")
-    out.write_bytes(data)
+    try:
+        out.write_bytes(data)
+    except OSError as exc:
+        reason = (
+            "directory does not exist"
+            if not out.parent.exists()
+            else f"the parent {out.parent} exists but the write was refused"
+        )
+        raise RenderError(
+            f"export_render could not write {out}: {exc}. {reason}. If this path is under a "
+            "sandbox or tmpfs, write inside the project directory instead."
+        ) from exc
     return {"path": str(out.resolve()), "format": format.lower(), "bytes": len(data)}
 
 

@@ -24,7 +24,8 @@ classifiers = [
 ]
 
 dependencies = [
-  "fastmcp>=2.3",
+  # floor: fastmcp.tools.ToolResult (flat) needs 3.0; fastmcp.apps.config.AppConfig needs 3.2
+  "fastmcp>=3.2",
   "pydantic>=2.7",
   "pydantic-settings>=2.2",
   "lxml>=5.0",
