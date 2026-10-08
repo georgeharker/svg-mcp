@@ -968,6 +968,7 @@ class EdgeSpec:
     route: RouteStyle
     label: str
     themed: bool = True
+    arrow_start: bool = False
     waypoints: tuple[Point, ...] | None = None
 
 
@@ -1042,6 +1043,7 @@ def read_edge_spec(element: BaseElement) -> EdgeSpec | None:
             route=_route_style(str(spec.get("route", "orthogonal"))),
             label=str(spec.get("label", "")),
             themed=bool(spec.get("themed", True)),
+            arrow_start=bool(spec.get("arrow_start", False)),
             # An empty list reads as "no pinned route" — that is what clearing one writes, and
             # what an edge that never had one means.
             waypoints=(None if not pinned else tuple((float(x), float(y)) for x, y in pinned)),
@@ -1114,6 +1116,11 @@ def _write_edge_spec(element: BaseElement, spec: EdgeSpec) -> None:
         "label": spec.label,
         "themed": spec.themed,
     }
+    # The same rule an edge's waypoints follow: an absent key is how a spec says "the
+    # router's default" — here, head at the target end only — and it keeps every existing
+    # edge byte-identical.
+    if spec.arrow_start:
+        stored["arrow_start"] = True
     # An edge nobody pinned a route on writes no ``waypoints`` key at all: an absent key is the
     # only honest way to say "route this freely", and it keeps every existing edge byte-identical.
     if spec.waypoints:
@@ -1691,7 +1698,10 @@ def _arrow_marker(doc: Document) -> str:
         ("refY", "5"),
         ("markerWidth", "8"),
         ("markerHeight", "8"),
-        ("orient", "auto"),
+        # auto-start-reverse, not auto: on a marker-end this is identical to auto, but on
+        # a marker-start (a double-ended edge) the head points BACK at the source, which
+        # is what an endpoint arrow must do. One def therefore serves both end styles.
+        ("orient", "auto-start-reverse"),
         ("markerUnits", "strokeWidth"),
         ("viewBox", "0 0 10 10"),
     ):
@@ -1791,7 +1801,14 @@ def _write_route(
         leg.element.add(path)
         path.set_id(doc.new_id("edge-path"))
     path.set("d", drawn)
-    path.style = inkex.Style({"fill": "none", "marker-end": f"url(#{_arrow_marker(doc)})"})
+    # The router OWNS this style — it is rewritten wholesale every pass, so a start marker
+    # applied by hand at this layer is scaffolding that no reflow will keep. A start head
+    # is `arrow_start` on the edge spec (persisted in data-diagram-edge): double-ended
+    # request/response edges are the edge spec's business, and every reroute re-applies it.
+    style = {"fill": "none", "marker-end": f"url(#{_arrow_marker(doc)})"}
+    if leg.spec.arrow_start:
+        style["marker-start"] = f"url(#{_arrow_marker(doc)})"
+    path.style = inkex.Style(style)
     canvas = theme.tokens.get("--canvas", _DEFAULT_CANVAS)
     _set_label(doc, leg.element, leg.spec.label, label_at, halo=canvas, dy=label_dy)
 
@@ -1983,6 +2000,7 @@ def add_diagram_edge(
     name: str | None = None,
     styles: list[str] | None = None,
     themed: bool = True,
+    arrow_start: bool = False,
 ) -> PlacedEdge:
     """Connect two nodes with a routed, themed edge — and re-spread every port it shares.
 
@@ -1996,6 +2014,10 @@ def add_diagram_edge(
 
     Every edge shares ONE arrowhead marker, so an edge's head does not follow its kind's colour
     yet — per-kind markers are a later refinement.
+
+    ``arrow_start`` doubles the edge: a head at the SOURCE end too, pointing back at it. It is
+    stored on the edge spec and re-applied by every reflow — start markers on diagram edges are
+    never hand-applied ink.
     """
     source_id = str(doc.resolve(source).get_id())
     target_id = str(doc.resolve(target).get_id())
@@ -2025,6 +2047,7 @@ def add_diagram_edge(
                 route=route,
                 label=label or "",
                 themed=themed,
+                arrow_start=arrow_start,
                 waypoints=tuple((float(x), float(y)) for x, y in waypoints or ()) or None,
             ),
         )
@@ -2042,6 +2065,7 @@ def edit_diagram_edge(
     target_anchor: AnchorPref | None = None,
     label: str | None = None,
     waypoints: list[Point] | None = None,
+    arrow_start: bool | None = None,
 ) -> EdgeEdit:
     """Edit a diagram edge by its SPEC — kind, route style, anchors, label — and re-route it.
 
@@ -2068,6 +2092,7 @@ def edit_diagram_edge(
             route=route if route is not None else spec.route,
             label=label if label is not None else spec.label,
             themed=spec.themed,
+            arrow_start=spec.arrow_start if arrow_start is None else arrow_start,
             waypoints=(
                 spec.waypoints
                 if waypoints is None

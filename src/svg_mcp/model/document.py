@@ -8,6 +8,7 @@ changes internally.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,6 +16,11 @@ import inkex
 from inkex import BaseElement, SvgDocumentElement
 
 from .errors import AmbiguousReference, NodeNotFound
+
+#: The theme-residency stamp written on the root at serialize time (see `Document.to_svg`):
+#: a JSON list of {name, variant, routes} so an export/import round-trip can re-materialize
+#: the resident themes instead of keeping their CSS only as the `imported_css` shim.
+THEMES_STAMP_ATTR = "data-svgmcp-themes"
 
 # Namespaces declared up front so inkscape:/sodipodi:/xlink: attributes serialize cleanly.
 _SVG_TEMPLATE = (
@@ -78,6 +84,9 @@ class Document:
         # Route key (a category or a role name) -> the resident theme serving it. Themes are a
         # role-routed SET, so a key is served by exactly one theme at a time.
         self.theme_routing: dict[str, str] = {}
+        # Non-fatal advice raised while the document came into being (import reconciliation
+        # misses, e.g. a stamped theme that no longer resolves on disk). Surfaced by import.
+        self.import_notes: list[str] = []
         # friendly-name -> set of node ids, built lazily from the tree then kept current by the
         # naming ops, so a duplicate-name check is an O(1) dict hit instead of a full-tree scan.
         self._names: dict[str, set[str]] | None = None
@@ -309,5 +318,29 @@ class Document:
         return self.resolve(parent)
 
     def to_svg(self) -> str:
-        """Serialize the document to an SVG string."""
+        """Serialize the document to an SVG string.
+
+        Writes a residency stamp (``data-svgmcp-themes``) on the root from the LIVE theme state,
+        so an export/import round-trip can re-materialize the themes instead of keeping their
+        CSS only as the `imported_css` preservation shim. Stamped at serialize time (not at load
+        time) because residency can change after load — unload → export must not resurrect a
+        theme on import.
+        """
+        stamp = [
+            {
+                "name": name,
+                "variant": self.theme_meta[name].variant,
+                "routes": list(self.theme_meta[name].routes),
+                # The paths the load actually used (ThemeMeta keeps them for re-reads): absolute
+                # in the file, so a project-local theme re-resolves on the same machine and
+                # degrades to an import note (paint preserved) when it doesn't.
+                "paths": [str(p) for p in self.theme_meta[name].search_paths],
+            }
+            for name in self.theme_css
+            if name in self.theme_meta
+        ]
+        if stamp:
+            self.svg.set(THEMES_STAMP_ATTR, json.dumps(stamp, separators=(",", ":")))
+        else:
+            self.svg.attrib.pop(THEMES_STAMP_ATTR, None)
         return str(self.svg.tostring().decode("utf-8"))

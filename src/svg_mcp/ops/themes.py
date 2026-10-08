@@ -18,6 +18,7 @@ over one subtree, and deliberately leave the routing table alone.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -28,7 +29,7 @@ from typing import Literal
 from inkex import BaseElement
 from pydantic import BaseModel, Field
 
-from ..model.document import Document, ThemeMeta
+from ..model.document import THEMES_STAMP_ATTR, Document, ThemeMeta
 from ..model.errors import InvalidArgument, ThemeError
 from ..theme.css import CATEGORIES
 from ..theme.loader import DEFAULT_THEME, default_search_paths, materialize
@@ -233,6 +234,43 @@ def load_theme(
         guidance=theme.guidance,
         styles=_styles_of(result),
     )
+
+
+def reinstate_themes(doc: Document) -> list[str]:
+    """Re-materialize the themes a round-tripped document was stamped with.
+
+    An imported document carries its themes' CSS (kept alive by the `imported_css` preservation
+    shim) but no registry state — so new facades fell back to `default-*` classes. This reads the
+    serialize-time stamp (`data-svgmcp-themes`, see `Document.to_svg`), re-materializes each
+    named theme through the normal `load_theme` path (whose `_install` supersedes the imported
+    shim block properly, so unload really does undress), and returns the names it could not.
+
+    A theme that doesn't resolve on disk (a project-local theme, a moved server cwd) is
+    unresolvable in the best available sense: its imported CSS keeps painting, nothing is
+    re-registered, and its name is returned for the caller to surface.
+    """
+    raw = doc.svg.get(THEMES_STAMP_ATTR)
+    if not raw:
+        return []
+    try:
+        entries = json.loads(raw)
+    except ValueError:
+        doc.svg.attrib.pop(THEMES_STAMP_ATTR, None)  # a corrupt stamp is dead weight
+        return []
+    unresolved: list[str] = []
+    for entry in entries:
+        name = str(entry.get("name") or "")
+        variant = entry.get("variant")
+        routes = [str(item) for item in entry.get("routes") or ()]  # json "Any" → typed
+        paths = [Path(item) for item in entry.get("paths") or () if Path(item).exists()]
+        if not name or name in doc.theme_css:
+            continue
+        try:
+            load_theme(doc, name, roles=routes, variant=variant, search_paths=paths or None)
+        except ThemeError:
+            # The imported CSS shim already keeps the paint; report the registry gap.
+            unresolved.append(name)
+    return unresolved
 
 
 def _resident(doc: Document, name: str) -> ThemeMeta:

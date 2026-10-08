@@ -58,8 +58,9 @@ from .render import (
     export_bytes,
     get_renderer,
     rsvg_available,
+    write_render_file,
 )
-from .render.base import RenderError, RenderRequest
+from .render.base import RenderRequest
 from .render.feedback import MCPImage
 from .schemas import FilterPrimitive, GradientStop, ShapeStyle
 from .serialize import export_svg as _export_svg
@@ -405,7 +406,9 @@ def _session_token() -> str:
     sid = _session_id()
     if sid is None:
         return "default"
-    return hashlib.sha1(sid.encode()).hexdigest()[:12]
+    # sha1 is enough for a non-secret partition key, but a stronger digest costs nothing:
+    # shorter hex prefixes are kept by truncation.
+    return hashlib.sha256(sid.encode()).hexdigest()[:12]
 
 
 Point = tuple[float, float]
@@ -589,7 +592,7 @@ def create_document(
 @emits_change
 def import_svg(
     *, svg: str | None = None, path: str | None = None, into_active: bool = False
-) -> dict[str, str | bool]:
+) -> dict[str, str | bool | list[str]]:
     """Load an existing SVG into the session, so you can render/inspect/edit it.
 
     Provide the source EITHER inline via `svg` OR from a file via `path` (preferred for large
@@ -608,13 +611,22 @@ def import_svg(
 
     Returns:
         {document_id, active, replaced}. `replaced` is true when an existing doc was overwritten.
+        `notes`, when present, is advice from the import itself — e.g. themes the document was
+        stamped with that could not be re-materialized (their painted rules survive, but new
+        nodes won't hook them until the theme is loaded again).
     """
     document = ops.load_svg_document(svg=svg, path=path)
     store = _store()
+    result: dict[str, str | bool | list[str]]
+    notes = list(document.import_notes)
     if into_active and store.active_id is not None:
         document_id = store.replace(None, document)
-        return {"document_id": document_id, "active": True, "replaced": True}
-    return {"document_id": store.register(document), "active": True, "replaced": False}
+        result = {"document_id": document_id, "active": True, "replaced": True}
+    else:
+        result = {"document_id": store.register(document), "active": True, "replaced": False}
+    if notes:
+        result["notes"] = notes
+    return result
 
 
 @mcp.tool
@@ -3377,6 +3389,7 @@ def add_diagram_edge(
     name: str | None = None,
     styles: list[str] | None = None,
     themed: bool = True,
+    arrow_start: bool = False,
 ) -> dict[str, str | int | None | list[str]]:
     """Connect two nodes with a routed, arrow-headed EDGE that stays attached.
 
@@ -3427,6 +3440,7 @@ def add_diagram_edge(
         name=name,
         styles=styles,
         themed=themed,
+        arrow_start=arrow_start,
     )
     return {**_placed(doc, placed.ref), "edges_rerouted": placed.edges_rerouted}
 
@@ -3480,6 +3494,7 @@ def edit_diagram_edge(
     target_anchor: Literal["auto", "N", "S", "E", "W"] | None = None,
     label: str | None = None,
     waypoints: list[Point] | None = None,
+    arrow_start: bool | None = None,
 ) -> dict[str, str | int | None]:
     """Edit a diagram edge by its SPEC — kind, route style, anchors, label — and re-route it.
 
@@ -5339,6 +5354,7 @@ def define_marker(
     marker_height: float = 10,
     orient: str = "auto",
     units: str = "strokeWidth",
+    view_box: str | None = None,
     name: str | None = None,
 ) -> str:
     """Create a marker (arrowhead, dot, tick) from existing nodes, then attach with apply_marker.
@@ -5353,6 +5369,9 @@ def define_marker(
         marker_height: Marker viewport height.
         orient: "auto" (rotate to follow the path), "auto-start-reverse", or an angle in degrees.
         units: "strokeWidth" (scale with stroke) or "userSpaceOnUse".
+        view_box: Optional viewBox for the marker, e.g. "0 0 10 10" — maps content coordinates
+            into the marker viewport so a glyph drawn in natural units pins to any marker size
+            (this is how the built-in diagram arrow stays crisp at its scaled size).
         name: Friendly name.
 
     Returns:
@@ -5367,6 +5386,7 @@ def define_marker(
         marker_height=marker_height,
         orient=orient,
         units=units,
+        view_box=view_box,
         name=name,
     )
 
@@ -5380,12 +5400,13 @@ def define_arrow_marker(
     size: float = 8.0,
     color: str = "#000000",
     stroke_width: float = 1.6,
+    orient: str = "auto",
     name: str | None = None,
 ) -> str:
     """Create an arrowhead/endpoint marker from a named preset — a one-call shortcut for arrows.
 
     Builds the head geometry for you (vs `define_marker`, where you supply the shapes). Apply it
-    with `apply_marker(target, <id>, position="end")` (or "start"/"mid"). The marker is
+    with `apply_marker(target, <id>, position="end")` (or "start"/"mid"). It defaults to
     `orient="auto"` (follows the path direction) and scales with the stroke width, so an arrow on a
     curve points along the tangent at its tip.
 
@@ -5395,6 +5416,10 @@ def define_arrow_marker(
         size: Marker size in stroke-width multiples.
         color: Head color — fill for solid presets, stroke for "open".
         stroke_width: Stroke width (in the 0..10 marker space) for the "open" preset.
+        orient: "auto", "auto-start-reverse", or an angle in degrees. "auto-start-reverse" is the
+            start-arrowhead answer: applied at `position="start"` the head points BACK at the
+            source, and the same def still points forward when used at "end" elsewhere (which is
+            exactly how the double-ended diagram edge uses it).
         name: Friendly name, usable as the "@name" paint/resource shorthand.
 
     Returns:
@@ -5406,6 +5431,7 @@ def define_arrow_marker(
         size=size,
         color=color,
         stroke_width=stroke_width,
+        orient=orient,
         name=name,
     )
 
@@ -6190,6 +6216,7 @@ def render_document(
     scale: float = 1.0,
     background: str | None = None,
     backend: str | None = None,
+    path: str | None = None,
 ) -> list[str | MCPImage]:
     """Render a document to a raster image so you can SEE the current result and iterate.
 
@@ -6199,15 +6226,24 @@ def render_document(
         scale: Zoom factor on the document's natural pixel size (e.g. 2.0 for a sharper preview).
         background: Optional CSS background color; omit for a transparent canvas.
         backend: Render backend name; omit to use the default (resvg).
+        path: Also write the PNG to this file (atomically written before the call returns), the
+            way to keep a render the harness cannot pass through. The returned summary carries
+            the absolute path. Relative paths resolve against THIS SERVER's working directory —
+            pass an absolute path.
 
     Returns:
-        A short text summary plus the rendered PNG image (base64) shown inline.
+        A short text summary (with the file path when `path` was given) plus the rendered PNG
+        image (base64) shown inline.
     """
     svg = _export_svg(_doc(document_id))
     renderer = get_renderer(backend)
     result = renderer.render(RenderRequest(svg=svg, scale=scale, background=background))
     feedback = build_feedback(result)
-    return [feedback.summary, feedback.image]
+    summary = feedback.summary
+    if path is not None:
+        target = write_render_file(Path(path), result.png)
+        summary = f"{summary}; written to {target}"
+    return [summary, feedback.image]
 
 
 @mcp.tool
@@ -6267,10 +6303,14 @@ def export_render(
     librsvg's ``rsvg-convert``; ``svg`` writes the serialized source. cairo is intentionally not
     used — it silently drops SVG filters (e.g. drop shadows render blank).
 
+    The write is atomic and fsynced before the call returns (temp file, rename, directory sync),
+    so a read or watch straight after sees the finished file, never a torn or stale one.
+
     Args:
         format: One of png, jpeg, webp, pdf, ps, eps, svg.
         scale: Zoom factor on the document's natural size (raster) or page (vector).
-        path: Output file path; defaults to ``render.<format>`` in the working directory.
+        path: Output file path; defaults to ``render.<format>`` in THIS SERVER's working directory
+            — the returned path is always absolute, so trust it rather than re-deriving it.
         background: Optional CSS background color; omit for transparent (raster) / white (vector).
 
     Returns:
@@ -6279,19 +6319,8 @@ def export_render(
     svg = _export_svg(_doc(document_id))
     data = export_bytes(svg, format, scale=scale, background=background)
     out = Path(path) if path else Path(f"render.{format.lower()}")
-    try:
-        out.write_bytes(data)
-    except OSError as exc:
-        reason = (
-            "directory does not exist"
-            if not out.parent.exists()
-            else f"the parent {out.parent} exists but the write was refused"
-        )
-        raise RenderError(
-            f"export_render could not write {out}: {exc}. {reason}. If this path is under a "
-            "sandbox or tmpfs, write inside the project directory instead."
-        ) from exc
-    return {"path": str(out.resolve()), "format": format.lower(), "bytes": len(data)}
+    resolved = write_render_file(out, data)
+    return {"path": str(resolved), "format": format.lower(), "bytes": len(data)}
 
 
 @mcp.tool

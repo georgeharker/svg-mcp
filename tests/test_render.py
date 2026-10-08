@@ -7,6 +7,7 @@ skipped when the binary is absent, so the suite stays green in CI without resvg 
 from __future__ import annotations
 
 import io
+import tempfile
 
 import pytest
 
@@ -112,3 +113,41 @@ def test_export_pdf_when_rsvg_available() -> None:
         pytest.skip("rsvg-convert not installed")
     pdf = export_bytes(SAMPLE_SVG, "pdf")
     assert pdf[:5] == b"%PDF-"
+
+
+# --- durable file writes (export_render returned before the file was usable) ---
+
+
+def test_write_render_file_is_atomic_and_durable() -> None:
+    from pathlib import Path
+
+    from svg_mcp.render.export import write_render_file
+
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "out.png"
+        resolved = write_render_file(target, b"first")
+        assert resolved.is_absolute()
+        assert target.read_bytes() == b"first"
+        # replaces wholesale: no stale bytes, no temp droppings left behind
+        write_render_file(target, b"second-payload")
+        assert target.read_bytes() == b"second-payload"
+        leftovers = [p.name for p in Path(tmp).iterdir()]
+        assert leftovers == ["out.png"]
+
+
+def test_write_render_file_creates_parents_and_reports_refusals() -> None:
+    from pathlib import Path
+
+    from svg_mcp.render.base import RenderError
+    from svg_mcp.render.export import write_render_file
+
+    with tempfile.TemporaryDirectory() as tmp:
+        nested = Path(tmp) / "docs" / "images" / "out.png"
+        write_render_file(nested, b"x")
+        assert nested.read_bytes() == b"x"
+    # a write under a file (not a directory) is refused, not half-finished
+    with tempfile.TemporaryDirectory() as tmp:
+        blocker = Path(tmp) / "file"
+        blocker.write_text("not a dir")
+        with pytest.raises(RenderError):
+            write_render_file(blocker / "impossible.png", b"x")

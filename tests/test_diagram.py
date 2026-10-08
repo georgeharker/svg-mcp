@@ -17,6 +17,7 @@ from svg_mcp.ops.diagram import (
     Corridor,
     LabelContext,
     _box_of,
+    _first_path,
     _overlap_area,
     _shape_for,
     anchor_point,
@@ -1080,3 +1081,158 @@ def test_reflow_rebakes_the_label_halo_after_a_variant_switch() -> None:
     dark = doc.theme_meta["default"].tokens["--canvas"]
     assert dark != light
     assert label.style["stroke"] == dark  # the reflow is the re-bake
+
+
+# --- double-ended edges (arrow_start on the spec) ------------------------------
+
+
+def test_a_double_ended_edge_wears_both_markers_on_one_shared_head() -> None:
+    doc = _doc()
+    a, b = _pair(doc)
+    edge = ops.add_diagram_edge(doc, source=a, target=b, arrow_start=True)
+    path = _first_path(doc.resolve(edge.ref.id))
+    assert path is not None
+    assert path.style["marker-end"] == "url(#diagram-arrow)"
+    assert path.style["marker-start"] == "url(#diagram-arrow)"
+    # The shared def orients itself: marker-start heads point back at the source, and the
+    # same def still serves markerEnd-only edges (auto-start-reverse degrades to auto there).
+    marker = doc.svg.getElementById("diagram-arrow")
+    assert marker is not None and marker.get("orient") == "auto-start-reverse"
+
+
+def test_arrow_start_is_spec_geometry_that_survives_relayout() -> None:
+    doc = _doc()
+    a, b = _pair(doc)
+    edge = ops.add_diagram_edge(doc, source=a, target=b, arrow_start=True)
+    spec = read_edge_spec(doc.resolve(edge.ref.id))
+    assert spec is not None and spec.arrow_start is True
+    # the exact regression from 2026-10-07: start markers were inline ink, and reflow
+    # (or an edge edit) rewrote the style without it.
+    ops.edit_diagram_node(doc, a, label="A (renamed)")
+    ops.reflow(doc)
+    ops.edit_diagram_edge(doc, edge.ref.id, label="req")
+    ops.reflow(doc)
+    path = _first_path(doc.resolve(edge.ref.id))
+    assert path is not None
+    assert path.style["marker-start"] == "url(#diagram-arrow)"
+    assert path.style["marker-end"] == "url(#diagram-arrow)"
+
+
+def test_a_plain_edge_writes_no_arrow_start_key_and_clears_spec_ways() -> None:
+    doc = _doc()
+    a, b = _pair(doc)
+    edge = ops.add_diagram_edge(doc, source=a, target=b)
+    import json
+
+    raw = doc.resolve(edge.ref.id).get("data-diagram-edge")
+    assert raw is not None and "arrow_start" not in json.loads(raw)
+    # absent key = router default, byte-identical to before
+    ops.edit_diagram_edge(doc, edge.ref.id, arrow_start=True)
+    spec = read_edge_spec(doc.resolve(edge.ref.id))
+    assert spec is not None and spec.arrow_start is True
+    ops.edit_diagram_edge(doc, edge.ref.id, arrow_start=False)
+    path = _first_path(doc.resolve(edge.ref.id))
+    assert path is not None
+    assert path.style.get("marker-start") is None
+    cleared = doc.resolve(edge.ref.id).get("data-diagram-edge")
+    assert cleared is not None and "arrow_start" not in json.loads(cleared)
+
+
+# --- markers through named styles (issue: define_style had no marker props) ----
+
+
+def test_a_named_style_can_carry_marker_props_that_survive_router_rewrites() -> None:
+    doc = _doc()
+    head_a = ops.define_arrow_marker(doc, preset="open", color="#0055cc", name="return-head")
+    head_b = ops.define_arrow_marker(doc, preset="triangle", color="#0055cc", name="go-head")
+    ops.define_style(
+        doc,
+        "rpc",
+        {
+            "marker-start": "@return-head",  # shorthand → url(#id)
+            "marker-end": head_b,  # bare id → url(#id)
+        },
+    )
+    a, b = _pair(doc)
+    edge = ops.add_diagram_edge(
+        doc, source=a, target=b, kind="control", styles=["rpc"], themed=False
+    )
+    path = _first_path(doc.resolve(edge.ref.id))
+    assert path is not None
+    # the router owns the inline style and does NOT know about the class rule's markers —
+    # so the class (not ink on the path) is the only thing carrying the start head:
+    assert path.style.get("marker-start") is None
+    ops.reflow(doc)
+    svg = export_svg(doc)
+    sheet = svg.split("</style>")[0]
+    assert f"marker-start:url(#{head_a})" in sheet  # resolved name → element id, in CSS
+    assert f"marker-end:url(#{head_b})" in sheet
+    assert _classes(doc, edge.ref.id)  # the class link the rules key on survived the reflow
+    assert path.style["marker-end"] == "url(#diagram-arrow)"  # spec end head is separate ink
+
+
+def test_marker_props_resolve_names_and_shorthands_and_keep_none() -> None:
+    from svg_mcp.ops.paint import resolve_paint_refs
+
+    doc = _doc()
+    head = ops.define_arrow_marker(doc, name="tri")
+    resolved = resolve_paint_refs(
+        doc,
+        {"marker-start": "@tri", "marker-mid": f"url(#{head})", "marker-end": "none"},
+    )
+    assert resolved is not None  # a non-empty style resolves in place, not to None
+    assert resolved["marker-start"] == f"url(#{head})"  # @name → the marker def's url(#id)
+    assert doc.svg.getElementById(head) is not None  # ...pointing at a real element
+    assert resolved["marker-mid"] == f"url(#{head})"  # already-resolved url passes through
+    assert resolved["marker-end"] == "none"  # explicit none passes through untouched
+
+
+# --- marker builder knobs (issue: orient pinned to auto, no viewBox) ----------
+
+
+def test_define_marker_accepts_orient_and_view_box() -> None:
+    doc = _doc()
+    glyph = ops.add_path(doc, d="M 0 0 L 10 5 L 0 10 Z")
+    backwards = ops.define_marker(
+        doc, content=[glyph.id], ref_x=10, ref_y=5, view_box="0 0 10 10",
+        orient="auto-start-reverse", name="back-head",
+    )
+    marker = doc.svg.getElementById(backwards)
+    assert marker is not None
+    assert marker.get("orient") == "auto-start-reverse"
+    assert marker.get("viewBox") == "0 0 10 10"
+
+
+def test_define_arrow_marker_orient_passthrough() -> None:
+    doc = _doc()
+    head = ops.define_arrow_marker(doc, preset="triangle", orient="auto-start-reverse")
+    marker = next(d for d in doc.svg.defs if d.TAG == "marker" and d.get_id() == head)
+    assert marker.get("orient") == "auto-start-reverse"
+    assert marker.get("viewBox") == "0 0 10 10"  # the 0..10 preset geometry still maps clean
+
+
+def test_a_reversed_start_head_renders_pointing_back_at_the_source() -> None:
+    renderer = get_renderer()
+    if not renderer.available():
+        pytest.skip("no resvg backend available")
+    from PIL import Image
+
+    doc = _doc()
+    a = ops.add_diagram_node(doc, kind="service", label="A", x=80, y=120, width=100, height=60)
+    b = ops.add_diagram_node(doc, kind="service", label="B", x=420, y=120, width=100, height=60)
+    ops.add_diagram_edge(doc, source=a.ref.id, target=b.ref.id, arrow_start=True)
+    result = renderer.render(
+        RenderRequest(svg=export_svg(doc), background="#ffffff")  # opaque: ink and fill differ
+    )
+    image = Image.open(io.BytesIO(result.png)).convert("RGB")
+
+    def ink(x: int, y: int = 150) -> bool:  # the route leaves A's E face (x=180) at y=150
+        pixel = image.getpixel((x, y))
+        assert isinstance(pixel, tuple)
+        return sum(pixel[:3]) < 700  # below #eceef1 node fill / #ffffff background
+
+    # The head sits OUTSIDE the face on the PATH side (x 180..192), tip AT the face:
+    assert any(ink(x) for x in range(182, 192)), "start head missing just outside the source face"
+    # ...and pointed BACK at A: were it plain `auto`, the flipped base would ink x≈168..179,
+    # INSIDE the node, where only #eceef1 fill may be.
+    assert not any(ink(x) for x in range(160, 178)), "arrowhead ink inside the node = wrong orient"

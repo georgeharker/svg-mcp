@@ -78,6 +78,14 @@ class ShapeStyle(BaseModel):
     dominant_baseline: str | None = None
     # Paint order, e.g. "stroke fill" to draw the stroke behind the fill.
     paint_order: str | None = None
+    # Terminal glyphs — by friendly name, element id, "@name" shorthand, an already-resolved
+    # "url(#id)", or "none" (explicitly none here). Resolved to ``url(#id)`` by
+    # ``resolve_paint_refs`` wherever a style is applied or defined, so a named class can carry
+    # a marker rule that survives reflow (the diagram router rewrites only the inline style).
+    # Reference SVG 1.1 §11.6.3: marker-* is valid on any container/graphics element.
+    marker_start: str | None = None
+    marker_mid: str | None = None
+    marker_end: str | None = None
 
     def to_style_dict(self) -> dict[str, str]:
         """Render to SVG presentation properties (omitting unset fields)."""
@@ -103,5 +111,8 @@ class ShapeStyle(BaseModel):
             "text-decoration": self.text_decoration,
             "dominant-baseline": self.dominant_baseline,
             "paint-order": self.paint_order,
+            "marker-start": self.marker_start,
+            "marker-mid": self.marker_mid,
+            "marker-end": self.marker_end,
         }
         return {key: str(value) for key, value in mapping.items() if value is not None}

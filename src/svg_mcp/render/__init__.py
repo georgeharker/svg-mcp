@@ -11,7 +11,7 @@ from collections.abc import Callable
 from ..config import get_settings
 from .base import Renderer, RenderError, RenderRequest, RenderResult
 from .cairo import CairoRenderer
-from .export import SUPPORTED_FORMATS, export_bytes, rsvg_available
+from .export import SUPPORTED_FORMATS, export_bytes, rsvg_available, write_render_file
 from .feedback import Feedback, build_feedback, downscale_png
 from .inkscape import InkscapeRenderer
 from .resvg import ResvgCliRenderer
@@ -58,4 +58,5 @@ __all__ = [
     "export_bytes",
     "SUPPORTED_FORMATS",
     "rsvg_available",
+    "write_render_file",
 ]

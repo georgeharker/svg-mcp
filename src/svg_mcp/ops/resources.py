@@ -11,12 +11,14 @@ import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import cast
 from urllib.parse import quote
 
 import inkex
+import lxml.etree as etree
 import tinycss2
 from inkex import BaseElement
-from lxml import etree
+from tinycss2.ast import IdentToken, LiteralToken, QualifiedRule
 from tinycss2.ast import Node as CssNode
 
 from ..model.document import Document
@@ -83,15 +85,15 @@ def _set_prop(element: BaseElement, key: str, value: str) -> None:
 # --- named styles (CSS classes) -------------------------------------------
 
 
-def _rule_classes(rule: CssNode) -> list[str]:
+def _rule_classes(rule: QualifiedRule) -> list[str]:
     """Every class token a qualified rule's selector list names, in order of appearance."""
     prelude = list(rule.prelude)
     out: list[str] = []
     for index, token in enumerate(prelude):
-        if str(token.type) != "literal" or str(token.value) != ".":
+        if not isinstance(token, LiteralToken) or str(token.value) != ".":
             continue
         following = prelude[index + 1] if index + 1 < len(prelude) else None
-        if following is not None and str(following.type) == "ident":
+        if isinstance(following, IdentToken):
             out.append(str(following.value))
     return out
 
@@ -100,7 +102,7 @@ def _normalized(rule: CssNode) -> str:
     return " ".join(str(tinycss2.serialize([rule])).split())
 
 
-def _strip_imported(css: str, superseded: Callable[[CssNode], bool]) -> str:
+def _strip_imported(css: str, superseded: Callable[[QualifiedRule], bool]) -> str:
     """Drop the top-level rules ``superseded`` claims, keeping everything else verbatim.
 
     CSS that does not parse cleanly is returned untouched: a sheet we cannot read is a sheet we
@@ -111,14 +113,20 @@ def _strip_imported(css: str, superseded: Callable[[CssNode], bool]) -> str:
     nodes = tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True)
     if any(str(node.type) == "error" for node in nodes):
         return css
-    kept = [node for node in nodes if not (_is_rule(node) and superseded(node))]
+    kept: list[CssNode] = []
+    for node in nodes:
+        rule = _is_rule(node)
+        if rule is not None and superseded(rule):
+            continue
+        kept.append(node)
     if len(kept) == len(nodes):
         return css
     return "\n".join(str(tinycss2.serialize([node])).strip() for node in kept)
 
 
-def _is_rule(node: CssNode) -> bool:
-    return str(node.type) == "qualified-rule"
+def _is_rule(node: CssNode) -> QualifiedRule | None:
+    """The node AS a qualified rule — narrowing lets ``prelude`` readers stay type-checked."""
+    return cast(QualifiedRule, node) if str(node.type) == "qualified-rule" else None
 
 
 def supersede_imported_theme(doc: Document, theme: str, block: str) -> None:
@@ -135,13 +143,13 @@ def supersede_imported_theme(doc: Document, theme: str, block: str) -> None:
     Anything else stays forever: a rule naming a class nothing here manages is somebody's own CSS.
     """
     replaced = {
-        _normalized(rule)
-        for rule in tinycss2.parse_stylesheet(block, skip_comments=True, skip_whitespace=True)
-        if _is_rule(rule)
+        _normalized(rule_q)
+        for n in tinycss2.parse_stylesheet(block, skip_comments=True, skip_whitespace=True)
+        if (rule_q := _is_rule(n)) is not None
     }
     prefix = f"{theme}-"
 
-    def superseded(rule: CssNode) -> bool:
+    def superseded(rule: QualifiedRule) -> bool:
         classes = _rule_classes(rule)
         if classes and all(name.startswith(prefix) for name in classes):
             return True
@@ -157,13 +165,13 @@ def supersede_imported_style(doc: Document, name: str) -> None:
     mentions the class was written by hand and is nobody's to throw away.
     """
 
-    def superseded(rule: CssNode) -> bool:
+    def superseded(rule: QualifiedRule) -> bool:
         significant = [token for token in rule.prelude if str(token.type) != "whitespace"]
         return (
             len(significant) == 2
-            and str(significant[0].type) == "literal"
+            and isinstance(significant[0], LiteralToken)
             and str(significant[0].value) == "."
-            and str(significant[1].type) == "ident"
+            and isinstance(significant[1], IdentToken)
             and str(significant[1].value) == name
         )
 
@@ -1546,9 +1554,21 @@ def define_marker(
     marker_height: float = 10,
     orient: str = "auto",
     units: str = "strokeWidth",
+    view_box: str | None = None,
     name: str | None = None,
 ) -> str:
-    """Create a ``<marker>`` (arrowhead/dot) from existing nodes; returns its id."""
+    """Create a ``<marker>`` (arrowhead/dot) from existing nodes; returns its id.
+
+    Args:
+        orient: "auto", "auto-start-reverse", or a numeric angle ("45").
+            "auto-start-reverse" is what a start-end arrowhead needs: on ``marker-end`` it
+            behaves exactly like "auto", but on ``marker-start`` it points BACK along the
+            path — one def serves heads at either end of an edge.
+        view_box: Optional marker viewBox, e.g. "0 0 10 10". Given, content coordinates map
+            from that box into the marker viewport (ref_x/ref_y stay in content space), so a
+            glyph drawn in its natural units can be pinned to any marker size — the same
+            convention the built-in diagram arrow uses.
+    """
     marker = inkex.Marker()
     for key, value in (
         ("refX", ref_x),
@@ -1559,6 +1579,8 @@ def define_marker(
         ("markerUnits", units),
     ):
         marker.set(key, value)
+    if view_box is not None:
+        marker.set("viewBox", view_box)
     marker_id = doc.add_def(marker, "marker", name)
     for node in content:
         marker.add(doc.resolve(node))
@@ -1585,19 +1607,25 @@ def define_arrow_marker(
     size: float = 8.0,
     color: str = "#000000",
     stroke_width: float = 1.6,
+    orient: str = "auto",
     name: str | None = None,
 ) -> str:
     """Create an arrowhead/endpoint ``<marker>`` from a named preset; returns its id.
 
     A one-call convenience over ``define_marker``: it builds the head geometry for you. Apply it
-    with ``apply_marker(target, id, position="end")`` (or start/mid). It is ``orient="auto"``
-    so it follows the path direction, and ``markerUnits="strokeWidth"`` so it scales with the line.
+    with ``apply_marker(target, id, position="end")`` (or start/mid). It defaults to
+    ``orient="auto"`` so it follows the path direction, and ``markerUnits="strokeWidth"`` so it
+    scales with the line.
 
     Args:
         preset: One of "triangle", "barbed", "stealth", "diamond", "open" (stroked chevron), "dot".
         size: Marker size in stroke-width multiples (markerWidth/Height).
         color: Head color — the fill for solid presets, the stroke for "open".
         stroke_width: Stroke width (in the 0..10 marker space) for the "open" preset.
+        orient: "auto", "auto-start-reverse", or a numeric angle — see :func:`define_marker`.
+            "auto-start-reverse" is the start-arrowhead answer: applied at ``start`` the head
+            points BACK at the source, and the same def still points forward if applied at
+            ``end`` elsewhere (which is exactly how the double-ended diagram edge uses it).
         name: Friendly name, usable as the "@name" shorthand.
 
     Returns:
@@ -1613,7 +1641,7 @@ def define_arrow_marker(
         ("refY", 5.0),
         ("markerWidth", size),
         ("markerHeight", size),
-        ("orient", "auto"),
+        ("orient", orient),
         ("markerUnits", "strokeWidth"),
         ("viewBox", "0 0 10 10"),  # map the 0..10 geometry cleanly into the marker box
     ):

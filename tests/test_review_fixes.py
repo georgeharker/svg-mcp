@@ -68,9 +68,12 @@ def test_a_reimported_document_keeps_its_css_when_the_sheet_is_next_synced() -> 
     assert ".house-shape" in exported and ".accent" in exported
 
     reopened = ops.load_svg_document(svg=exported)
-    # The registries genuinely start empty — the CSS is only in the imported <style>.
-    assert reopened.theme_css == {} and reopened.styles == {}
-    assert reopened.imported_css != ""
+    # UPDATED for the residency stamp: a stamped theme is re-registered ON IMPORT now (its
+    # registry speaks again, the shim copy superseded); named styles have no stamp, so their
+    # rules still live only in the imported <style> until redefined.
+    assert "house" in reopened.theme_css and reopened.styles == {}
+    assert ".accent" in reopened.imported_css
+    assert reopened.import_notes == []
 
     # Anything that re-syncs the sheet used to rewrite it from those empty registries.
     ops.define_style(reopened, "later", {"stroke": "#00ff00"})
@@ -99,12 +102,16 @@ def test_reloading_the_same_theme_over_imported_css_supersedes_the_imported_copy
     doc = _doc()
     ops.load_theme(doc, "house", search_paths=[FIXTURES])
     reopened = ops.load_svg_document(svg=export_svg(doc))
-    assert reopened.imported_css != ""
-    ops.load_theme(reopened, "house", search_paths=[FIXTURES])
+    # with the residency stamp, the import itself re-registers the theme: the shim copy is
+    # superseded by the re-materialized block AT IMPORT, not on the next manual reload.
+    assert "house-shape" not in reopened.imported_css
+    assert "house" in reopened.theme_css
     sheet = str(reopened.stylesheet().text or "")
     block = reopened.theme_css["house"]
     assert sheet.count(block) == 1
-    assert "house-shape" not in reopened.imported_css
+    # a manual reload on top stays idempotent (still exactly one copy of the block)
+    ops.load_theme(reopened, "house", search_paths=[FIXTURES])
+    assert str(reopened.stylesheet().text or "").count(reopened.theme_css["house"]) == 1
 
 
 # --- F2: a rejected boolean must not have consumed its inputs ----------------

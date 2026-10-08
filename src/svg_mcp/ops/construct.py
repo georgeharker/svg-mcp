@@ -1007,56 +1007,71 @@ def _offset_parametric(
     Returns a new parametric shape of the SAME kind (so it stays editable), or None if ``element``
     isn't one of those (then the caller falls back to the general path offset).
     """
-    raw = element.get(_SQUIRCLE_ATTR)
-    if raw is not None:
-        s = json.loads(raw)
+    spec = _parametric_spec(element, _SQUIRCLE_ATTR)
+    if spec is not None:
         return add_squircle(
             doc,
-            x=float(s["x"]) - distance,
-            y=float(s["y"]) - distance,
-            width=float(s["width"]) + 2 * distance,
-            height=float(s["height"]) + 2 * distance,
-            radius=max(0.0, float(s["radius"]) + distance),
-            smoothness=float(s["smoothness"]),
+            x=spec["x"] - distance,
+            y=spec["y"] - distance,
+            width=spec["width"] + 2 * distance,
+            height=spec["height"] + 2 * distance,
+            radius=max(0.0, spec["radius"] + distance),
+            smoothness=spec["smoothness"],
             parent=parent,
             name=name,
             style=style,
         )
-    raw = element.get(_PILL_ATTR)
-    if raw is not None:
-        s = json.loads(raw)
+    spec = _parametric_spec(element, _PILL_ATTR)
+    if spec is not None:
         return add_pill(
             doc,
-            x=float(s["x"]) - distance,
-            y=float(s["y"]) - distance,
-            width=float(s["width"]) + 2 * distance,
-            height=float(s["height"]) + 2 * distance,
-            smoothness=float(s["smoothness"]),
+            x=spec["x"] - distance,
+            y=spec["y"] - distance,
+            width=spec["width"] + 2 * distance,
+            height=spec["height"] + 2 * distance,
+            smoothness=spec["smoothness"],
             parent=parent,
             name=name,
             style=style,
         )
-    raw = element.get(_ROUNDED_POLYGON_ATTR)
-    if raw is not None:
-        s = json.loads(raw)
-        sides = int(s["sides"])
+    spec = _parametric_spec(element, _ROUNDED_POLYGON_ATTR)
+    if spec is not None:
+        sides = int(spec["sides"])
         # Offsetting a regular polygon moves each edge out by `distance`: the apothem grows by
         # `distance`, so the circumradius grows by distance / cos(pi/sides); the fillet by distance.
         grow = distance / math.cos(math.pi / sides)
         return add_rounded_polygon(
             doc,
-            cx=float(s["cx"]),
-            cy=float(s["cy"]),
-            radius=max(0.0, float(s["radius"]) + grow),
+            cx=spec["cx"],
+            cy=spec["cy"],
+            radius=max(0.0, spec["radius"] + grow),
             sides=sides,
-            corner_radius=max(0.0, float(s["corner_radius"]) + distance),
-            smoothness=float(s["smoothness"]),
-            start_angle=float(s["start_angle"]),
+            corner_radius=max(0.0, spec["corner_radius"] + distance),
+            smoothness=spec["smoothness"],
+            start_angle=spec["start_angle"],
             parent=parent,
             name=name,
             style=style,
         )
     return None
+
+
+def _parametric_spec(element: BaseElement, attr: str) -> dict[str, float] | None:
+    """The stored parametric spec on ``element`` as floats, or None (not parametric / corrupt).
+
+    A present-but-corrupt attr — a hand-edited SVG, or a spec an older version wrote
+    differently — reads as NOT parametric rather than crashing: the caller's general offset
+    covers it from the element's real path data, which is intact however the spec rotted. Same
+    contract the diagram facades' read_*_spec use.
+    """
+    raw = element.get(attr)
+    if raw is None:
+        return None
+    try:
+        s = json.loads(raw)
+        return {key: float(value) for key, value in s.items()}  # also non-numeric / non-dict
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
 
 
 def _subpath_segments(sub: list[list[list[float]]]) -> tuple[list[Cubic], bool]:
@@ -1464,12 +1479,27 @@ def load_svg_document(*, svg: str | None = None, path: str | None = None) -> Doc
     """Build a :class:`Document` from SVG source given inline ``svg`` OR a file ``path``.
 
     Exactly one source must be provided. Reading from a path is preferred for large documents.
+
+    Themes the document was stamped with at serialize time (`data-svgmcp-themes`) are
+    re-materialized on import, so new facades hook the same theme they did before the round
+    trip; themes that no longer resolve on disk are reported as document import notes and keep
+    painting via the imported-CSS shim only.
     """
     if (svg is None) == (path is None):
         raise InvalidArgument("provide exactly one of svg or path")
     text = Path(path).read_text(encoding="utf-8") if path is not None else svg
     assert text is not None  # narrowed by the xor check above
-    return Document.from_svg(text)
+    document = Document.from_svg(text)
+    # Deferred import — `ops.themes` reaches back into this module the way `ops.annotate` does.
+    from .themes import reinstate_themes
+
+    unresolved = reinstate_themes(document)
+    if unresolved:
+        document.import_notes.append(
+            "themes not re-materialized (not found on disk; rules preserved, "
+            "registry not restored): " + ", ".join(sorted(unresolved))
+        )
+    return document
 
 
 def add_use(
@@ -1579,7 +1609,7 @@ def _first_float(value: object, default: float = 0.0) -> float:
         return default
 
 
-def _run_font(style: BaseElement) -> tuple[str, float, bool, bool]:
+def _run_font(style: inkex.Style) -> tuple[str, float, bool, bool]:
     family = str(style.get("font-family") or "sans-serif").split(",")[0].strip().strip("'\"")
     size = parse_font_size(str(style.get("font-size") or ""))
     bold = is_bold(str(style.get("font-weight") or ""))
@@ -1587,7 +1617,8 @@ def _run_font(style: BaseElement) -> tuple[str, float, bool, bool]:
     return family, size, bold, italic
 
 
-def _paint_style(style: BaseElement) -> BaseElement:
+def _paint_style(style: inkex.Style) -> inkex.Style:
+    """The paint properties a text style carries, lifted into a fresh style for the outline."""
     out = inkex.Style()
     for key in _PATH_PAINT_KEYS:
         value = style.get(key)
@@ -1723,7 +1754,7 @@ def text_to_path(doc: Document, target: str) -> NodeRef:
 
     base_style = element.specified_style()
     # Collect runs in order: the element's direct text, then each tspan (and its tail text).
-    runs: list[tuple[str, BaseElement, float | None, float | None, float | None, float | None]] = []
+    runs: list[tuple[str, inkex.Style, float | None, float | None, float | None, float | None]] = []
     if element.text:
         runs.append((element.text, base_style, None, None, None, None))
     for child in element:
@@ -1773,7 +1804,7 @@ def text_to_path(doc: Document, target: str) -> NodeRef:
     inline_total = sum(m[-1] for m in measured if m[5] is None)  # runs without an absolute x
     cursor_x = base_x + {"middle": -inline_total / 2.0, "end": -inline_total}.get(anchor, 0.0)
     cursor_y = base_y
-    pieces: list[tuple[str, BaseElement]] = []
+    pieces: list[tuple[str, inkex.Style]] = []
     for index, (text, family, size, bold, italic, ax, ay, dx, dy, width) in enumerate(measured):
         if ax is not None:
             cursor_x = ax + {"middle": -width / 2.0, "end": -width}.get(anchor, 0.0)

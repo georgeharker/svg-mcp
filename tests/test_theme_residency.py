@@ -350,3 +350,82 @@ def test_an_unstyled_rect_renders_in_the_theme_fill() -> None:
     pixel = image.getpixel((100, 60))
     assert isinstance(pixel, tuple)
     assert pixel[:3] == (51, 102, 255)  # --accent, via the auto-applied `.house-shape` hook
+
+
+# --- round trips: themes survive export/import through the residency stamp -----
+
+
+def _round_trip(doc: Document) -> Document:
+    imported = ops.load_svg_document(svg=export_svg(doc))
+    return imported
+
+
+def test_a_theme_survives_an_export_import_round_trip() -> None:
+    doc = _doc()
+    _load(doc, "house")  # serves shape/container + title/label roles
+    node = ops.add_diagram_node(doc, kind="service", label="A")
+    before = _classes(doc, node.ref.id)
+    assert any(cls.startswith("house-") for cls in before)
+
+    imported = _round_trip(doc)
+    # the registry is restored: new facades hook the theme again, identically to pre-import
+    fresh = ops.add_diagram_node(imported, kind="service", label="B")
+    assert _classes(imported, fresh.ref.id) == before  # same dressing, same fallback mix
+    assert "house" in imported.theme_css
+    assert imported.theme_routing["shape"] == "house"
+    # and the imported shim block was superseded by the re-materialized one (one copy, not two)
+    sheet = _stylesheet(imported)
+    assert sheet.count(".house-shape {") == 1
+    assert imported.import_notes == []
+
+
+def test_a_variant_survives_a_round_trip() -> None:
+    doc = _doc()
+    _load(doc, "house", variant="dark")
+    imported = _round_trip(doc)
+    assert imported.theme_meta["house"].variant == "dark"
+    assert imported.theme_routing["shape"] == "house"
+    # the variant's token overlay re-resolved, not just the name (dark differs from base)
+    base_doc = DocumentStore().create(200, 120)[1]
+    ops.load_theme(base_doc, "house", search_paths=[FIXTURES])
+    assert imported.theme_meta["house"].tokens != base_doc.theme_meta["house"].tokens
+
+
+def test_a_theme_missing_on_disk_keeps_its_paint_and_reports_itself() -> None:
+    doc = _doc()
+    _load(doc, "house")
+    node = ops.add_diagram_node(doc, kind="service", label="A")
+    # the same file but with the theme renamed everywhere (classes, stamp — attr values are
+    # HTML-escaped in serialization): "phantom" exists nowhere on disk.
+    text = (
+        export_svg(doc)
+        .replace("house-", "phantom-")
+        .replace('"house"', '"phantom"')
+        .replace("&quot;house&quot;", "&quot;phantom&quot;")
+    )
+
+    imported = ops.load_svg_document(svg=text)
+    assert "phantom" not in imported.theme_css  # nothing re-registered for it
+    assert "phantom" not in imported.theme_routing
+    assert any("phantom" in note for note in imported.import_notes)  # surfaced, not silent
+    # the imported shim still paints what was there; new nodes fall back as before the fix
+    assert ".phantom-shape" in imported.imported_css
+    fresh = ops.add_diagram_node(imported, kind="service", label="B")
+    assert all(not cls.startswith("phantom-") for cls in _classes(imported, fresh.ref.id))
+
+
+def test_an_unloaded_theme_is_not_resurrected_by_the_stamp() -> None:
+    doc = _doc()
+    _load(doc, "drafting")
+    ops.unload_theme(doc, "drafting")
+    imported = _round_trip(doc)
+    assert "drafting" not in imported.theme_css
+    assert imported.theme_routing == {}
+    fresh = ops.add_diagram_node(imported, kind="service", label="B")
+    assert _classes(imported, fresh.ref.id)  # hooked by the bundled default, not the unloaded one
+    assert all(not cls.startswith("drafting-") for cls in _classes(imported, fresh.ref.id))
+
+
+def test_a_document_without_themes_carries_no_stamp() -> None:
+    doc = _doc()  # nothing resident: no fallback hook has ever fired
+    assert "data-svgmcp-themes" not in export_svg(doc)

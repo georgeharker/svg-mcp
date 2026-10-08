@@ -13,6 +13,8 @@ correctly and adds vector PDF/PS/EPS, so it is the faithful vector engine.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
 import subprocess
 from io import BytesIO
@@ -30,6 +32,43 @@ SUPPORTED_FORMATS: tuple[str, ...] = (*_RASTER, *_VECTOR, "svg")
 def rsvg_available() -> bool:
     """True if the librsvg ``rsvg-convert`` binary (faithful vector export) is installed."""
     return shutil.which("rsvg-convert") is not None
+
+
+def write_render_file(path: Path, data: bytes) -> Path:
+    """Write render output atomically and durably; returns the resolved absolute path.
+
+    Writes a same-directory temp file, flushes and fsyncs it, atomically renames it over the
+    target, and fsyncs the parent directory entry before returning — so a reader (or a watcher
+    pipeline) never observes a torn or half-old file, and the call returning means the bytes
+    are durably on disk.
+    """
+    target = path.resolve()
+    tmp = target.with_name(f".{target.name}.tmp-{os.getpid()}-{os.urandom(4).hex()}")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)  # atomic: readers see the old file or the new one, never a stub
+        dir_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)  # the rename itself, so a crash cannot lose the new name
+        finally:
+            os.close(dir_fd)
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        reason = (
+            "directory does not exist"
+            if not target.parent.exists()
+            else f"the parent {target.parent} exists but the write was refused"
+        )
+        raise RenderError(
+            f"export could not write {target}: {exc}. {reason}. If this path is under a "
+            "sandbox or tmpfs, write inside the project directory instead."
+        ) from exc
+    return target
 
 
 def export_bytes(svg: str, fmt: str, *, scale: float = 1.0, background: str | None = None) -> bytes:
