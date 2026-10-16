@@ -82,10 +82,11 @@ const DEFAULT_GRACE = "1h"
 // ── pinned svg-mcp tool version ────────────────────────────────────
 
 /** The svg-mcp PyPI release this plugin runs by default (`uvx svg-mcp@<v>`).
- *  Decoupled from this package's OWN version so the plugin can version
- *  independently; keep it pointing at a real svg-mcp release. Override
- *  per-launch with the `version` option or `$SVG_MCP_VERSION`. */
-const SVG_MCP_TOOL_VERSION = "0.2.6"
+ *  Kept IN LOCKSTEP with the repo release by scripts/bump-version.sh — it
+ *  shipped stale at 0.2.6 for several releases, so fresh installs pinned to a
+ *  years-old server. Override per-launch with the `version` option or
+ *  `$SVG_MCP_VERSION`. */
+const SVG_MCP_TOOL_VERSION = "0.8.0"
 
 // ── the diagram-authoring directive ────────────────────────────────
 // Appended to the system prompt so the agent reaches for svg-mcp's tools instead of

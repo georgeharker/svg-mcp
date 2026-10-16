@@ -46,10 +46,12 @@ const DEFAULT_GRACE = "1h"
 // Floor-only against sharedserver's latest release: svg-mcp consumes sharedserver rather
 // than shipping it. Kept equal to the sibling plugins' value.
 const SHAREDSERVER_MIN_VERSION = "0.6.7"
-// The svg-mcp PyPI release this extension runs by default (`uvx svg-mcp@<v>`). Decoupled
-// from this package's OWN version (matching the OpenCode plugin); override per-launch
-// with $SVG_MCP_VERSION. Keep it pointing at a real svg-mcp release.
-const SVG_MCP_TOOL_VERSION = "0.2.6"
+// The svg-mcp PyPI release this extension runs by default (`uvx svg-mcp@<v>`). Override
+// per-launch with $SVG_MCP_VERSION. Kept IN LOCKSTEP with the repo release by
+// scripts/bump-version.sh — a plugin shipped un-updated here served svg-mcp@0.2.6 for
+// several releases. (Track the release this tag publishes; `latest` is not published
+// to the pi extension store, so users on `@latest` can still miss releases.)
+const SVG_MCP_TOOL_VERSION = "0.8.0"
 
 type LogFn = (level: "info" | "warn" | "error", message: string) => void
 

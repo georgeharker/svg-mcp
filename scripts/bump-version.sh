@@ -7,6 +7,10 @@
 #   - Cargo.toml                ([package] version = "X.Y.Z")        — if present
 #   - the Claude Code plugin    plugins/*/.claude-plugin/plugin.json ("version")
 #   - the opencode plugin       plugins/opencode/package.json        ("version")
+#   - the Pi extension          plugins/pi/package.json              ("version")
+#   - the svg-mcp pins          SVG_MCP_TOOL_VERSION in plugins/{pi,opencode}/src/index.ts
+#                               and the pi README's SVG_MCP_VERSION default row
+#   - self-reported version     src/svg_mcp/__init__.py __version__
 #   - the marketplace listing   .claude-plugin/marketplace.json      (plugins[].version)
 # and creates ONE release tag:
 #   - vX.Y.Z                    (the unified release trigger for PyPI / npm / crate)
@@ -47,6 +51,10 @@ read_lines() { # $1 = array name
 # ---- locate manifests -------------------------------------------------------
 MANIFESTS=()   # every file that gets the new version
 TARGETS=()     # parallel: "toml" | "json"
+
+# read_lines populates these via eval, which static analysis can't see — declare
+# them up front so "referenced before assignment" stays quiet and real.
+declare -a _py=() _cg=() _pj=() _oc=()
 
 # pyproject.toml: the project's own (root OR a package subdir, e.g. combiner/),
 # excluding vendored/submodule copies (vendor/, node_modules/).
@@ -236,9 +244,41 @@ for i in "${!MANIFESTS[@]}"; do
   LOCKS+=("$lock"); echo "  synced $(basename "$lock") ($cname -> $new)"
 done
 
+# The svg-mcp PyPI release the plugins pin (`uvx svg-mcp@<v>`) and the package's own
+# `__version__` string must move in lockstep too. They shipped OUT of lockstep: several
+# release bumps (0.4 -> 0.8) left every fresh pi/opencode default install pinned to the
+# years-old `svg-mcp@0.2.6`, and `svg_mcp.__version__` kept reporting 0.2.6 while the
+# manifests said otherwise — because no manifest listed those files. Loud failure if a
+# pattern misses, matching write_ver's behavior.
+PINS_AND_STRINGS=()
+sync_pin() { # $1=file $2=label $3=kind(ts|py|md) — replaces the first version match with the new version
+  local f="$1" label="$2" kind="$3"
+  [ -f "$f" ] || return 0
+  python3 - "$f" "$new" "$kind" <<'PY'
+import re, sys
+path, new, kind = sys.argv[1:4]
+pats = {
+    "ts": (r'const SVG_MCP_TOOL_VERSION *= *"[^"]+"', f'const SVG_MCP_TOOL_VERSION = "{new}"'),
+    "py": (r'^__version__ *= *"[^"]+"', f'__version__ = "{new}"'),
+    "md": (r"(\|\s*`SVG_MCP_VERSION`\s*\|\s*`)[^`]+(`)", rf"\g<1>{new}\g<2>"),
+}[kind]
+src = open(path).read()
+out, n = re.subn(pats[0], pats[1], src, count=1, flags=0 if kind != "py" else re.M)
+if n != 1:
+    sys.exit(f"error: {kind} version pattern not matched in {path}")
+open(path, "w").write(out)
+PY
+  PINS_AND_STRINGS+=("$f")
+  echo "  synced ${f#"$ROOT"/} ($label -> $new)"
+}
+sync_pin "$ROOT/plugins/pi/src/index.ts" "SVG_MCP_TOOL_VERSION" ts
+sync_pin "$ROOT/plugins/opencode/src/index.ts" "SVG_MCP_TOOL_VERSION" ts
+sync_pin "$ROOT/plugins/pi/README.md" "SVG_MCP_VERSION default row" md
+sync_pin "$ROOT/src/svg_mcp/__init__.py" "__version__" py
+
 [ "$do_commit" = 0 ] && { echo "files updated; skipped commit (--no-commit)"; exit 0; }
 
-git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"} ${INSTRS+"${INSTRS[@]}"}
+git -C "$ROOT" add "${MANIFESTS[@]}" ${LOCKS+"${LOCKS[@]}"} ${INSTRS+"${INSTRS[@]}"} ${PINS_AND_STRINGS+"${PINS_AND_STRINGS[@]}"}
 git -C "$ROOT" commit -m "release: $TAG — lockstep version across all manifests"
 echo "committed."
 
