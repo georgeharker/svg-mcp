@@ -86,7 +86,7 @@ const DEFAULT_GRACE = "1h"
  *  shipped stale at 0.2.6 for several releases, so fresh installs pinned to a
  *  years-old server. Override per-launch with the `version` option or
  *  `$SVG_MCP_VERSION`. */
-const SVG_MCP_TOOL_VERSION = "0.8.0"
+const SVG_MCP_TOOL_VERSION = "0.8.1"
 
 // ── the diagram-authoring directive ────────────────────────────────
 // Appended to the system prompt so the agent reaches for svg-mcp's tools instead of

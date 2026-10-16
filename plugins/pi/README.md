@@ -58,7 +58,7 @@ so they apply across every client. Pi-extension toggles use `PI_SVG_MCP_*`.
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `SVG_MCP_PORT` | `7731` | HTTP port svg-mcp serves on. |
-| `SVG_MCP_VERSION` | `0.8.0` | Pin the PyPI release (`uvx svg-mcp@<v>`). Kept in lockstep with this package's release by `scripts/bump-version.sh`. |
+| `SVG_MCP_VERSION` | `0.8.1` | Pin the PyPI release (`uvx svg-mcp@<v>`). Kept in lockstep with this package's release by `scripts/bump-version.sh`. |
 | `SVG_MCP_DEV` | — | Dev checkout for `uv run --project <dir>` (a path, or `1` for in-repo source). |
 | `PI_SVG_MCP_NAME` | `svg-mcp` | `sharedserver` instance name. |
 | `PI_SVG_MCP_GRACE` | `1h` | `sharedserver` grace period. |
