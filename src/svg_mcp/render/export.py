@@ -17,6 +17,7 @@ import contextlib
 import os
 import shutil
 import subprocess
+import sys
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -51,11 +52,16 @@ def write_render_file(path: Path, data: bytes) -> Path:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, target)  # atomic: readers see the old file or the new one, never a stub
-        dir_fd = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)  # the rename itself, so a crash cannot lose the new name
-        finally:
-            os.close(dir_fd)
+        if sys.platform == "win32":
+            # No directory-fd fsync on Windows (dirs can't be opened/fsynced); NTFS metadata
+            # journaling covers the rename, and the file itself is already fsynced.
+            pass
+        else:
+            dir_fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)  # the rename itself, so a crash cannot lose the new name
+            finally:
+                os.close(dir_fd)
     except OSError as exc:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
