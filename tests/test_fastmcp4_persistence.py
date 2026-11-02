@@ -10,21 +10,33 @@ silently, with no errors reported. ``svg_mcp.server._store()`` keys on the per-c
 - a document created in one request is still there for later requests (incl. resources);
 - different client sessions get isolated stores;
 - closing a client releases its store, so a fresh session starts empty;
-- outside a request, direct/programmatic tool use resolves to the shared default store.
+- outside a request, direct/programmatic tool use resolves to the shared default store;
+- the combiner handover contract: a client that drops WITHOUT a DELETE (park), then
+  reattaches with the same ``Mcp-Session-Id``, reaches the same store; a DELETE (forget)
+  releases the store.
 """
 
 import asyncio
+import contextlib
 import json
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from types import TracebackType
 from typing import Any, cast
 
+import anyio
 import pytest
 import uvicorn
 from fastmcp import Client
+from mcp.client.session import ClientSession
+from mcp.client.streamable_http import StreamableHTTPTransport
+from mcp.shared._context_streams import create_context_streams
+from mcp.shared._httpx_utils import create_mcp_http_client
+from mcp.shared.message import SessionMessage
+from mcp.types import InitializedNotification
+from mcp_types.version import LATEST_HANDSHAKE_VERSION
 
 from svg_mcp.server import _DEFAULT_STORE, _SESSION_STORES
 from svg_mcp.server import mcp as _mcp_server
@@ -84,7 +96,7 @@ async def _legacy_client(url: str) -> Client[Any]:
 
 
 def _resource_text(contents: object) -> str:
-    """First resource payload's text (mcp 1/2 differ in how the union is typed, not in runtime)."""
+    """First resource payload's text (mcp 1/2 differ only in union typing, not runtime)."""
     text: str = cast("Any", contents).text
     return text
 
@@ -153,3 +165,118 @@ def test_programmatic_use_uses_shared_default_store() -> None:
     assert _store() is _DEFAULT_STORE
     document_id, _ = _DEFAULT_STORE.create(10, 10)
     assert document_id in _DEFAULT_STORE.list_ids()
+
+
+# --- combiner handover contract --------------------------------------------
+# The mcp-combiner parks upstream sessions across its own restarts and resumes them
+# by reattaching with the SAME Mcp-Session-Id (skip initialize, re-send
+# notifications/initialized). That contract only holds if svg-mcp keeps the per-client
+# state (and its Connection identity) alive while the client is GONE, which requires:
+# (a) the SDK/server not tearing the session down when the client's HTTP connection
+#     / GET stream drops without a DELETE (combiner park = drop without DELETE), and
+# (b) the idle timeout being off — parked sessions sit idle up to the 1h park TTL.
+# These tests pin both sides of that contract over real HTTP with raw mcp 2 protocol
+# calls (the combiner's client face), mirroring what its ResumableStreamableHttpTransport
+# does. The combiner maintains ids across its own proper restarts; svg-mcp's side of the
+# deal is reattach-stability, which is what is proven here.
+
+
+@contextlib.asynccontextmanager
+async def _raw_session(
+    url: str,
+    *,
+    seeded_session_id: str | None = None,
+    terminate_on_close: bool = True,
+) -> AsyncIterator[tuple[StreamableHTTPTransport, ClientSession]]:
+    """A minimal raw mcp 2 streamable-HTTP client — mirrors the SDK's own transport
+    composition, plus the combiner resume path: connect with a pre-established
+    Mcp-Session-Id (skip initialize, re-send notifications/initialized) and reattach
+    to the server's live session.
+    """
+    transport = StreamableHTTPTransport(url)
+    seeded = seeded_session_id is not None
+    if seeded:
+        transport.session_id = seeded_session_id
+        transport._protocol_version_header = LATEST_HANDSHAKE_VERSION
+    http_client = create_mcp_http_client()
+
+    read_writer, read_stream = create_context_streams[SessionMessage | Exception](0)
+    write_stream, write_reader = create_context_streams[SessionMessage](0)
+
+    async with (
+        http_client,
+        read_writer,
+        read_stream,
+        write_stream,
+        write_reader,
+        anyio.create_task_group() as tg,
+    ):
+
+        def _start_get_stream() -> None:
+            tg.start_soon(transport.handle_get_stream, http_client, read_writer)
+
+        tg.start_soon(
+            transport.post_writer,
+            http_client,
+            write_reader,
+            read_writer,
+            write_stream,
+            _start_get_stream,
+            tg,
+        )
+
+        async with ClientSession(read_stream, write_stream) as session:
+            if seeded:
+                await session.send_notification(InitializedNotification())
+            else:
+                await session.initialize()
+            try:
+                yield transport, session
+            finally:
+                if transport.session_id and terminate_on_close:
+                    await transport.terminate_session(http_client)
+                tg.cancel_scope.cancel()
+
+
+def test_combiner_reattach_same_session_id_keeps_documents(server: _Server) -> None:
+    """The combiner's park/resume: drop without DELETE, then reattach with the same
+    Mcp-Session-Id (no initialize) — the SAME per-client store must be reached and
+    the parked documents survive."""
+
+    async def scenario() -> None:
+        # Parked era: establish a session, create a document, then drop WITHOUT a DELETE.
+        async with _raw_session(server.url, terminate_on_close=False) as (transport, session):
+            created = await session.call_tool("create_document", {"width": 400, "height": 200})
+            document_id = created.structured_content["document_id"]
+            session_id = transport.session_id
+            assert session_id is not None
+
+        # Resumed era: the successor attaches with the SAME Mcp-Session-Id, no initialize.
+        async with _raw_session(server.url, seeded_session_id=session_id) as (transport, session):
+            assert transport.session_id == session_id
+            # The original store counter continues (a fresh store would re-number "doc1").
+            created = await session.call_tool("create_document", {"width": 50, "height": 50})
+            assert created.structured_content["document_id"] != document_id
+            # And the parked document is still there, via the resource layer too.
+            contents = await session.read_resource("svg://documents")
+            index = _documents_index(_resource_text(contents.contents[0]))
+            assert document_id in [d["id"] for d in index["documents"]]
+
+    asyncio.run(scenario())
+
+
+def test_combiner_forget_delete_releases_store(server: _Server) -> None:
+    """A DELETE (the combiner's forget path) tears the session down and releases its
+    store from the per-session registry — nothing lingers after the forget."""
+
+    async def scenario() -> None:
+        async with _raw_session(server.url, terminate_on_close=True) as (transport, session):
+            await session.call_tool("create_document", {"width": 300, "height": 300})
+            assert transport.session_id is not None
+            # The context exit below sends DELETE via terminate_session.
+
+    asyncio.run(scenario())
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and _SESSION_STORES:
+        time.sleep(0.02)
+    assert not _SESSION_STORES, "DELETE did not release the session's store"
