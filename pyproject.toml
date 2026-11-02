@@ -24,8 +24,10 @@ classifiers = [
 ]
 
 dependencies = [
-  # floor: fastmcp.tools.ToolResult (flat) needs 3.0; fastmcp.apps.config.AppConfig needs 3.2
-  "fastmcp>=3.2",
+  # floor: fastmcp.tools.ToolResult (flat) needs 3.0; fastmcp.apps.config.AppConfig needs 3.2.
+  # fastmcp 4.1.5 (mcp 2) is an explicit floor: `_store()` keys per-client mcp Connection object
+  # (`ServerSession._connection`), which only exists on mcp 2 — do not lower the floor back.
+  "fastmcp>=4.1.5,<5",
   "pydantic>=2.7",
   "pydantic-settings>=2.2",
   "lxml>=5.0",

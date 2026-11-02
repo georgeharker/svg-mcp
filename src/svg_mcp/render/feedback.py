@@ -11,13 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 
-from .base import RenderResult
+# FastMCP's Image content type (fastmcp >= 3, incl. 4 / mcp 2).
+from fastmcp.utilities.types import Image as MCPImage
 
-# FastMCP's Image content type. Import location differs across fastmcp/mcp versions.
-try:  # fastmcp >= 2.x
-    from fastmcp.utilities.types import Image as MCPImage
-except ImportError:  # pragma: no cover - fallback for the bundled mcp SDK
-    from mcp.server.fastmcp import Image as MCPImage  # type: ignore[assignment]
+from .base import RenderResult
 
 __all__ = ["Feedback", "MCPImage", "build_feedback", "downscale_png"]
 

@@ -15,14 +15,14 @@ import inspect
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 from weakref import WeakKeyDictionary
 
 from fastmcp import Context, FastMCP
 from fastmcp.apps.config import AppConfig
 from fastmcp.server.dependencies import get_context
 from fastmcp.tools import ToolResult
-from mcp.server.session import ServerSession
+from mcp.server.connection import Connection
 from pydantic import AnyUrl, BaseModel
 
 from . import ops
@@ -363,28 +363,58 @@ explicitly to target a specific document.
 mcp: FastMCP = FastMCP(name="svg-mcp", instructions=_INSTRUCTIONS)
 
 _DEFAULT_STORE = DocumentStore()
-# Per-connection document stores, keyed by the MCP session OBJECT. MCP exposes no session-close
-# hook, so we lean on GC: when the connection ends and the session object is collected, its store
-# entry is released automatically — that is what the WeakKeyDictionary buys us. The stable
-# `session_id` string identifies the same connection for logging/observability (see
-# `_session_id`); we deliberately do NOT key on it, to keep the automatic cleanup.
-_SESSION_STORES: WeakKeyDictionary[ServerSession, DocumentStore] = WeakKeyDictionary()
+# Per-connection document stores, keyed by the low-level mcp `Connection` — the per-client object
+# that lives for the whole client session on every protocol era (its `_connection` attribute hangs
+# off the low-level `ServerSession` that serves each request). Keying on the `ServerSession`
+# itself is NOT safe on mcp 2: in request contexts it is constructed fresh per inbound request,
+# so a store keyed on it would be empty on every call and die on release — silently.
+#
+# MCP exposes no session-close hook for the dictionary itself, so cleanup is two-layered: the
+# connection's `exit_stack` (an AsyncExitStack unwound when the connection closes) releases the
+# store deterministically, and the WeakKeyDictionary is belt-and-braces GC in case the stack is
+# never unwound. The stable `session_id` string identifies the same connection for
+# logging/observability (see `_session_id`); we deliberately do NOT key on it, to keep the
+# automatic cleanup. Note a 2026-era (stateless) client gets a fresh Connection per request and
+# therefore no persistent session documents; streamable HTTP on the handshake era, stdio and
+# every client behind the mcp-combiner are unaffected.
+_SESSION_STORES: WeakKeyDictionary[Connection, DocumentStore] = WeakKeyDictionary()
 
 
-def _store() -> DocumentStore:
-    """Resolve the DocumentStore for the current MCP session (per-connection isolation).
-
-    Each client connection gets its own store, keyed by the session object and released by GC when
-    the connection ends. Outside a request (direct/programmatic use) a shared default is used.
-    """
+def _connection() -> Connection | None:
+    """The low-level mcp `Connection` for the current request, or None outside a request."""
     try:
         session = get_context().session
     except Exception:
+        return None
+    connection: Connection | None = getattr(session, "_connection", None)
+    return connection
+
+
+def _bind_release(connection: Connection, store: DocumentStore) -> None:
+    """Release `store` from `_SESSION_STORES` when `connection` closes."""
+
+    async def _release() -> None:  # pragma: no cover - exercised only at connection teardown
+        _SESSION_STORES.pop(connection, None)
+
+    connection.exit_stack.push_async_callback(_release)
+
+
+def _store() -> DocumentStore:
+    """Resolve the DocumentStore for the current MCP connection (per-client isolation).
+
+    Each client connection gets its own store, keyed by the Connection object and released
+    deterministically when the connection closes. Outside a request (direct/programmatic use) a
+    shared default is used.
+    """
+    connection = _connection()
+    if connection is None:
         return _DEFAULT_STORE
-    store = _SESSION_STORES.get(session)
+    store = _SESSION_STORES.get(connection)
     if store is None:
         store = DocumentStore()
-        _SESSION_STORES[session] = store
+        # Belt-and-braces: if exit_stack teardown never runs, GC on the Connection collects it.
+        _SESSION_STORES[connection] = store
+        _bind_release(connection, store)
     return store
 
 
@@ -6557,6 +6587,19 @@ def main() -> None:
     if args.transport == "stdio":
         mcp.run()
     else:
+        # mcp 2 / fastmcp 4 stateful HTTP sessions expire after 30 min idle by default ("auto"
+        # passes the SDK default). svg-mcp keeps a chat's open documents in its per-connection
+        # store, so that would silently drop a drawing across a half-hour pause — keep
+        # indefinitely-lived sessions like earlier versions did. Only the global setting can
+        # express "never" (`http_app(session_idle_timeout=None)` means "use the setting", not
+        # None); it is irrelevant to stdio. Override in the environment via
+        # FASTMCP_HTTP_SESSION_IDLE_TIMEOUT. cast to Any because the field only exists on
+        # fastmcp 4 (older Settings just lack it).
+        from fastmcp import settings as _settings
+
+        settings_any = cast(Any, _settings)
+        if settings_any.http_session_idle_timeout == "auto":
+            settings_any.http_session_idle_timeout = None
         # Bound how long uvicorn waits for in-flight connections to drain on shutdown. uvicorn's
         # own default is None (wait forever), which would hang a stop signal while a long-lived MCP
         # connection stays open; FastMCP currently overrides it to 0, but pin it ourselves so we
