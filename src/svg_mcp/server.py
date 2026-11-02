@@ -379,6 +379,36 @@ _DEFAULT_STORE = DocumentStore()
 # every client behind the mcp-combiner are unaffected.
 _SESSION_STORES: WeakKeyDictionary[Connection, DocumentStore] = WeakKeyDictionary()
 
+# HTTP-session idle bound: "never" was tempting (stateful sessions hold a chat's drawing while
+# it pauses) but means a crashed or vanished combiner leaves every parked per-chat session —
+# each with its DocumentStore — pinned in memory forever (cribsheet's risk review; mcp-companion
+# requested the same). 24h is bounded reaping with huge margin over downstream park/grace
+# lifetimes (3600s + 300s), while active sessions never expire (the SDK pushes the deadline on
+# every request). See `_apply_default_idle_bound` and the reaping e2e test.
+_DEFAULT_IDLE_TIMEOUT_S = 24 * 60 * 60
+
+
+def _apply_default_idle_bound() -> None:
+    """Set the fastmcp HTTP idle-expiry bound from the SDK's "auto" to the finite default.
+
+    Runs before `mcp.run(...)` on non-stdio transports (the setting is global; stdio is
+    unaffected). A value already configured — via FASTMCP_HTTP_SESSION_IDLE_TIMEOUT or code —
+    is left untouched, so the env override remains authoritative. Kept out of `main()` so
+    tests can exercise it against the settings singleton without starting a transport.
+
+    Suppression reasoning: `_settings` is fastmcp's real singleton. The floor here is
+    fastmcp>=4.1.5, whose Settings HAS `http_session_idle_timeout`, so both attribute
+    accesses are runtime-correct. The ignore is transient editor-armor for environments
+    still resolving fastmcp 3.4.11 (the shared ~/.venv, until cribsheet's port lands the
+    joint upgrade): old Settings lacks the field (attr-defined), while on fastmcp 4 the same
+    ignore becomes unused (strict's unused-ignore) — hence both codes listed. Remove both
+    ignores and this note once every consumer environment is on fastmcp 4.
+    """
+    from fastmcp import settings as _settings  # noqa: PLC0415 — kept next to the floor note
+
+    if _settings.http_session_idle_timeout == "auto":  # type: ignore[attr-defined,unused-ignore]
+        _settings.http_session_idle_timeout = _DEFAULT_IDLE_TIMEOUT_S  # type: ignore[attr-defined,unused-ignore]
+
 
 def _connection() -> Connection | None:
     """The low-level mcp `Connection` for the current request, or None outside a request."""
@@ -6588,25 +6618,16 @@ def main() -> None:
         mcp.run()
     else:
         # mcp 2 / fastmcp 4 stateful HTTP sessions expire after 30 min idle by default ("auto"
-        # passes the SDK default). svg-mcp keeps a chat's open documents in its per-connection
-        # store, so that would silently drop a drawing across a half-hour pause — keep
-        # indefinitely-lived sessions like earlier versions did. Only the global setting can
-        # express "never" (`http_app(session_idle_timeout=None)` means "use the setting", not
-        # None); it is irrelevant to stdio. Override in the environment via
+        # passes the SDK default). Default is a LONG FINITE bound (24h) rather than "never":
+        # a session reaped ONLY on DELETE/failure means a crashed/vanished combiner leaves
+        # every parked per-chat session alive forever, each pinning its DocumentStore in
+        # memory. 24h sits far above the combiner's park TTL + grace, so parked chats resume
+        # safely and vanished sessions are eventually reaped (the SDK pushes the deadline on
+        # every request, so active chats never trip it); see `_DEFAULT_IDLE_TIMEOUT_S`.
+        # Only the global setting can express a value (`http_app(session_idle_timeout=None)`
+        # means "use the setting", not None); irrelevant to stdio. Override via
         # FASTMCP_HTTP_SESSION_IDLE_TIMEOUT.
-        #
-        # Suppression reasoning: `_settings` is fastmcp's real singleton. The floor here is
-        # fastmcp>=4.1.5, whose Settings HAS `http_session_idle_timeout`, so both attribute
-        # accesses below are runtime-correct. The ignore is transient editor-armor for
-        # environments still resolving fastmcp 3.4.11 (the shared ~/.venv, until cribsheet's
-        # port lands the joint upgrade): old Settings lacks the field (attr-defined), while
-        # on fastmcp 4 the same ignore becomes unused (strict's unused-ignore) — hence both
-        # codes listed. Once every consumer environment is on fastmcp 4, delete BOTH
-        # suppressions and this note.
-        from fastmcp import settings as _settings
-
-        if _settings.http_session_idle_timeout == "auto":  # type: ignore[attr-defined,unused-ignore]
-            _settings.http_session_idle_timeout = None  # type: ignore[attr-defined,unused-ignore]
+        _apply_default_idle_bound()
         # Bound how long uvicorn waits for in-flight connections to drain on shutdown. uvicorn's
         # own default is None (wait forever), which would hang a stop signal while a long-lived MCP
         # connection stays open; FastMCP currently overrides it to 0, but pin it ourselves so we
