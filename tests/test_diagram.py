@@ -1194,8 +1194,13 @@ def test_define_marker_accepts_orient_and_view_box() -> None:
     doc = _doc()
     glyph = ops.add_path(doc, d="M 0 0 L 10 5 L 0 10 Z")
     backwards = ops.define_marker(
-        doc, content=[glyph.id], ref_x=10, ref_y=5, view_box="0 0 10 10",
-        orient="auto-start-reverse", name="back-head",
+        doc,
+        content=[glyph.id],
+        ref_x=10,
+        ref_y=5,
+        view_box="0 0 10 10",
+        orient="auto-start-reverse",
+        name="back-head",
     )
     marker = doc.svg.getElementById(backwards)
     assert marker is not None
