@@ -394,7 +394,7 @@ def test_a_variant_survives_a_round_trip() -> None:
 def test_a_theme_missing_on_disk_keeps_its_paint_and_reports_itself() -> None:
     doc = _doc()
     _load(doc, "house")
-    node = ops.add_diagram_node(doc, kind="service", label="A")
+    ops.add_diagram_node(doc, kind="service", label="A")
     # the same file but with the theme renamed everywhere (classes, stamp — attr values are
     # HTML-escaped in serialization): "phantom" exists nowhere on disk.
     text = (
