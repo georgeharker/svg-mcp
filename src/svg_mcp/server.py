@@ -15,7 +15,7 @@ import inspect
 import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal
 from weakref import WeakKeyDictionary
 
 from fastmcp import Context, FastMCP
@@ -6593,13 +6593,20 @@ def main() -> None:
         # indefinitely-lived sessions like earlier versions did. Only the global setting can
         # express "never" (`http_app(session_idle_timeout=None)` means "use the setting", not
         # None); it is irrelevant to stdio. Override in the environment via
-        # FASTMCP_HTTP_SESSION_IDLE_TIMEOUT. cast to Any because the field only exists on
-        # fastmcp 4 (older Settings just lack it).
+        # FASTMCP_HTTP_SESSION_IDLE_TIMEOUT.
+        #
+        # Suppression reasoning: `_settings` is fastmcp's real singleton. The floor here is
+        # fastmcp>=4.1.5, whose Settings HAS `http_session_idle_timeout`, so both attribute
+        # accesses below are runtime-correct. The ignore is transient editor-armor for
+        # environments still resolving fastmcp 3.4.11 (the shared ~/.venv, until cribsheet's
+        # port lands the joint upgrade): old Settings lacks the field (attr-defined), while
+        # on fastmcp 4 the same ignore becomes unused (strict's unused-ignore) — hence both
+        # codes listed. Once every consumer environment is on fastmcp 4, delete BOTH
+        # suppressions and this note.
         from fastmcp import settings as _settings
 
-        settings_any = cast(Any, _settings)
-        if settings_any.http_session_idle_timeout == "auto":
-            settings_any.http_session_idle_timeout = None
+        if _settings.http_session_idle_timeout == "auto":  # type: ignore[attr-defined,unused-ignore]
+            _settings.http_session_idle_timeout = None  # type: ignore[attr-defined,unused-ignore]
         # Bound how long uvicorn waits for in-flight connections to drain on shutdown. uvicorn's
         # own default is None (wait forever), which would hang a stop signal while a long-lived MCP
         # connection stays open; FastMCP currently overrides it to 0, but pin it ourselves so we
