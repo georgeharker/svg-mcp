@@ -24,8 +24,11 @@ classifiers = [
 ]
 
 dependencies = [
-  # floor: fastmcp.tools.ToolResult (flat) needs 3.0; fastmcp.apps.config.AppConfig needs 3.2
-  "fastmcp>=3.2",
+  # floor: fastmcp.tools.ToolResult (flat) needs 3.0; fastmcp.apps.config.AppConfig needs 3.2.
+  # CAP at <4: the 0.8.x line keys per-session state on fastmcp's ServerSession object, which
+  # mcp 2 / fastmcp 4 rebuilds per inbound request — documents silently vanish between calls
+  # there. 0.9.0+ is the fastmcp-4-compatible line (floor >=4.1.5,<5).
+  "fastmcp>=3.2,<4",
   "pydantic>=2.7",
   "pydantic-settings>=2.2",
   "lxml>=5.0",

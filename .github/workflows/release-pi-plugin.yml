@@ -25,6 +25,11 @@ on:
 
 jobs:
   publish:
+    # Maintenance-line tags (0.8.x pin bumps, released after 0.9.0) publish PyPI
+    # only: an npm publish from this branch would move the `latest` dist-tag
+    # backwards past the 0.9 line. Plugin versions march with main's 0.9.x
+    # lockstep instead.
+    if: ${{ !startsWith(github.ref_name, 'v0.8.') }}
     runs-on: ubuntu-latest
     environment: npm
     permissions:
