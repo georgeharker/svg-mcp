@@ -12,10 +12,23 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, cast
 
 import tinycss2
-from tinycss2.ast import Node as CssNode
+from tinycss2.ast import (
+    AtRule,
+    Comment,
+    IdentToken,
+    LiteralToken,
+    ParseError,
+    QualifiedRule,
+)
+from tinycss2.ast import (
+    Declaration as CssDeclaration,
+)
+from tinycss2.ast import (
+    Node as CssNode,
+)
 
 from ..model.errors import ThemeError
 
@@ -37,6 +50,19 @@ _REJECTED_LITERALS: Final[dict[str, str]] = {
     "~": "general-sibling combinator",
     "|": "namespace separator",
 }
+
+
+def _css_of[T: CssNode](node: CssNode, cls: type[T]) -> T:
+    """Narrow a tinycss2 node to the subclass its ``.type`` tag names.
+
+    tinycss2's parser types every tree member as the broad ``Node`` union; the concrete
+    subclass is a runtime fact of the ``type`` tag (``"qualified-rule"`` → QualifiedRule,
+    ``"declaration"`` → Declaration, ``"comment"`` → Comment, …), which callers dispatch on
+    immediately before. tinycss2 offers no runtime narrow helper and no type information, so
+    this is a straight cast — used ONLY on the branch whose tag match just guaranteed the
+    subclass, and nowhere else.
+    """
+    return cast("T", node)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,22 +134,25 @@ def parse_css(text: str, *, origin: str) -> ParsedCss:
     for node in tinycss2.parse_stylesheet(text, skip_comments=False, skip_whitespace=True):
         kind = str(node.type)
         if kind == "comment":
-            body = str(node.value)
+            body = str(_css_of(node, Comment).value)
             if body.startswith("*"):
                 pending = body[1:].strip()
             continue
         if kind == "error":
-            raise ThemeError(f"{origin}: CSS parse error: {node.message}")
+            raise ThemeError(f"{origin}: CSS parse error: {_css_of(node, ParseError).message}")
         if kind == "at-rule":
+            at_rule = _css_of(node, AtRule)
             raise ThemeError(
-                f"{origin}: at-rule '@{node.lower_at_keyword}' is not allowed in a theme "
+                f"{origin}: at-rule '@{at_rule.lower_at_keyword}' is not allowed in a theme "
                 "stylesheet; themes are a flat list of plain rules"
             )
         if kind != "qualified-rule":
             continue
-        raw_selector = _raw_selector(node.prelude)
-        declarations = _parse_declarations(node.content, origin=origin, selector=raw_selector)
-        if _is_root(node.prelude):
+        rule = _css_of(node, QualifiedRule)
+        prelude = rule.prelude
+        raw_selector = _raw_selector(prelude)
+        declarations = _parse_declarations(rule.content or [], origin=origin, selector=raw_selector)
+        if _is_root(prelude):
             for declaration in declarations:
                 if not declaration.prop.startswith("--"):
                     raise ThemeError(
@@ -133,7 +162,7 @@ def parse_css(text: str, *, origin: str) -> ParsedCss:
                 tokens[declaration.prop] = declaration.value
             pending = None
             continue
-        selectors = _parse_selector_list(node.prelude, origin=origin)
+        selectors = _parse_selector_list(prelude, origin=origin)
         for declaration in declarations:
             if declaration.prop.startswith("--"):
                 raise ThemeError(
@@ -168,9 +197,9 @@ def _is_root(prelude: Sequence[CssNode]) -> bool:
     first, second = significant
     return (
         str(first.type) == "literal"
-        and str(first.value) == ":"
+        and str(_css_of(first, LiteralToken).value) == ":"
         and str(second.type) == "ident"
-        and str(second.value) == "root"
+        and str(_css_of(second, IdentToken).value) == "root"
     )
 
 
@@ -181,18 +210,23 @@ def _parse_declarations(
     for node in tinycss2.parse_blocks_contents(content, skip_comments=True, skip_whitespace=True):
         kind = str(node.type)
         if kind == "error":
-            raise ThemeError(f"{origin}: CSS parse error in rule '{selector}': {node.message}")
-        if kind == "at-rule":
             raise ThemeError(
-                f"{origin}: at-rule '@{node.lower_at_keyword}' is not allowed "
+                f"{origin}: CSS parse error in rule '{selector}': "
+                f"{_css_of(node, ParseError).message}"
+            )
+        if kind == "at-rule":
+            at_rule = _css_of(node, AtRule)
+            raise ThemeError(
+                f"{origin}: at-rule '@{at_rule.lower_at_keyword}' is not allowed "
                 f"(in rule '{selector}')"
             )
         if kind != "declaration":
             continue
-        name = str(node.name)
-        prop = name if name.startswith("--") else str(node.lower_name)
-        value = str(tinycss2.serialize(node.value)).strip()
-        if node.important:
+        declaration = _css_of(node, CssDeclaration)
+        name = str(declaration.name)
+        prop = name if name.startswith("--") else str(declaration.lower_name)
+        value = str(tinycss2.serialize(declaration.value)).strip()
+        if declaration.important:
             value = f"{value} !important"
         out.append(Declaration(prop=prop, value=value))
     return tuple(out)
@@ -202,7 +236,7 @@ def _parse_selector_list(prelude: Sequence[CssNode], *, origin: str) -> tuple[Se
     whole = _raw_selector(prelude)
     groups: list[list[CssNode]] = [[]]
     for token in prelude:
-        if str(token.type) == "literal" and str(token.value) == ",":
+        if str(token.type) == "literal" and str(_css_of(token, LiteralToken).value) == ",":
             groups.append([])
             continue
         groups[-1].append(token)
@@ -229,7 +263,7 @@ def _parse_selector(tokens: Sequence[CssNode], *, origin: str, whole: str) -> Se
                 pending = " "
             index += 1
             continue
-        is_class = kind == "literal" and str(token.value) == "."
+        is_class = kind == "literal" and str(_css_of(token, LiteralToken).value) == "."
         if kind == "ident" or is_class:
             if pending is not None:
                 compounds.append(Compound(element=element, classes=tuple(classes)))
@@ -239,17 +273,17 @@ def _parse_selector(tokens: Sequence[CssNode], *, origin: str, whole: str) -> Se
                 following = tokens[index + 1] if index + 1 < count else None
                 if following is None or str(following.type) != "ident":
                     raise ThemeError(_bad(origin, whole, "a malformed class selector"))
-                classes.append(str(following.value))
+                classes.append(str(_css_of(following, IdentToken).value))
                 index += 2
             else:
                 if element is not None or classes:
                     raise ThemeError(_bad(origin, whole, "an unsupported selector construct"))
-                element = str(token.value)
+                element = str(_css_of(token, IdentToken).value)
                 index += 1
             started = True
             continue
         if kind == "literal":
-            char = str(token.value)
+            char = str(_css_of(token, LiteralToken).value)
             if char == ">":
                 if not started:
                     raise ThemeError(_bad(origin, whole, "a leading child combinator"))
