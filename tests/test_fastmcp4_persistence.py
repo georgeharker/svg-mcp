@@ -167,6 +167,50 @@ def test_programmatic_use_uses_shared_default_store() -> None:
     assert document_id in _DEFAULT_STORE.list_ids()
 
 
+def test_http_idle_expiry_reaps_parked_session() -> None:
+    """The idle bound reaps a session whose client VANISHED without a DELETE (the
+    crashed-combiner / vanished-direct-client scenario): create a document, drop the
+    connection, and after the idle bound the per-session store is released — pinning
+    the bounded-reaping behavior (see `_DEFAULT_IDLE_TIMEOUT_S`)."""
+    import socket as _socket  # noqa: PLC0415 — test-local
+
+    with _socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    asgi = _mcp_server.http_app(session_idle_timeout=1.0)
+    uvicorn_config = uvicorn.Config(asgi, host="127.0.0.1", port=port, log_level="error")
+    uvicorn_server = uvicorn.Server(uvicorn_config)
+    thread = threading.Thread(target=uvicorn_server.run, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + _TIMEOUT_S
+    while not uvicorn_server.started:
+        if time.monotonic() > deadline:
+            raise RuntimeError("uvicorn did not start")
+        time.sleep(0.02)
+    try:
+
+        async def scenario() -> None:
+            # Park a session: raw client creates a document, then drops WITHOUT a DELETE.
+            async with _raw_session(f"http://127.0.0.1:{port}/mcp", terminate_on_close=False) as (
+                t,
+                session,
+            ):
+                created = await session.call_tool("create_document", {"width": 100, "height": 100})
+                assert not created.is_error
+            assert len(_SESSION_STORES) == 1  # the parked session still holds its store
+            # The vanished client's session idles past the 1.0s bound: reaped. (A CONNECTED
+            # session never idles out — the GET stream counts as activity in the SDK.)
+            gone_by = time.monotonic() + 10.0
+            while _SESSION_STORES and time.monotonic() < gone_by:
+                await asyncio.sleep(0.05)
+            assert not _SESSION_STORES, "expired parked session was not reaped"
+
+        asyncio.run(scenario())
+    finally:
+        uvicorn_server.should_exit = True
+        thread.join(timeout=_TIMEOUT_S)
+
+
 # --- combiner handover contract --------------------------------------------
 # The mcp-combiner parks upstream sessions across its own restarts and resumes them
 # by reattaching with the SAME Mcp-Session-Id (skip initialize, re-send
