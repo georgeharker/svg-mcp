@@ -22,7 +22,7 @@ import json
 import socket
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from types import TracebackType
 from typing import Any, cast
 
@@ -30,6 +30,7 @@ import anyio
 import pytest
 import uvicorn
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import StreamableHTTPTransport
 from mcp.shared._context_streams import create_context_streams
@@ -38,8 +39,11 @@ from mcp.shared.message import SessionMessage
 from mcp.types import InitializedNotification
 from mcp_types.version import LATEST_HANDSHAKE_VERSION
 
-from svg_mcp.server import _DEFAULT_STORE, _SESSION_STORES
+from svg_mcp.server import _DEFAULT_STORE, _MINTED_SESSION_STORES, _SESSION_STORES
 from svg_mcp.server import mcp as _mcp_server
+
+# The 2026-07-28 stateless protocol revision.
+_MODERN_VERSION = "2026-07-28"
 
 _TIMEOUT_S = 10.0
 
@@ -82,8 +86,11 @@ class _Server:
 @pytest.fixture()
 def server() -> Iterator[_Server]:
     """A running streamable-HTTP svg-mcp for the duration of the test."""
+    _SESSION_STORES.clear()
+    _MINTED_SESSION_STORES.clear()
     with _Server() as s:
         yield s
+    _MINTED_SESSION_STORES.clear()
 
 
 def _documents_index(text: str) -> dict[str, Any]:
@@ -99,6 +106,13 @@ def _resource_text(contents: object) -> str:
     """First resource payload's text (mcp 1/2 differ only in union typing, not runtime)."""
     text: str = cast("Any", contents).text
     return text
+
+
+async def _legacy_client_auto(url: str) -> Client[Any]:
+    """A fastmcp client in default (auto) mode: probes server/discover and negotiates —
+    against svg-mcp this lands on the 2026-07-28 stateless era, so identity-less calls
+    are per-request and session-aware calls ride the minted-session registry."""
+    return Client(url)
 
 
 def test_cross_call_document_persistence(server: _Server) -> None:
@@ -230,19 +244,26 @@ async def _raw_session(
     url: str,
     *,
     seeded_session_id: str | None = None,
+    protocol_version: str | None = None,
+    extra_headers: Mapping[str, str] | None = None,
     terminate_on_close: bool = True,
 ) -> AsyncIterator[tuple[StreamableHTTPTransport, ClientSession]]:
     """A minimal raw mcp 2 streamable-HTTP client — mirrors the SDK's own transport
-    composition, plus the combiner resume path: connect with a pre-established
-    Mcp-Session-Id (skip initialize, re-send notifications/initialized) and reattach
-    to the server's live session.
+    composition, plus the era/identity variants svg-mcp must distinguish:
+
+    - legacy reattach (combiner handover): ``seeded_session_id`` — same Mcp-Session-Id,
+      skip initialize, re-send notifications/initialized to restart the GET stream;
+    - stateless era: ``protocol_version="2026-07-28"`` — no initialize, no Mcp-Session-Id,
+      identity carried only by the caller (tool argument or ambient ``extra_headers``).
     """
     transport = StreamableHTTPTransport(url)
-    seeded = seeded_session_id is not None
-    if seeded:
+    reattach = seeded_session_id is not None
+    if reattach:
         transport.session_id = seeded_session_id
         transport._protocol_version_header = LATEST_HANDSHAKE_VERSION
-    http_client = create_mcp_http_client()
+    elif protocol_version is not None:
+        transport._protocol_version_header = protocol_version
+    http_client = create_mcp_http_client(headers=dict(extra_headers or {}))
 
     read_writer, read_stream = create_context_streams[SessionMessage | Exception](0)
     write_stream, write_reader = create_context_streams[SessionMessage](0)
@@ -270,10 +291,10 @@ async def _raw_session(
         )
 
         async with ClientSession(read_stream, write_stream) as session:
-            if seeded:
+            if reattach:
                 await session.send_notification(InitializedNotification())
             else:
-                await session.initialize()
+                await session.initialize()  # modern-era clients never initialize
             try:
                 yield transport, session
             finally:
@@ -324,3 +345,182 @@ def test_combiner_forget_delete_releases_store(server: _Server) -> None:
     while time.monotonic() < deadline and _SESSION_STORES:
         time.sleep(0.02)
     assert not _SESSION_STORES, "DELETE did not release the session's store"
+
+
+# --- 2026-era (stateless) identity -------------------------------------------
+# A 2026-era connection has no durable wire identity: every request is its own
+# Connection, born and discarded. Per-session documents there ride a *minted* session
+# id — explicit `session_id` argument or the ambient `X-Svg-Mcp-Session` header —
+# validated through fastmcp's session framework on every resolve. Legacy-era behavior
+# must be byte-for-byte unchanged (the tests above pin that).
+
+
+def test_2026_explicit_session_id_persists_across_requests(server: _Server) -> None:
+    """A document created under a minted session survives fresh stateless connections."""
+
+    async def scenario() -> None:
+        async with _raw_session(server.url, protocol_version=_MODERN_VERSION) as (t, session):
+            minted = await session.call_tool("create_session", {})
+            session_id = minted.structured_content["session_id"]
+            created = await session.call_tool(
+                "create_document", {"width": 400, "height": 200, "session_id": session_id}
+            )
+            created.structured_content["document_id"]
+
+        # A fresh connection — a new per-request Connection — resuming the same session:
+        async with _raw_session(server.url, protocol_version=_MODERN_VERSION) as (t, session):
+            created = await session.call_tool(
+                "create_document", {"width": 400, "height": 200, "session_id": session_id}
+            )
+            # Same registry store: the counter continued (a fresh store re-numbers doc1).
+            assert created.structured_content["document_id"] == "doc2"
+            assert _MINTED_SESSION_STORES[session_id].active_id == "doc2"
+
+    asyncio.run(scenario())
+
+
+def test_2026_no_identity_tool_call_is_guided_error(server: _Server) -> None:
+    """An identity-less stateless tool call is rejected with recovery guidance, not
+    silently written into state that the protocol would discard with the request.
+    Uses a default fastmcp client (mode=auto): it probes server/discover and negotiates
+    the 2026-07-28 era, so this exercises the real stateless path end-to-end."""
+
+    async def scenario() -> None:
+        async with await _legacy_client_auto(server.url) as client:
+            with pytest.raises(ToolError, match="create_session"):
+                await client.call_tool("create_document", {"width": 100, "height": 100})
+
+    asyncio.run(scenario())
+
+
+def test_2026_auto_client_sessions_do_not_bleed(server: _Server) -> None:
+    """Two concurrent identity-less auto clients are isolated: each request errors with
+    the guidance; nothing lands in a shared store — and once a session is minted, that
+    client's documents persist across its own requests (stateless era)."""
+
+    async def scenario() -> None:
+        async with await _legacy_client_auto(server.url) as first:
+            async with await _legacy_client_auto(server.url) as second:
+                for attacker, _victim_name in ((first, "first"), (second, "second")):
+                    with pytest.raises(ToolError, match="create_session"):
+                        await attacker.call_tool("create_document", {"width": 100, "height": 100})
+                assert len(_SESSION_STORES) == 0 and len(_MINTED_SESSION_STORES) == 0
+            # The first client mints and now persists across its own requests:
+            minted = await first.call_tool("create_session", {})
+            sid = minted.data["session_id"]
+            await first.call_tool(
+                "create_document", {"width": 100, "height": 100, "session_id": sid}
+            )
+            minted = await first.call_tool("create_session", {})
+            # (idempotent mint just returns a different id; the first one still resolves)
+            document = await first.call_tool("describe_document", {"session_id": sid})
+            assert not document.is_error
+
+    asyncio.run(scenario())
+
+
+def test_2026_unknown_session_id_rejected(server: _Server) -> None:
+    """Only ids minted by create_session resolve; anything else is a load error.
+    (Raw-proto variant: per-message identity on a stateless-classified connection.)"""
+
+    async def scenario() -> None:
+        async with _raw_session(server.url, protocol_version=_MODERN_VERSION) as (t, session):
+            created = await session.call_tool(
+                "create_document", {"width": 100, "height": 100, "session_id": "never-minted"}
+            )
+            assert created.is_error
+            assert "unknown session_id" in _resource_text(created.content[0])
+
+    asyncio.run(scenario())
+
+
+def test_2026_sessions_are_isolated(server: _Server) -> None:
+    """Two minted sessions get independent stores."""
+
+    async def scenario() -> None:
+        async with _raw_session(server.url, protocol_version=_MODERN_VERSION) as (t, session):
+            minted_a = await session.call_tool("create_session", {})
+            sid_a = minted_a.structured_content["session_id"]
+            minted_b = await session.call_tool("create_session", {})
+            sid_b = minted_b.structured_content["session_id"]
+            assert sid_a != sid_b
+            await session.call_tool(
+                "create_document", {"width": 100, "height": 100, "session_id": sid_a}
+            )
+            created = await session.call_tool(
+                "create_document", {"width": 100, "height": 100, "session_id": sid_b}
+            )
+            # Separate stores: both restart their counters at doc1.
+            assert created.structured_content["document_id"] == "doc1"
+            assert sid_a in _MINTED_SESSION_STORES and sid_b in _MINTED_SESSION_STORES
+
+    asyncio.run(scenario())
+
+
+def test_2026_ambient_header_carries_session(server: _Server) -> None:
+    """A proxy (combiner) can carry the minted id ambiently — tools need no argument."""
+
+    async def scenario() -> None:
+        async with _raw_session(server.url, protocol_version=_MODERN_VERSION) as (t, session):
+            minted = await session.call_tool("create_session", {})
+            session_id = minted.structured_content["session_id"]
+
+        headers = {"X-Svg-Mcp-Session": session_id}
+        async with _raw_session(
+            server.url, protocol_version=_MODERN_VERSION, extra_headers=headers
+        ) as (t, session):
+            created = await session.call_tool("create_document", {"width": 400, "height": 200})
+            assert not created.is_error
+            # A second header-only request mutates the persisted drawing.
+            drawn = await session.call_tool("add_rect", {"x": 1, "y": 1, "width": 5, "height": 5})
+            assert not drawn.is_error
+
+    asyncio.run(scenario())
+
+
+def test_2026_end_session_discards_documents(server: _Server) -> None:
+    """end_session invalidates the id and empties the registry; a replayed id starts
+    empty instead of resurrecting the ended session's state."""
+
+    async def scenario() -> None:
+        async with _raw_session(server.url, protocol_version=_MODERN_VERSION) as (t, session):
+            minted = await session.call_tool("create_session", {})
+            session_id = minted.structured_content["session_id"]
+            ended = await session.call_tool("end_session", {"session_id": session_id})
+            assert ended.structured_content["result"] == "session ended"
+            replayed = await session.call_tool(
+                "create_document", {"width": 100, "height": 100, "session_id": session_id}
+            )
+            assert replayed.is_error
+            assert len(_MINTED_SESSION_STORES) == 0
+
+    asyncio.run(scenario())
+
+
+def test_2026_resource_read_without_identity_is_guided_error(server: _Server) -> None:
+    """Resources can't carry a session argument — identity-less stateless reads are
+    rejected with the same guidance (a proxy sets the ambient header)."""
+
+    async def scenario() -> None:
+        async with await _legacy_client_auto(server.url) as client:
+            with pytest.raises(Exception, match="create_session"):
+                await client.read_resource("svg://documents")
+
+    asyncio.run(scenario())
+
+
+def test_minted_session_id_also_works_on_stateful_links(server: _Server) -> None:
+    """Uniform rule: an explicit validated session_id is honored on any era — a
+    stateful client can pass one and inherit registry-backed persistence."""
+
+    async def scenario() -> None:
+        async with await _legacy_client(server.url) as client:
+            minted = await client.call_tool("create_session", {})
+            session_id = minted.data["session_id"]
+            await client.call_tool(
+                "create_document", {"width": 100, "height": 100, "session_id": session_id}
+            )
+        # The connection is gone; the registry store persists.
+        assert session_id in _MINTED_SESSION_STORES
+
+    asyncio.run(scenario())
