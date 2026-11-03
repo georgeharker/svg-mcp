@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # main plus the dev integration line (dev releases gate on this CI).
+    branches:
+      - main
+      - dev
   pull_request:
 
 jobs:
