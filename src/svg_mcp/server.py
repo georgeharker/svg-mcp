@@ -395,7 +395,9 @@ SESSION (STATELESS / 2026-ERA LINKS)
   `create_session` once, then pass its `session_id` on EVERY subsequent svg-mcp call —
   each tool's schema marks the argument, and passing it yourself is the contract (no
   client injects it behind your back). An identity-less stateless call is rejected with
-  that guidance rather than silently losing state.
+  that guidance rather than silently losing state. A session minted on a stateful link is
+  owned by that connection alone (and dies with it); on a stateless link the unguessable
+  minted id is its capability.
 - `end_session` invalidates a session and discards its documents.
 
 Multiple documents can be open at once; omit `document_id` for the active one, or pass it
