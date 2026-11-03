@@ -1674,7 +1674,7 @@ wheels = [
 
 [[package]]
 name = "svg-mcp"
-version = "0.10.0-dev.2"
+version = "0.10.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
