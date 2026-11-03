@@ -14,21 +14,53 @@ import hashlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional, cast, overload
 from weakref import WeakKeyDictionary
 
 from fastmcp import Context, FastMCP
 from fastmcp.apps.config import AppConfig
-from fastmcp.server.dependencies import get_context
-from fastmcp.tools import ToolResult
+
+# Session machinery below uses three fastmcp 4 / mcp 2 symbols (svg-mcp's floor): the minted
+# session framework (`get_session`, `SessionId`, `InvalidSession`, its lifecycle helpers),
+# per-request HTTP headers, and the modern-era protocol-version set. The ignores are
+# editor-armor for environments still resolving fastmcp 3.4.11 — the same transient code-pair
+# used for the settings field in main(): old envs lack the symbols (attr-defined,
+# module-not-found), fastmcp 4 envs see each ignore as redundant (unused-ignore). Remove with
+# that cleanup once every consumer environment is on fastmcp 4.
+from fastmcp.server.dependencies import (
+    get_context,
+    get_http_headers,  # type: ignore[attr-defined,unused-ignore]  # noqa: I001 — see reasoning comment above
+    get_session,  # type: ignore[attr-defined,unused-ignore]
+)
+from fastmcp.server.sessions import (  # type: ignore[attr-defined,unused-ignore]
+    InvalidSession,
+    Session,
+    SessionId,
+)
+from fastmcp.server.sessions import (
+    create_session as mint_session,
+)
+from fastmcp.server.sessions import (
+    end_session as end_minted_session,
+)
+from fastmcp.tools import FunctionTool, ToolResult
 from mcp.server.connection import Connection
+
+# mcp_types is an mcp-2-only package: mypy's ignore_missing_imports already covers it on old
+# editor envs, and fastmcp-4 envs see no error at all — so mypy flags the comment itself as
+# unused there; both codes listed. pyright reads the line via the same comment.
+from mcp_types.version import (
+    MODERN_PROTOCOL_VERSIONS,  # type: ignore[import-not-found,unused-ignore]  # noqa: E501
+)
 from pydantic import AnyUrl, BaseModel
 
 from . import ops
 from . import preview as _preview
 from . import widget as _widget
 from .model.document import Document
+from .model.errors import InvalidArgument, NoSession
 from .model.handles import NodeRef
 from .ops.resources import FilterInfo as _FilterInfo
 from .ops.resources import FxParams as _FxParams
@@ -356,6 +388,18 @@ LIVE PREVIEW
   Reserve `render_document` for when YOU need to inspect the result, and prefer batching the
   primitives you already know you need before you stop to look.
 
+SESSION (STATELESS / 2026-ERA LINKS)
+- On stateful links (handshake-era HTTP, stdio, mcp-combiner legacy) svg-mcp tracks your
+  connection automatically: never pass session_id.
+- On a stateless (2026-07-28) link, documents only persist under a minted session: call
+  `create_session` once, then pass its `session_id` on EVERY subsequent svg-mcp call —
+  each tool's schema marks the argument, and passing it yourself is the contract (no
+  client injects it behind your back). An identity-less stateless call is rejected with
+  that guidance rather than silently losing state. A session minted on a stateful link is
+  owned by that connection alone (and dies with it); on a stateless link the unguessable
+  minted id is its capability.
+- `end_session` invalidates a session and discards its documents.
+
 Multiple documents can be open at once; omit `document_id` for the active one, or pass it
 explicitly to target a specific document.
 """
@@ -378,6 +422,123 @@ _DEFAULT_STORE = DocumentStore()
 # therefore no persistent session documents; streamable HTTP on the handshake era, stdio and
 # every client behind the mcp-combiner are unaffected.
 _SESSION_STORES: WeakKeyDictionary[Connection, DocumentStore] = WeakKeyDictionary()
+
+# --- 2026-era (stateless) support -------------------------------------------
+# Stateless-era requests have NO durable wire identity — each request is its own Connection,
+# born and discarded with it — so per-session state there is keyed on a *minted* session id
+# instead: the MODEL calls `create_session` once and passes the id back on every call
+# (validated via fastmcp's session framework `get_session`, so an id ends/forgot/expires
+# through the same channel it was created through). A few bespoke proxies MAY carry it
+# ambiently per request via the `X-Svg-Mcp-Session` header; the mcp-combiner deliberately
+# does NOT — it passes tool arguments through unchanged, so the model supplies session_id
+# itself. Validation runs on EVERY resolve — the fastmcp session record is the source of
+# truth, so a store whose session was ended/forgot-expired is popped and cannot resurrect.
+# Like _SESSION_STORES this registry is in-process: it survives all combiner restarts
+# (svg-mcp doesn't restart), dies with svg-mcp itself. A session never `end_session`ed
+# holds its documents until then (the same trade the stateful path makes at disconnect).
+_MINTED_SESSION_HEADER = "x-svg-mcp-session"
+_CURRENT_MINTED_SESSION: ContextVar[str | None] = ContextVar("svg_mcp_minted_session", default=None)
+_MINTED_SESSION_STORES: dict[str, DocumentStore] = {}
+# Who may USE each minted session: the binding records the minting request's stable session
+# id when one exists (handshake-era/stdio connections have one — the Mcp-Session-Id);
+# stateless (2026-era) requests have no durable identity, so their mints record None and the
+# minted id itself is the capability (intrinsic to the stateless era). A bound session is
+# ONLY resolvable from the connection that minted it — a leaked id used from another
+# connection is rejected — and dies with that connection (its stores are popped and its
+# fastmcp session record invalidated at connection teardown). An unbound session lives until
+# `end_session` (or the process dies; the HTTP idle bound does not reach fastmcp's state
+# records). Under auth, `get_session` additionally principal-scopes both cases.
+_MINTED_SESSION_OWNER: dict[str, str | None] = {}
+# The minted session's fastmcp record object, captured AT MINT TIME (principal + state store
+# pinned). Connection teardown runs OUTSIDE any request — `get_session`/helpers that resolve
+# the current principal can't work there — so release goes through this captured object;
+# deleting via `record.end()` needs no request context.
+_MINTED_SESSION_RECORD: dict[str, Session] = {}
+# Per-connection minted-session groups, for deterministic release at connection close —
+# same lifecycle hook as `_SESSION_STORES` (Connection.exit_stack + WeakKeyDictionary).
+_MINTED_BY_CONNECTION: WeakKeyDictionary[Connection, list[str]] = WeakKeyDictionary()
+
+
+_MCP_SESSION_ID_HEADER = "mcp-session-id"
+
+
+def _stable_connection_id() -> str | None:
+    """The current request's stable wire identity, for minted-session ownership: the
+    stateful `Mcp-Session-Id` request header when present — handshake-era/stdio clients
+    carry it on every request after initialize, and it names the same server-side connection
+    for the connection's whole life. Requests of the stateless (2026) era carry none (the
+    protocol forbids the server assigning it), so mints there record None.
+
+    NOTE: the low-level Connection's own `session_id` attribute is PER-REQUEST (fastmcp
+    derives and backfills a fresh uuid when none exists) and is deliberately NOT used as
+    the binding anchor — it would bind stateless mints to throwaway per-request
+    connections, killing persistence.
+    """
+    try:
+        # include_all: get_http_headers STRIPS mcp-session-id by default (list "MCP-related
+        # headers"); the stable identity is exactly the header it strips.
+        return get_http_headers(include_all=True).get(_MCP_SESSION_ID_HEADER) or None
+    except Exception:
+        return None
+
+
+def _assert_usable_from_here(session_id: str) -> None:
+    """Ownership check: a bound minted session resolves only from its minting connection."""
+    owner = _MINTED_SESSION_OWNER.get(session_id)
+    if owner is not None and owner != _stable_connection_id():
+        raise InvalidArgument(
+            f"session_id {session_id!r} belongs to a different connection: mint a fresh "
+            "one on this connection with create_session"
+        )
+
+
+def _revoke_minted(sid: str) -> None:
+    """Invalidate a minted session's server-side state: the live store, the owner record
+    and the captured fastmcp record object are dropped (deleting the fastmcp RECORD itself
+    is the async caller's job — see `_release_connection_minted`/`end_session`)."""
+    _MINTED_SESSION_STORES.pop(sid, None)
+    _MINTED_SESSION_OWNER.pop(sid, None)
+    _MINTED_SESSION_RECORD.pop(sid, None)
+
+
+async def _release_connection_minted(connection: Connection) -> None:
+    """Release every session minted over `connection` (connection teardown): stores, owner
+    records, and the fastmcp session records — so a bound id dies with the connection that
+    minted it and cannot be replayed from elsewhere afterwards."""
+    for sid in _MINTED_BY_CONNECTION.pop(connection, ()):
+        record = _MINTED_SESSION_RECORD.get(sid)
+        _revoke_minted(sid)
+        if record is not None:
+            with contextlib.suppress(Exception):
+                await record.end()  # deletes the fastmcp record via the captured object
+
+
+def _mint_ownership(sid: str, owner: str | None) -> None:
+    """Record the minting session for `sid` and arrange deterministic release.
+
+    `owner` is the minting connection's stable session id when one exists (bound: only that
+    connection may use/end it, release at its teardown), else None (unbound: stateless-era
+    minted id is the capability, lives until `end_session`)."""
+    _MINTED_SESSION_OWNER[sid] = owner
+    if owner is None:
+        return
+    connection = _connection()
+    if connection is None:
+        return  # pragma: no cover - bound mints always originate in a request
+    group = _MINTED_BY_CONNECTION.get(connection)
+    if group is None:
+        group = _MINTED_BY_CONNECTION[connection] = []
+        connection.exit_stack.push_async_callback(_release_connection_minted, connection)
+    group.append(sid)
+
+
+# The schema annotation the session-aware wrapper appends for `session_id`. It must be a
+# runtime VALUE, not just a type expression: fastmcp resolves parameter annotations via
+# `get_type_hints`, which reads the function's `__annotations__` dict, NOT the Parameter
+# objects in a `__signature__` override — so the wrapper assigns this into its
+# `__annotations__` at construction. `SessionId | None` is valid in annotation position, but
+# pyright rejects `|` on Annotated in the runtime-expression position — hence `Optional`.
+_SESSION_ID_ARG = Optional[SessionId]  # noqa: UP045 — runtime value, not an annotation; see comment above
 
 # HTTP-session idle bound: "never" was tempting (stateful sessions hold a chat's drawing while
 # it pauses) but means a crashed or vanished combiner leaves every parked per-chat session —
@@ -410,6 +571,177 @@ def _apply_default_idle_bound() -> None:
         _settings.http_session_idle_timeout = _DEFAULT_IDLE_TIMEOUT_S  # type: ignore[attr-defined,unused-ignore]
 
 
+def _ambient_session_id() -> str | None:
+    """The ambient minted-session id for the current request, when a bespoke client or
+    proxy carries it on every request via the `X-Svg-Mcp-Session` header. The
+    mcp-combiner does NOT do this — the model passes `session_id` itself there. None
+    when no header is present.
+    """
+    try:
+        return get_http_headers().get(_MINTED_SESSION_HEADER)
+    except Exception:
+        return None
+
+
+async def _resolve_minted_session(session_id: str) -> None:
+    """Validate a minted id and lazily register its live DocumentStore (call from wrappers).
+
+    Validation is the isolation wall (ids are minted/validated per principal under auth) AND
+    the invalidation signal: ended/forgotten/expired raises `InvalidSession`, which pops this
+    session's live store so a replayed id starts empty instead of resurrecting state.
+    Ownership is enforced too: a session bound to a minting connection is only resolvable
+    from that same connection (a leaked id from another connection is rejected — see
+    `_MINTED_SESSION_OWNER`); unbound (stateless-era) mints are validated-id bearer sessions.
+    """
+    try:
+        await get_session(session_id)
+    except InvalidSession:
+        _revoke_minted(session_id)
+        raise InvalidArgument(
+            f"unknown session_id {session_id!r}: "
+            "never created (call create_session) or already ended"
+        ) from None
+    owner = _MINTED_SESSION_OWNER.get(session_id)
+    if owner is not None and owner != _stable_connection_id():
+        raise InvalidArgument(
+            f"session_id {session_id!r} belongs to a different connection: mint a fresh "
+            "one on this connection with create_session"
+        )
+    _MINTED_SESSION_STORES.setdefault(session_id, DocumentStore())
+
+
+def _session_bound(fn: Callable[..., object]) -> Callable[..., object]:
+    """Make a tool session-aware: an optional validated `session_id`, resolved to state.
+
+    Appends a kw-only `session_id: SessionId | None` parameter (schema-visible, default None,
+    auto-described by fastmcp's SessionId marker with the create-then-pass contract),
+    validates it against fastmcp's session framework on every use, and publishes it to
+    `_store()` via a contextvar so the lower layers never need explicit plumbing. Precedence:
+    explicit argument > ambient header. Typed loosely on purpose (Callable[..., object]): a
+    ParamSpec wrapper can't survive pruning a key from **kwargs structurally, and the
+    schema/type-hint surfaces are built from the `__signature__` override + `__annotations__`
+    assignment below (the `__signature__` surgery is the same as `emits_change`; fastmcp
+    resolves parameter annotations via `get_type_hints`, which reads `__annotations__`, not
+    the Parameter objects). Tool bodies keep their own typed signatures, called verbatim.
+    """
+    inner_sig = inspect.signature(fn)
+    param = inspect.Parameter(
+        "session_id",
+        inspect.Parameter.KEYWORD_ONLY,
+        default=None,
+        annotation=SessionId | None,
+    )
+    new_signature = inner_sig.replace(parameters=[*inner_sig.parameters.values(), param])
+
+    @functools.wraps(fn)
+    async def wrapper(*args: object, **kwargs: object) -> object:
+        arg = kwargs.pop("session_id", None)
+        # Values of **kwargs are `object` to the checker; only a real str is session-able.
+        session_id: str | None = arg if isinstance(arg, str) else None
+        if session_id is None:
+            session_id = _ambient_session_id()
+        token = _CURRENT_MINTED_SESSION.set(session_id)
+        try:
+            if session_id is not None:
+                await _resolve_minted_session(session_id)
+            result = fn(*args, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result  # inner async wrapper (`emits_change`) — same tool chain
+            return result
+        finally:
+            _CURRENT_MINTED_SESSION.reset(token)
+
+    wrapper.__signature__ = new_signature  # type: ignore[attr-defined]
+    # NB: do NOT touch `__annotations__['return']` — functools.wraps already copied the tool
+    # body's typed return annotation, and it is what drives fastmcp's structured-output
+    # schema; forcing `object` here would wrap every payload under a generic {"result": …}.
+    wrapper.__annotations__["session_id"] = _SESSION_ID_ARG
+    return wrapper
+
+
+@overload
+def tool(fn: Callable[..., object], /, *, app: AppConfig | None = None) -> FunctionTool: ...
+
+
+@overload
+def tool(
+    fn: None = None, /, *, app: AppConfig | None = None
+) -> Callable[[Callable[..., object]], FunctionTool]: ...
+
+
+def tool(
+    fn: Callable[..., object] | None = None,
+    *,
+    app: AppConfig | None = None,
+) -> Callable[[Callable[..., object]], FunctionTool] | FunctionTool:
+    """Registration alias for `@mcp.tool` / `@mcp.tool(app=...)` — session-aware tools.
+
+    Every svg-mcp tool except the session-lifecycle pair is registered through these
+    overloads, which pre-wrap the function with `_session_bound` (the optional validated
+    `session_id` argument + contextvar publishing) before handing it to FastMCP. Plain
+    module functions rather than a FastMCP subclass override deliberately: an override's
+    return type had to fight pyright's compatibility checks across FastMCP.tool's three
+    contract shapes (decorator / direct registration / partial), while overloads make both
+    used forms exact and composable — the call-surface change is a mechanical rename at the
+    181 stateful decorators.
+    """
+
+    def register(function: Callable[..., object]) -> FunctionTool:
+        # `app` is the only non-default registration kwarg svg-mcp uses; passing it through
+        # explicitly keeps mcp.tool's overload resolvable for both checkers.
+        return cast("FunctionTool", mcp.tool(_session_bound(function), app=app))
+
+    return register if fn is None else register(fn)
+
+
+@mcp.tool
+async def create_session() -> dict[str, str]:
+    """Mint a session id so documents persist across calls on stateless (2026-era) links.
+
+    Stateful links (handshake-era HTTP, stdio, mcp-combiner legacy) already get per-connection
+    document ownership automatically — you don't need this. On a stateless (2026-07-28) link,
+    pass the returned `session_id` on EVERY subsequent svg-mcp call — the schema marks the
+    argument on each tool, and that is the contract on every transport (no client injects it
+    behind your back). Documents follow the session until `end_session`.
+
+    Ownership: a mint made on a stateful connection is bound to it (only that connection can
+    use or end the id, and it is discarded when the connection closes). A mint made on a
+    stateless connection cannot be bound (per-request connections, no stable identity), so
+    the minted id — unguessable uuid — is the capability.
+
+    Registered with plain `@mcp.tool`, not the session-aware `@tool` alias: minting needs no
+    session of its own.
+    """
+    session_id = await mint_session()
+    with contextlib.suppress(Exception):
+        # Capture the fastmcp record while the minting request is still live (principal +
+        # state store pinned inside), so connection TEARDOWN — which runs outside any
+        # request — can delete the record via `_release_connection_minted` without needing
+        # to resolve the current principal (that resolution is what fails there).
+        _MINTED_SESSION_RECORD[session_id] = await get_session(session_id)
+    _mint_ownership(session_id, _stable_connection_id())
+    return {"session_id": session_id}
+
+
+@mcp.tool
+async def end_session(session_id: SessionId) -> str:
+    """End a session: its id stops resolving and all documents in it are discarded.
+
+    Registered with plain `@mcp.tool`, not the session-aware `@tool` alias: its own
+    `session_id` argument IS the session being ended. Sessions bound to a minting
+    connection can only be ended from that connection.
+    """
+    owner = _MINTED_SESSION_OWNER.get(session_id)
+    if owner is not None and owner != _stable_connection_id():
+        raise InvalidArgument(f"session_id {session_id!r} belongs to a different connection")
+    _revoke_minted(session_id)
+    try:
+        await end_minted_session(session_id)
+    except InvalidSession:
+        raise InvalidArgument(f"unknown session_id {session_id!r}") from None
+    return "session ended"
+
+
 def _connection() -> Connection | None:
     """The low-level mcp `Connection` for the current request, or None outside a request."""
     try:
@@ -430,15 +762,35 @@ def _bind_release(connection: Connection, store: DocumentStore) -> None:
 
 
 def _store() -> DocumentStore:
-    """Resolve the DocumentStore for the current MCP connection (per-client isolation).
+    """Resolve the DocumentStore of the current call's session (per-session isolation).
 
-    Each client connection gets its own store, keyed by the Connection object and released
-    deterministically when the connection closes. Outside a request (direct/programmatic use) a
-    shared default is used.
+    Precedence:
+    1. a minted session id — explicit `session_id` argument or `X-Svg-Mcp-Session` header,
+       resolved/validated by the tool wrapper into the contextvar (any era; the registry is
+       what makes 2026-era stateful-per-session semantics possible);
+    2. otherwise, for stateful/handshake-era requests, the low-level mcp Connection
+       (`WeakKeyDictionary`, released deterministically at connection close);
+    3. outside a request (direct/programmatic use), the shared default.
+
+    A 2026-era request with NO session identity raises `NoSession` with recovery guidance,
+    rather than silently writing state that the stateless protocol discards with the request.
     """
+    minted = _CURRENT_MINTED_SESSION.get()
+    if minted is not None:
+        store = _MINTED_SESSION_STORES.get(minted)
+        if store is None:
+            # Defensive: a still-valid id whose live object was churned away re-creates it;
+            # a genuinely ended id was already popped (+raised) at validation time.
+            store = _MINTED_SESSION_STORES[minted] = DocumentStore()
+        return store
     connection = _connection()
     if connection is None:
         return _DEFAULT_STORE
+    if connection.protocol_version in MODERN_PROTOCOL_VERSIONS:
+        raise NoSession(
+            "no session on this stateless (2026-era) connection: call create_session and pass "
+            "its id as the session_id argument so documents persist between calls"
+        )
     store = _SESSION_STORES.get(connection)
     if store is None:
         store = DocumentStore()
@@ -461,8 +813,13 @@ def _session_token() -> str:
 
     Each chat connects as its own MCP session and gets its own per-session DocumentStore; the live
     preview is partitioned by this token so one chat's edits never appear in another's preview.
-    Outside a request (direct/programmatic use) all callers share the ``default`` bucket.
+    On a minted session (explicit argument or ambient header) the minted id is the partition
+    key; otherwise the stateful connection's stable session id is. Outside a request
+    (direct/programmatic use) all callers share the ``default`` bucket.
     """
+    minted = _CURRENT_MINTED_SESSION.get()
+    if minted is not None:
+        return hashlib.sha256(minted.encode()).hexdigest()[:12]
     sid = _session_id()
     if sid is None:
         return "default"
@@ -628,7 +985,7 @@ def emits_change[**P, R](fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
 # --- session / document ----------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def create_document(
     width: float, height: float, viewbox: str | None = None
@@ -648,7 +1005,7 @@ def create_document(
     return {"document_id": document_id, "width": width, "height": height, "active": True}
 
 
-@mcp.tool
+@tool
 @emits_change
 def import_svg(
     *, svg: str | None = None, path: str | None = None, into_active: bool = False
@@ -689,7 +1046,7 @@ def import_svg(
     return result
 
 
-@mcp.tool
+@tool
 def list_documents() -> list[str]:
     """List the ids of all open documents in the session.
 
@@ -699,7 +1056,7 @@ def list_documents() -> list[str]:
     return _store().list_ids()
 
 
-@mcp.tool
+@tool
 @emits_change
 def set_active_document(document_id: str) -> dict[str, str]:
     """Make a document the active one, so later calls may omit document_id to target it.
@@ -713,7 +1070,7 @@ def set_active_document(document_id: str) -> dict[str, str]:
     return {"active": _store().set_active(document_id)}
 
 
-@mcp.tool
+@tool
 def current_context() -> dict[str, str | list[str] | OutlineNode | None]:
     """Report the working context so you can re-anchor (e.g. after a long conversation).
 
@@ -732,7 +1089,7 @@ def current_context() -> dict[str, str | list[str] | OutlineNode | None]:
     }
 
 
-@mcp.tool
+@tool
 @emits_change
 def delete_document(*, document_id: str | None = None) -> str:
     """Delete an open document and free its resources.
@@ -743,7 +1100,7 @@ def delete_document(*, document_id: str | None = None) -> str:
     return _store().delete(document_id)
 
 
-@mcp.tool
+@tool
 def export_svg(*, document_id: str | None = None) -> str:
     """Serialize a document to SVG source text.
 
@@ -753,7 +1110,7 @@ def export_svg(*, document_id: str | None = None) -> str:
     return _export_svg(_doc(document_id))
 
 
-@mcp.tool
+@tool
 def outline(
     *,
     document_id: str | None = None,
@@ -777,7 +1134,7 @@ def outline(
     return _outline(_doc(document_id), root=root, depth=depth, include_bbox=include_bbox)
 
 
-@mcp.tool
+@tool
 def get_bbox(*, document_id: str | None = None, target: str) -> dict[str, float] | None:
     """Return a node's world-absolute bounding box (ancestor transforms applied).
 
@@ -796,7 +1153,7 @@ def get_bbox(*, document_id: str | None = None, target: str) -> dict[str, float]
 # --- construction ----------------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_rect(
     *,
@@ -857,7 +1214,7 @@ def add_rect(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_circle(
     *,
@@ -909,7 +1266,7 @@ def add_circle(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_ellipse(
     *,
@@ -964,7 +1321,7 @@ def add_ellipse(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_line(
     *,
@@ -1021,7 +1378,7 @@ def add_line(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_polyline(
     *,
@@ -1067,7 +1424,7 @@ def add_polyline(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_polygon(
     *,
@@ -1113,7 +1470,7 @@ def add_polygon(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_path(
     *,
@@ -1159,7 +1516,7 @@ def add_path(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_variable_width_path(
     *,
@@ -1229,7 +1586,7 @@ def add_variable_width_path(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_squircle(
     *,
@@ -1296,7 +1653,7 @@ def add_squircle(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_rounded_polygon(
     *,
@@ -1365,7 +1722,7 @@ def add_rounded_polygon(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_superellipse(
     *,
@@ -1429,7 +1786,7 @@ def add_superellipse(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_pill(
     *,
@@ -1489,7 +1846,7 @@ def add_pill(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_variable_width_paths(
     *,
@@ -1546,7 +1903,7 @@ def add_variable_width_paths(
     return {"count": len(ids), "ids": ids, "auto_styles": _classes(doc, ids[0]) if ids else []}
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_rects(
     *,
@@ -1594,7 +1951,7 @@ def add_rects(
     return {"count": len(ids), "ids": ids, "auto_styles": _classes(doc, ids[0]) if ids else []}
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_circles(
     *,
@@ -1639,7 +1996,7 @@ def add_circles(
     return {"count": len(ids), "ids": ids, "auto_styles": _classes(doc, ids[0]) if ids else []}
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_lines(
     *,
@@ -1685,7 +2042,7 @@ def add_lines(
     return {"count": len(ids), "ids": ids, "auto_styles": _classes(doc, ids[0]) if ids else []}
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_paths(
     *,
@@ -1728,7 +2085,7 @@ def add_paths(
     return {"count": len(ids), "ids": ids, "auto_styles": _classes(doc, ids[0]) if ids else []}
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_text(
     *,
@@ -1784,7 +2141,7 @@ def add_text(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_text(
     *,
@@ -1821,7 +2178,7 @@ def edit_text(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_text_block(
     *,
@@ -1874,7 +2231,7 @@ def add_text_block(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_text_block(
     *,
@@ -1910,7 +2267,7 @@ def edit_text_block(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def create_group(
     *,
@@ -1942,7 +2299,7 @@ def create_group(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def create_layer(
     *, document_id: str | None = None, name: str, parent: str | None = None
@@ -1964,7 +2321,7 @@ def create_layer(
 # --- modification ----------------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def set_name(*, document_id: str | None = None, target: str, name: str) -> dict[str, str | None]:
     """Set a node's friendly name (its inkscape:label) so you can target it by name later.
@@ -1979,7 +2336,7 @@ def set_name(*, document_id: str | None = None, target: str, name: str) -> dict[
     return ops.set_name(_doc(document_id), target, name).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def delete_node(*, document_id: str | None = None, target: str) -> str:
     """Delete a node (and its descendants) from the document.
@@ -1993,7 +2350,7 @@ def delete_node(*, document_id: str | None = None, target: str) -> str:
     return ops.delete_node(_doc(document_id), target)
 
 
-@mcp.tool
+@tool
 @emits_change
 def delete_nodes(*, document_id: str | None = None, targets: list[str]) -> list[str]:
     """Delete several nodes in one call (and their descendants); returns the deleted ids.
@@ -2007,7 +2364,7 @@ def delete_nodes(*, document_id: str | None = None, targets: list[str]) -> list[
     return ops.delete_nodes(_doc(document_id), targets)
 
 
-@mcp.tool
+@tool
 @emits_change
 def restyle(
     *,
@@ -2055,7 +2412,7 @@ def restyle(
 # id, clip, mask, filters, and z-order — unlike delete + re-add. Pass only what you want changed.
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_rect(
     *,
@@ -2081,7 +2438,7 @@ def edit_rect(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_circle(
     *,
@@ -2104,7 +2461,7 @@ def edit_circle(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_ellipse(
     *,
@@ -2128,7 +2485,7 @@ def edit_ellipse(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_line(
     *,
@@ -2156,7 +2513,7 @@ def _points_attr(points: list[Point] | None) -> str | None:
     return None if points is None else " ".join(f"{px},{py}" for px, py in points)
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_polyline(
     *,
@@ -2177,7 +2534,7 @@ def edit_polyline(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_polygon(
     *,
@@ -2198,7 +2555,7 @@ def edit_polygon(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_path(
     *,
@@ -2228,7 +2585,7 @@ def edit_path(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_star(
     *,
@@ -2265,7 +2622,7 @@ def edit_star(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_arc(
     *,
@@ -2297,7 +2654,7 @@ def edit_arc(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_variable_width_path(
     *,
@@ -2333,7 +2690,7 @@ def edit_variable_width_path(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_squircle(
     *,
@@ -2368,7 +2725,7 @@ def edit_squircle(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_rounded_polygon(
     *,
@@ -2405,7 +2762,7 @@ def edit_rounded_polygon(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_superellipse(
     *,
@@ -2440,7 +2797,7 @@ def edit_superellipse(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_pill(
     *,
@@ -2473,7 +2830,7 @@ def edit_pill(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def offset_path(
     *,
@@ -2520,7 +2877,7 @@ def offset_path(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def reparent(
     *,
@@ -2560,7 +2917,7 @@ def reparent(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def ungroup(*, document_id: str | None = None, target: str) -> list[str]:
     """Dissolve a group/layer, moving its children up into its parent.
@@ -2577,7 +2934,7 @@ def ungroup(*, document_id: str | None = None, target: str) -> list[str]:
     return ops.ungroup(_doc(document_id), target)
 
 
-@mcp.tool
+@tool
 @emits_change
 def duplicate(
     *,
@@ -2603,7 +2960,7 @@ def duplicate(
     return ops.duplicate(_doc(document_id), target, into, _style(style)).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def to_front(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Move a node to the top of its parent's stacking order (drawn last, appears on top).
@@ -2617,7 +2974,7 @@ def to_front(*, document_id: str | None = None, target: str) -> dict[str, str | 
     return ops.to_front(_doc(document_id), target).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def to_back(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Move a node to the bottom of its parent's stacking order (drawn first, behind siblings).
@@ -2631,7 +2988,7 @@ def to_back(*, document_id: str | None = None, target: str) -> dict[str, str | N
     return ops.to_back(_doc(document_id), target).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def raise_node(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Raise a node one step up its parent's stacking order (one sibling closer to the front).
@@ -2645,7 +3002,7 @@ def raise_node(*, document_id: str | None = None, target: str) -> dict[str, str 
     return ops.raise_node(_doc(document_id), target).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def lower_node(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Lower a node one step down its parent's stacking order (one sibling closer to the back).
@@ -2659,7 +3016,7 @@ def lower_node(*, document_id: str | None = None, target: str) -> dict[str, str 
     return ops.lower_node(_doc(document_id), target).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def translate_node(
     *, document_id: str | None = None, target: str, dx: float, dy: float
@@ -2677,7 +3034,7 @@ def translate_node(
     return ops.translate_node(_doc(document_id), target, dx, dy).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def rotate_node(
     *, document_id: str | None = None, target: str, degrees: float, center: Point | None = None
@@ -2695,7 +3052,7 @@ def rotate_node(
     return ops.rotate_node(_doc(document_id), target, degrees, center).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def scale_node(
     *,
@@ -2719,7 +3076,7 @@ def scale_node(
     return ops.scale_node(_doc(document_id), target, sx, sy, center).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def skew_node(
     *, document_id: str | None = None, target: str, axis: Literal["x", "y"], degrees: float
@@ -2737,7 +3094,7 @@ def skew_node(
     return ops.skew_node(_doc(document_id), target, axis, degrees).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_transform(
     *, document_id: str | None = None, target: str, transform: str
@@ -2755,7 +3112,7 @@ def apply_transform(
     return ops.apply_transform(_doc(document_id), target, transform).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def set_transform(
     *, document_id: str | None = None, target: str, transform: str
@@ -2778,7 +3135,7 @@ def set_transform(
 # --- layers ----------------------------------------------------------------
 
 
-@mcp.tool
+@tool
 def list_layers(*, document_id: str | None = None) -> list[dict[str, str | bool | None]]:
     """List the document's layers and their state.
 
@@ -2788,7 +3145,7 @@ def list_layers(*, document_id: str | None = None) -> list[dict[str, str | bool 
     return ops.list_layers(_doc(document_id))
 
 
-@mcp.tool
+@tool
 @emits_change
 def set_layer_state(
     *,
@@ -2814,7 +3171,7 @@ def set_layer_state(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def rename_layer(
     *, document_id: str | None = None, target: str, name: str
@@ -2831,7 +3188,7 @@ def rename_layer(
     return ops.rename_layer(_doc(document_id), target, name).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def move_to_layer(
     *, document_id: str | None = None, target: str, layer: str
@@ -2851,7 +3208,7 @@ def move_to_layer(
 # --- text runs / text-on-path / image --------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_text_run(
     *,
@@ -2909,7 +3266,7 @@ def add_text_run(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_text_on_path(
     *,
@@ -2969,7 +3326,7 @@ def add_text_on_path(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_image(
     *,
@@ -3039,7 +3396,7 @@ def add_image(
 # --- resources: named styles, gradients, clip/mask, filters ----------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_style(*, document_id: str | None = None, name: str, style: ShapeStyle) -> str:
     """Define a reusable named style, emitted as a CSS class. Apply it with apply_styles.
@@ -3054,7 +3411,7 @@ def define_style(*, document_id: str | None = None, name: str, style: ShapeStyle
     return ops.define_style(_doc(document_id), name, style.to_style_dict())
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_style(
     *,
@@ -3080,7 +3437,7 @@ def edit_style(
     return ops.edit_style(_doc(document_id), name, style.to_style_dict(), replace=replace)
 
 
-@mcp.tool
+@tool
 @emits_change
 def delete_style(*, document_id: str | None = None, name: str) -> str:
     """Delete a named style. Nodes still referencing the class keep their `class` attribute but lose
@@ -3095,7 +3452,7 @@ def delete_style(*, document_id: str | None = None, name: str) -> str:
     return ops.delete_style(_doc(document_id), name)
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_styles(
     *, document_id: str | None = None, target: str, names: list[str], replace: bool = False
@@ -3122,7 +3479,7 @@ def apply_styles(
     return ops.apply_styles(_doc(document_id), target, names, replace=replace).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def remove_styles(
     *, document_id: str | None = None, target: str, names: list[str]
@@ -3146,7 +3503,7 @@ def remove_styles(
 # --- themes ----------------------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def load_theme(
     *,
@@ -3192,7 +3549,7 @@ def load_theme(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def unload_theme(*, document_id: str | None = None, name: str) -> ops.ThemeRemoval:
     """Remove a theme's rules, routes, and metadata from the document.
@@ -3210,7 +3567,7 @@ def unload_theme(*, document_id: str | None = None, name: str) -> ops.ThemeRemov
     return ops.unload_theme(_doc(document_id), name)
 
 
-@mcp.tool
+@tool
 @emits_change
 def sync_theme(*, document_id: str | None = None, name: str) -> ops.ThemeResidency:
     """Re-read a resident theme from disk, keeping its variant and routes — pick up a CSS edit.
@@ -3224,7 +3581,7 @@ def sync_theme(*, document_id: str | None = None, name: str) -> ops.ThemeResiden
     return ops.sync_theme(_doc(document_id), name)
 
 
-@mcp.tool
+@tool
 @emits_change
 def replace_theme(
     *,
@@ -3261,7 +3618,7 @@ def replace_theme(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def set_theme_variant(
     *, document_id: str | None = None, variant: str | None = None
@@ -3286,7 +3643,7 @@ def set_theme_variant(
     return ops.set_theme_variant(_doc(document_id), variant)
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_theme(
     *,
@@ -3329,7 +3686,7 @@ def apply_theme(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def clear_theme(
     *, document_id: str | None = None, target: str, theme: str | None = None
@@ -3350,7 +3707,7 @@ def clear_theme(
     return ops.clear_theme(_doc(document_id), target, theme)
 
 
-@mcp.tool
+@tool
 def list_styles(*, document_id: str | None = None) -> list[ops.StyleInfo]:
     """Every style this document can attach: each resident theme's classes, then doc-local ones.
 
@@ -3364,7 +3721,7 @@ def list_styles(*, document_id: str | None = None) -> list[ops.StyleInfo]:
 # --- diagram facades -------------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_diagram_node(
     *,
@@ -3432,7 +3789,7 @@ def add_diagram_node(
     return {**_placed(doc, placed.ref), "x": placed.x, "y": placed.y, "w": placed.w, "h": placed.h}
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_diagram_edge(
     *,
@@ -3505,7 +3862,7 @@ def add_diagram_edge(
     return {**_placed(doc, placed.ref), "edges_rerouted": placed.edges_rerouted}
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_diagram_node(
     *,
@@ -3542,7 +3899,7 @@ def edit_diagram_node(
     }
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_diagram_edge(
     *,
@@ -3589,7 +3946,7 @@ def edit_diagram_edge(
     return {**result.ref.as_dict(), "edges_rerouted": result.edges_rerouted}
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_diagram_container(
     *,
@@ -3663,7 +4020,7 @@ def add_diagram_container(
     }
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_diagram_container(
     *,
@@ -3704,7 +4061,7 @@ def edit_diagram_container(
     return {**result.ref.as_dict(), "members": result.members, "refit": result.refit}
 
 
-@mcp.tool
+@tool
 @emits_change
 def layout_diagram(
     *,
@@ -3771,7 +4128,7 @@ def layout_diagram(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_diagram_graph(
     *,
@@ -3911,7 +4268,7 @@ def add_diagram_graph(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def reflow(
     *,
@@ -3952,7 +4309,7 @@ def reflow(
 # --- chart facades ---------------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_chart(
     *,
@@ -4074,7 +4431,7 @@ def add_chart(
     return {**_placed(doc, placed.ref), "x": placed.x, "y": placed.y, "w": placed.w, "h": placed.h}
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_chart(
     *,
@@ -4128,7 +4485,7 @@ def edit_chart(
 # --- annotation facades -----------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_legend(
     *,
@@ -4197,7 +4554,7 @@ def add_legend(
     }
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_legend(
     *,
@@ -4237,7 +4594,7 @@ def edit_legend(
     return {**result.ref.as_dict(), "entries": result.entries, "regenerated": result.regenerated}
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_callout(
     *,
@@ -4325,7 +4682,7 @@ def add_callout(
     }
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_callout(
     *,
@@ -4354,7 +4711,7 @@ def edit_callout(
     return {**result.ref.as_dict(), "lines": result.lines, "replaced": result.replaced}
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_callout_card(
     *,
@@ -4424,7 +4781,7 @@ def add_callout_card(
     }
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_callout_card(
     *,
@@ -4452,7 +4809,7 @@ def edit_callout_card(
     return {**result.ref.as_dict(), "lines": result.lines, "h": result.h}
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_table(
     *,
@@ -4530,7 +4887,7 @@ def add_table(
     }
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_table(
     *,
@@ -4574,7 +4931,7 @@ def edit_table(
     }
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_linear_gradient(
     *,
@@ -4620,7 +4977,7 @@ def define_linear_gradient(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_radial_gradient(
     *,
@@ -4669,7 +5026,7 @@ def define_radial_gradient(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_clip(
     *,
@@ -4694,7 +5051,7 @@ def define_clip(
     return ops.define_clip(_doc(document_id), content=content, name=name, units=units)
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_mask(
     *,
@@ -4719,7 +5076,7 @@ def define_mask(
     return ops.define_mask(_doc(document_id), content=content, name=name, units=units)
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_clip(*, document_id: str | None = None, target: str, clip: str) -> dict[str, str | None]:
     """Clip a node to a clipPath (created via define_clip).
@@ -4734,7 +5091,7 @@ def apply_clip(*, document_id: str | None = None, target: str, clip: str) -> dic
     return ops.apply_clip(_doc(document_id), target, clip).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_mask(*, document_id: str | None = None, target: str, mask: str) -> dict[str, str | None]:
     """Apply a mask to a node (created via define_mask).
@@ -4749,7 +5106,7 @@ def apply_mask(*, document_id: str | None = None, target: str, mask: str) -> dic
     return ops.apply_mask(_doc(document_id), target, mask).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def boolean(
     *,
@@ -4801,7 +5158,7 @@ def boolean(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def clear_clip(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Remove a node's clip-path (undo apply_clip).
@@ -4815,7 +5172,7 @@ def clear_clip(*, document_id: str | None = None, target: str) -> dict[str, str 
     return ops.clear_clip(_doc(document_id), target).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def clear_mask(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Remove a node's mask (undo apply_mask).
@@ -4829,7 +5186,7 @@ def clear_mask(*, document_id: str | None = None, target: str) -> dict[str, str 
     return ops.clear_mask(_doc(document_id), target).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_blur(
     *, document_id: str | None = None, target: str, std_deviation: float
@@ -4846,7 +5203,7 @@ def apply_blur(
     return ops.apply_blur(_doc(document_id), target, std_deviation=std_deviation).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_drop_shadow(
     *,
@@ -4881,7 +5238,7 @@ def apply_drop_shadow(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_color_matrix(
     *, document_id: str | None = None, target: str, type: str = "matrix", values: str | None = None
@@ -4900,7 +5257,7 @@ def apply_color_matrix(
     return ops.apply_color_matrix(_doc(document_id), target, type=type, values=values).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_color_overlay(
     *, document_id: str | None = None, target: str, color: str, opacity: float = 1.0
@@ -4920,7 +5277,7 @@ def apply_color_overlay(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_blend(*, document_id: str | None = None, target: str, mode: str) -> dict[str, str | None]:
     """Apply a blend mode to a node via a filter.
@@ -4939,7 +5296,7 @@ def apply_blend(*, document_id: str | None = None, target: str, mode: str) -> di
 # --- inspection ------------------------------------------------------------
 
 
-@mcp.tool
+@tool
 def describe_document(*, document_id: str | None = None) -> _DocumentInfo:
     """Summarize a document at a glance, including which themes it currently holds.
 
@@ -4951,7 +5308,7 @@ def describe_document(*, document_id: str | None = None) -> _DocumentInfo:
     return _describe_document(_doc(document_id))
 
 
-@mcp.tool
+@tool
 def get_computed_style(*, document_id: str | None = None, target: str) -> dict[str, str]:
     """Return a node's resolved presentation style (inline props + inheritance applied).
 
@@ -4967,7 +5324,7 @@ def get_computed_style(*, document_id: str | None = None, target: str) -> dict[s
     return _get_computed_style(_doc(document_id), target)
 
 
-@mcp.tool
+@tool
 def get_transform(
     *, document_id: str | None = None, target: str
 ) -> dict[str, str | list[float] | list[_TransformEntry]]:
@@ -4984,7 +5341,7 @@ def get_transform(
     return _get_transform(_doc(document_id), target)
 
 
-@mcp.tool
+@tool
 def get_geometry(
     *, document_id: str | None = None, target: str, relative_to: str = "world"
 ) -> _Geometry | None:
@@ -5007,7 +5364,7 @@ def get_geometry(
     return _get_geometry(_doc(document_id), target, relative_to)
 
 
-@mcp.tool
+@tool
 def get_params(
     *, document_id: str | None = None, target: str
 ) -> dict[str, str | bool | _ShapeParams | dict[str, str]]:
@@ -5027,7 +5384,7 @@ def get_params(
     return _get_params(_doc(document_id), target)
 
 
-@mcp.tool
+@tool
 def convert_units(*, document_id: str | None = None, value: str, to_unit: str) -> float:
     """Convert a length between units using the document's scale.
 
@@ -5041,7 +5398,7 @@ def convert_units(*, document_id: str | None = None, value: str, to_unit: str) -
     return _convert_units(_doc(document_id), value, to_unit)
 
 
-@mcp.tool
+@tool
 def describe_node(
     *, document_id: str | None = None, target: str
 ) -> dict[str, str | int | None | list[float] | list[str] | dict[str, str]]:
@@ -5060,7 +5417,7 @@ def describe_node(
     return _describe_node(_doc(document_id), target)
 
 
-@mcp.tool
+@tool
 def list_resources(*, document_id: str | None = None) -> dict[str, list[dict[str, str | None]]]:
     """List the reusable resources defined in the document, so you know what you can reference.
 
@@ -5072,7 +5429,7 @@ def list_resources(*, document_id: str | None = None) -> dict[str, list[dict[str
     return _list_resources(_doc(document_id))
 
 
-@mcp.tool
+@tool
 def list_fonts() -> list[str]:
     """List the font families installed on this system, usable as a text style's font-family.
 
@@ -5083,7 +5440,7 @@ def list_fonts() -> list[str]:
     return _list_font_families()
 
 
-@mcp.tool
+@tool
 @emits_change
 def text_to_path(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Convert a text node into an outlined <path> (font-independent, usable in clips/booleans).
@@ -5103,7 +5460,7 @@ def text_to_path(*, document_id: str | None = None, target: str) -> dict[str, st
 # --- path factories & path ops ---------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_arc(
     *,
@@ -5161,7 +5518,7 @@ def add_arc(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_star(
     *,
@@ -5225,7 +5582,7 @@ def add_star(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def path_transform(
     *, document_id: str | None = None, target: str, transform: str
@@ -5245,7 +5602,7 @@ def path_transform(
     return ops.path_transform(_doc(document_id), target, transform).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def path_to_absolute(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Normalize a path's data to absolute commands (uppercase). Path nodes only.
@@ -5259,7 +5616,7 @@ def path_to_absolute(*, document_id: str | None = None, target: str) -> dict[str
     return ops.path_to_absolute(_doc(document_id), target).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def path_to_relative(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Normalize a path's data to relative commands (lowercase). Path nodes only.
@@ -5273,7 +5630,7 @@ def path_to_relative(*, document_id: str | None = None, target: str) -> dict[str
     return ops.path_to_relative(_doc(document_id), target).as_dict()
 
 
-@mcp.tool
+@tool
 def path_bbox(*, document_id: str | None = None, target: str) -> dict[str, float] | None:
     """Return the bounding box of a path's raw data, ignoring any node transform. Path nodes only.
 
@@ -5291,7 +5648,7 @@ def path_bbox(*, document_id: str | None = None, target: str) -> dict[str, float
 # --- symbols / use ---------------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_symbol(
     *, document_id: str | None = None, content: list[str], name: str | None = None
@@ -5311,7 +5668,7 @@ def define_symbol(
     return ops.define_symbol(_doc(document_id), content=content, name=name)
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_use(
     *,
@@ -5341,7 +5698,7 @@ def add_use(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def unlink_use(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Expand a <use> instance into a real, independent copy of its referenced content.
@@ -5358,7 +5715,7 @@ def unlink_use(*, document_id: str | None = None, target: str) -> dict[str, str 
 # --- patterns / markers ----------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_pattern(
     *,
@@ -5402,7 +5759,7 @@ def define_pattern(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_marker(
     *,
@@ -5451,7 +5808,7 @@ def define_marker(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_arrow_marker(
     *,
@@ -5496,7 +5853,7 @@ def define_arrow_marker(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_marker(
     *, document_id: str | None = None, target: str, marker: str, position: str = "end"
@@ -5517,7 +5874,7 @@ def apply_marker(
 # --- advanced filters ------------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_filter(
     *, document_id: str | None = None, primitives: list[FilterPrimitive], name: str | None = None
@@ -5542,7 +5899,7 @@ def define_filter(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_filter(
     *, document_id: str | None = None, target: str, filter: str
@@ -5559,7 +5916,7 @@ def apply_filter(
     return ops.apply_filter(_doc(document_id), target, filter).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_morphology(
     *, document_id: str | None = None, target: str, operator: str = "dilate", radius: float = 1
@@ -5586,7 +5943,7 @@ def apply_morphology(
 # Effects are bounded by a `size`/falloff and compose: shadow + gloss + inner-shadow coexist.
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_inner_shadow(
     *,
@@ -5612,7 +5969,7 @@ def apply_inner_shadow(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_outer_glow(
     *,
@@ -5629,7 +5986,7 @@ def apply_outer_glow(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_inner_glow(
     *,
@@ -5646,7 +6003,7 @@ def apply_inner_glow(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_outline(
     *,
@@ -5663,7 +6020,7 @@ def apply_outline(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_bevel(
     *,
@@ -5687,7 +6044,7 @@ def apply_bevel(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_gloss(
     *,
@@ -5720,7 +6077,7 @@ def apply_gloss(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_front_light(
     *,
@@ -5752,7 +6109,7 @@ def apply_front_light(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_grain(
     *,
@@ -5774,7 +6131,7 @@ def apply_grain(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 def get_filter(*, document_id: str | None = None, target: str) -> _FilterInfo | None:
     """Describe a node's EFFECT STACK — {id, effects:[{index, kind, params}, …]} — to read-edit.
 
@@ -5787,7 +6144,7 @@ def get_filter(*, document_id: str | None = None, target: str) -> _FilterInfo | 
     return ops.get_filter(_doc(document_id), target)
 
 
-@mcp.tool
+@tool
 @emits_change
 def edit_filter(
     *, document_id: str | None = None, target: str, params: _FxParams, index: int = 0
@@ -5806,7 +6163,7 @@ def edit_filter(
     return ops.edit_filter(_doc(document_id), target, params, index=index).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def remove_effect(
     *, document_id: str | None = None, target: str, index: int
@@ -5820,7 +6177,7 @@ def remove_effect(
     return ops.remove_effect(_doc(document_id), target, index).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def clear_effects(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
     """Remove ALL effects from a node (detaches the whole filter).
@@ -5831,7 +6188,7 @@ def clear_effects(*, document_id: str | None = None, target: str) -> dict[str, s
     return ops.clear_effects(_doc(document_id), target).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_component_transfer(
     *,
@@ -5866,7 +6223,7 @@ def apply_component_transfer(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_turbulence(
     *,
@@ -5902,7 +6259,7 @@ def apply_turbulence(
 # --- metadata --------------------------------------------------------------
 
 
-@mcp.tool
+@tool
 @emits_change
 def set_title(*, document_id: str | None = None, target: str, text: str) -> dict[str, str | None]:
     """Set a node's <title> (accessibility label / hover tooltip).
@@ -5917,7 +6274,7 @@ def set_title(*, document_id: str | None = None, target: str, text: str) -> dict
     return ops.set_title(_doc(document_id), target, text).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def set_description(
     *, document_id: str | None = None, target: str, text: str
@@ -5934,7 +6291,7 @@ def set_description(
     return ops.set_description(_doc(document_id), target, text).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def set_document_metadata(
     *,
@@ -5960,7 +6317,7 @@ def set_document_metadata(
     )
 
 
-@mcp.tool
+@tool
 @emits_change
 def resize_document(
     *,
@@ -5997,7 +6354,7 @@ def resize_document(
 # --- selectors -------------------------------------------------------------
 
 
-@mcp.tool
+@tool
 def find(
     *,
     document_id: str | None = None,
@@ -6029,7 +6386,7 @@ def find(
     )
 
 
-@mcp.tool
+@tool
 def get_subtree(*, document_id: str | None = None, target: str) -> dict[str, str | OutlineNode]:
     """Extract a node's subtree for inspection — both rendered SVG and structured form.
 
@@ -6042,7 +6399,7 @@ def get_subtree(*, document_id: str | None = None, target: str) -> dict[str, str
     return _get_subtree(_doc(document_id), target)
 
 
-@mcp.tool
+@tool
 def extract_image(*, document_id: str | None = None, target: str) -> dict[str, str] | None:
     """Extract the embedded bytes of an <image> node that uses a data URI.
 
@@ -6058,7 +6415,7 @@ def extract_image(*, document_id: str | None = None, target: str) -> dict[str, s
 # --- flowed text / links / mesh / advanced filter / pages (Tier 3) ---------
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_flowed_text(
     *,
@@ -6116,7 +6473,7 @@ def add_flowed_text(
     return _placed(doc, ref)
 
 
-@mcp.tool
+@tool
 @emits_change
 def wrap_in_link(
     *,
@@ -6142,7 +6499,7 @@ def wrap_in_link(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def define_mesh_gradient(
     *,
@@ -6168,7 +6525,7 @@ def define_mesh_gradient(
     return ops.define_mesh_gradient(_doc(document_id), x=x, y=y, rows=rows, cols=cols, name=name)
 
 
-@mcp.tool
+@tool
 @emits_change
 def apply_displacement_map(
     *,
@@ -6198,7 +6555,7 @@ def apply_displacement_map(
     ).as_dict()
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_guide(
     *,
@@ -6220,7 +6577,7 @@ def add_guide(
     return ops.add_guide(_doc(document_id), position=position, angle=angle, name=name)
 
 
-@mcp.tool
+@tool
 def list_guides(*, document_id: str | None = None) -> list[dict[str, str | None]]:
     """List the document's guides.
 
@@ -6230,7 +6587,7 @@ def list_guides(*, document_id: str | None = None) -> list[dict[str, str | None]
     return ops.list_guides(_doc(document_id))
 
 
-@mcp.tool
+@tool
 @emits_change
 def add_page(
     *,
@@ -6256,7 +6613,7 @@ def add_page(
     return ops.add_page(_doc(document_id), x=x, y=y, width=width, height=height, label=label)
 
 
-@mcp.tool
+@tool
 def list_pages(*, document_id: str | None = None) -> list[dict[str, str | None]]:
     """List the document's pages.
 
@@ -6269,7 +6626,7 @@ def list_pages(*, document_id: str | None = None) -> list[dict[str, str | None]]
 # --- render ----------------------------------------------------------------
 
 
-@mcp.tool
+@tool
 def render_document(
     *,
     document_id: str | None = None,
@@ -6306,7 +6663,7 @@ def render_document(
     return [summary, feedback.image]
 
 
-@mcp.tool
+@tool
 def render_svg(
     svg: str,
     scale: float = 1.0,
@@ -6338,7 +6695,7 @@ def render_svg(
     return [feedback.summary, feedback.image]
 
 
-@mcp.tool
+@tool
 def render_backends() -> dict[str, bool]:
     """Report which render backends are installed and usable in this environment.
 
@@ -6348,7 +6705,7 @@ def render_backends() -> dict[str, bool]:
     return available_backends()
 
 
-@mcp.tool
+@tool
 def export_render(
     *,
     document_id: str | None = None,
@@ -6383,7 +6740,7 @@ def export_render(
     return {"path": str(resolved), "format": format.lower(), "bytes": len(data)}
 
 
-@mcp.tool
+@tool
 def export_formats() -> dict[str, list[str] | bool]:
     """List the file formats ``export_render`` can write, and whether vector export is available.
 
@@ -6394,7 +6751,7 @@ def export_formats() -> dict[str, list[str] | bool]:
     return {"formats": list(SUPPORTED_FORMATS), "vector_available": rsvg_available()}
 
 
-@mcp.tool
+@tool
 def measure_text(content: str, style: ShapeStyle | None = None) -> dict[str, float]:
     """Measure a single text run without rendering — its advance width and line height.
 
@@ -6423,7 +6780,7 @@ def measure_text(content: str, style: ShapeStyle | None = None) -> dict[str, flo
 # --- live preview ----------------------------------------------------------
 
 
-@mcp.tool
+@tool
 def start_preview(
     *, host: str = "127.0.0.1", port: int | None = None
 ) -> dict[str, str | int | bool]:
@@ -6449,7 +6806,7 @@ def start_preview(
     return {"url": url, "port": bound, "running": True}
 
 
-@mcp.tool
+@tool
 def set_preview_backdrop(*, backdrop: str) -> dict[str, str]:
     """Set the live-preview BACKDROP shown behind the (possibly transparent) artwork.
 
@@ -6476,7 +6833,7 @@ def _trim_num(value: _DocumentValue) -> str:
     return text[:-2] if text.endswith(".0") else text
 
 
-@mcp.tool(app=AppConfig(resource_uri=_widget.WIDGET_URI))
+@tool(app=AppConfig(resource_uri=_widget.WIDGET_URI))
 def show_widget(
     *,
     document_id: str | None = None,
@@ -6621,12 +6978,13 @@ def main() -> None:
         # passes the SDK default). Default is a LONG FINITE bound (24h) rather than "never":
         # a session reaped ONLY on DELETE/failure means a crashed/vanished combiner leaves
         # every parked per-chat session alive forever, each pinning its DocumentStore in
-        # memory. 24h sits far above the combiner's park TTL + grace, so parked chats resume
-        # safely and vanished sessions are eventually reaped (the SDK pushes the deadline on
-        # every request, so active chats never trip it); see `_DEFAULT_IDLE_TIMEOUT_S`.
-        # Only the global setting can express a value (`http_app(session_idle_timeout=None)`
-        # means "use the setting", not None); irrelevant to stdio. Override via
-        # FASTMCP_HTTP_SESSION_IDLE_TIMEOUT.
+        # memory (cribsheet's risk review; mcp-companion requested the same). 24h sits far
+        # above the combiner's park TTL (3600s) + downstream grace (300s), so parked chats
+        # resume safely, while vanished sessions are eventually reaped. The SDK pushes the
+        # deadline with every request, so active chats never trip it. Only the global setting
+        # can express a value (`http_app(session_idle_timeout=None)` means "use the setting",
+        # not None); irrelevant to stdio. Override via FASTMCP_HTTP_SESSION_IDLE_TIMEOUT.
+        # See `_apply_default_idle_bound` for the guard and its suppression reasoning.
         _apply_default_idle_bound()
         # Bound how long uvicorn waits for in-flight connections to drain on shutdown. uvicorn's
         # own default is None (wait forever), which would hang a stop signal while a long-lived MCP
