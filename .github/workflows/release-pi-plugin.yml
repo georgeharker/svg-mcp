@@ -53,4 +53,12 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run build
       - name: Publish to npm (trusted publishing + provenance)
-        run: npm publish --provenance --access public
+        # Prerelease versions publish under the `dev` dist-tag so a
+        # dev line never moves `latest` — same rule the 0.8.x
+        # maintenance guard encodes.
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) DIST_TAG_ARGS=(--tag dev) ;;
+            *)   DIST_TAG_ARGS=() ;;
+          esac
+          npm publish --provenance --access public "${DIST_TAG_ARGS[@]}"
