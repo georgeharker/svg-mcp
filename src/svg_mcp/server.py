@@ -391,10 +391,10 @@ SESSION (STATELESS / 2026-ERA LINKS)
 - On stateful links (handshake-era HTTP, stdio, mcp-combiner legacy) svg-mcp tracks your
   connection automatically: never pass session_id.
 - On a stateless (2026-07-28) link, documents only persist under a minted session: call
-  `create_session` once, then pass its `session_id` on EVERY subsequent svg-mcp call
-  (each tool's schema marks the argument), or have a client/proxy send it ambiently as the
-  `X-Svg-Mcp-Session` request header on every request. An identity-less stateless call is
-  rejected with that guidance rather than silently losing state.
+  `create_session` once, then pass its `session_id` on EVERY subsequent svg-mcp call —
+  each tool's schema marks the argument, and passing it yourself is the contract (no
+  client injects it behind your back). An identity-less stateless call is rejected with
+  that guidance rather than silently losing state.
 - `end_session` invalidates a session and discards its documents.
 
 Multiple documents can be open at once; omit `document_id` for the active one, or pass it
@@ -668,8 +668,7 @@ def _store() -> DocumentStore:
     if connection.protocol_version in MODERN_PROTOCOL_VERSIONS:
         raise NoSession(
             "no session on this stateless (2026-era) connection: call create_session and pass "
-            "its id as the session_id argument (or send the X-Svg-Mcp-Session header with every "
-            "request) so documents persist between calls"
+            "its id as the session_id argument so documents persist between calls"
         )
     store = _SESSION_STORES.get(connection)
     if store is None:

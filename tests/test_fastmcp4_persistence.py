@@ -350,7 +350,9 @@ def test_combiner_forget_delete_releases_store(server: _Server) -> None:
 # --- 2026-era (stateless) identity -------------------------------------------
 # A 2026-era connection has no durable wire identity: every request is its own
 # Connection, born and discarded. Per-session documents there ride a *minted* session
-# id — explicit `session_id` argument or the ambient `X-Svg-Mcp-Session` header —
+# id — explicit `session_id` argument or the ambient `X-Svg-Mcp-Session` header (an
+# alternative carrier for bespoke proxies; the combiner passes tool arguments through,
+# so the model supplies the id itself) —
 # validated through fastmcp's session framework on every resolve. Legacy-era behavior
 # must be byte-for-byte unchanged (the tests above pin that).
 
@@ -458,7 +460,10 @@ def test_2026_sessions_are_isolated(server: _Server) -> None:
 
 
 def test_2026_ambient_header_carries_session(server: _Server) -> None:
-    """A proxy (combiner) can carry the minted id ambiently — tools need no argument."""
+    """A bespoke proxy that prefers transport-level identity can carry the minted id
+    ambiently via the X-Svg-Mcp-Session header — tools need no argument. (The
+    mcp-combiner does NOT do this: the model passes session_id itself there; the header
+    is an alternative carrier, not the combiner's contract.)"""
 
     async def scenario() -> None:
         async with _raw_session(server.url, protocol_version=_MODERN_VERSION) as (t, session):
