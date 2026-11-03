@@ -564,3 +564,94 @@ def test_stateful_minted_session_is_bound_to_its_connection(server: _Server) -> 
                 )
 
     asyncio.run(scenario())
+
+
+# --- subscriptions/listen (2026 era) ----------------------------------------
+# mcp 2's listen: one client call = one subscription stream, per-client and NOT tied to a
+# minted session id; svg-mcp publishes events verbatim and per-stream filters select. The
+# per-call `send_resource_updated` path (any era) is already covered by the tests above; the
+# bus is the channel that reaches BETWEEN calls.
+
+
+def test_listen_handler_is_registered_on_the_kernel(server: _Server) -> None:
+    """The SDK advertises listChanged/subscribe on 2026 discover only when the handler
+    exists; svg-mcp registers it at import; the bus is a working SubscriptionBus."""
+    from svg_mcp.server import _LISTEN_BUS
+
+    method = "subscriptions/listen"
+    assert method in _mcp_server._mcp_server._request_handlers  # noqa: SLF001 — internal registry
+    unsubscribe = _LISTEN_BUS.subscribe(lambda _event: None)
+    unsubscribe()
+
+
+def test_edits_publish_resource_updated_events_to_the_listen_bus(server: _Server) -> None:
+    """A mutating tool call fans its change events out through the subscription bus
+    (verbatim URIs: per-doc svg + the documents index + the widget), for open listen
+    streams of EVERY client — per-stream filters select."""
+    from mcp.server.subscriptions import ResourceUpdated as _RU
+
+    from svg_mcp.server import _LISTEN_BUS
+
+    seen: list[_RU] = []
+
+    async def scenario() -> None:
+        async with await _legacy_client(server.url) as client:
+            created = await client.call_tool("create_document", {"width": 300, "height": 200})
+            document_id = created.data["document_id"]
+            unsubscribe = _LISTEN_BUS.subscribe(
+                lambda event: seen.append(event) if isinstance(event, _RU) else None
+            )
+            try:
+                await client.call_tool("add_rect", {"x": 1, "y": 1, "width": 5, "height": 5})
+            finally:
+                unsubscribe()
+
+            uris = {event.uri for event in seen}
+            assert {
+                f"svg://{document_id}/svg",
+                f"svg://{document_id}/render",
+                "svg://documents",
+                "ui://svg-mcp/widget",
+            } <= uris
+
+    asyncio.run(scenario())
+
+
+def test_a_2026_listen_stream_receives_updates_from_another_connection(
+    server: _Server,
+) -> None:
+    """The real 2026 e2e: one client holds a subscriptions/listen stream; a DIFFERENT
+    connection edits; the listener sees the resource event BETWEEN its own calls."""
+
+    async def scenario() -> None:
+        from mcp.client.subscriptions import listen
+        from mcp.server.subscriptions import ResourceUpdated
+
+        async with await _legacy_client_auto(server.url) as watcher:
+            minted = await watcher.call_tool("create_session", {})
+            session_id = minted.data["session_id"]
+            created = await watcher.call_tool(
+                "create_document", {"width": 300, "height": 200, "session_id": session_id}
+            )
+            document_id = created.data["document_id"]
+
+            # A second, raw connection performs the edit while the watcher just listens.
+            async with (
+                _raw_session(server.url, extra_headers={}, terminate_on_close=False) as (
+                    editor_t,
+                    editor,
+                ),
+                listen(
+                    watcher.session,
+                    resource_subscriptions=[f"svg://{document_id}/svg", "svg://documents"],
+                ) as stream,
+            ):
+                drawn = await editor.call_tool(
+                    "add_rect",
+                    {"x": 1, "y": 1, "width": 5, "height": 5, "session_id": session_id},
+                )
+                assert not drawn.is_error
+                event = await asyncio.wait_for(anext(stream), timeout=10.0)
+                assert event == ResourceUpdated(uri=f"svg://{document_id}/svg")
+
+    asyncio.run(scenario())

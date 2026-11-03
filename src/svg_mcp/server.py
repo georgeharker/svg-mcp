@@ -47,6 +47,14 @@ from fastmcp.server.sessions import (
 )
 from fastmcp.tools import FunctionTool, ToolResult
 from mcp.server.connection import Connection
+from mcp.server.subscriptions import (  # type: ignore[import-not-found,unused-ignore]  # noqa: I001 — mcp-2-only (svg-mcp's floor); mypy's ignore_missing_imports + this comment cover older editor envs
+    InMemorySubscriptionBus,
+    ListenHandler,
+    ResourceUpdated,
+)
+from mcp.types import (
+    SubscriptionsListenRequestParams,  # type: ignore[import-not-found,unused-ignore]  # noqa: E501 — same armor
+)
 
 # mcp_types is an mcp-2-only package: mypy's ignore_missing_imports already covers it on old
 # editor envs, and fastmcp-4 envs see no error at all — so mypy flags the comment itself as
@@ -742,6 +750,23 @@ async def end_session(session_id: SessionId) -> str:
     return "session ended"
 
 
+# --- subscriptions/listen (2026 era) ----------------------------------------
+# mcp 2's listen: one client call = one subscription STREAM, filtered per stream by the URIs
+# and change kinds the listener named. svg-mcp publishes verbatim (the URI as we name it; the
+# combiner namespaces it downstream), and does NOT key bus events to sessions — a listen
+# stream is per-client, not per-minted-session. Registering the handler also makes the SDK
+# advertise listChanged/subscribe on 2026 discover. Notifications DURING a call
+# (`_emit_change`'s `send_resource_updated`) keep riding that call's response stream on any
+# era; the bus is the channel that works BETWEEN calls.
+_LISTEN_BUS = InMemorySubscriptionBus()
+
+mcp._mcp_server.add_request_handler(
+    "subscriptions/listen",
+    SubscriptionsListenRequestParams,
+    ListenHandler(_LISTEN_BUS),
+)
+
+
 def _connection() -> Connection | None:
     """The low-level mcp `Connection` for the current request, or None outside a request."""
     try:
@@ -939,13 +964,23 @@ def _placed(doc: Document, ref: NodeRef) -> dict[str, str | None | list[str]]:
 
 
 async def _emit_change(ctx: Context) -> None:
-    """Notify subscribers that the active document's resources changed."""
+    """Notify subscribers that the active document's resources changed.
+
+    Two channels: `send_resource_updated` rides the CALLER's response stream (works on any
+    era, but only reaches that caller), and the subscriptions/listen bus reaches every open
+    listen stream (the 2026-era channel, and how OTHER clients hear this change). Published
+    verbatim; per-stream filters select.
+    """
     session = ctx.session
+    uri_strings = ["svg://documents"]
     active = _store().active_id
     if active is not None:
-        await session.send_resource_updated(AnyUrl(f"svg://{active}/svg"))
-        await session.send_resource_updated(AnyUrl(f"svg://{active}/render"))
-    await session.send_resource_updated(AnyUrl("svg://documents"))
+        uri_strings = [f"svg://{active}/svg", f"svg://{active}/render", *uri_strings]
+    uri_strings.append(_widget.WIDGET_URI)  # MCP-Apps clients repaint the widget with the doc
+    for uri in uri_strings:
+        await session.send_resource_updated(AnyUrl(uri))
+    for uri in uri_strings:
+        await _LISTEN_BUS.publish(ResourceUpdated(uri=uri))
     if _preview.server.running:
         with contextlib.suppress(Exception):
             _publish_preview()
