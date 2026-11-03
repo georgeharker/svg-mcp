@@ -36,6 +36,7 @@ from fastmcp.server.dependencies import (
 )
 from fastmcp.server.sessions import (  # type: ignore[attr-defined,unused-ignore]
     InvalidSession,
+    Session,
     SessionId,
 )
 from fastmcp.server.sessions import (
@@ -436,6 +437,98 @@ _SESSION_STORES: WeakKeyDictionary[Connection, DocumentStore] = WeakKeyDictionar
 _MINTED_SESSION_HEADER = "x-svg-mcp-session"
 _CURRENT_MINTED_SESSION: ContextVar[str | None] = ContextVar("svg_mcp_minted_session", default=None)
 _MINTED_SESSION_STORES: dict[str, DocumentStore] = {}
+# Who may USE each minted session: the binding records the minting request's stable session
+# id when one exists (handshake-era/stdio connections have one — the Mcp-Session-Id);
+# stateless (2026-era) requests have no durable identity, so their mints record None and the
+# minted id itself is the capability (intrinsic to the stateless era). A bound session is
+# ONLY resolvable from the connection that minted it — a leaked id used from another
+# connection is rejected — and dies with that connection (its stores are popped and its
+# fastmcp session record invalidated at connection teardown). An unbound session lives until
+# `end_session` (or the process dies; the HTTP idle bound does not reach fastmcp's state
+# records). Under auth, `get_session` additionally principal-scopes both cases.
+_MINTED_SESSION_OWNER: dict[str, str | None] = {}
+# The minted session's fastmcp record object, captured AT MINT TIME (principal + state store
+# pinned). Connection teardown runs OUTSIDE any request — `get_session`/helpers that resolve
+# the current principal can't work there — so release goes through this captured object;
+# deleting via `record.end()` needs no request context.
+_MINTED_SESSION_RECORD: dict[str, Session] = {}
+# Per-connection minted-session groups, for deterministic release at connection close —
+# same lifecycle hook as `_SESSION_STORES` (Connection.exit_stack + WeakKeyDictionary).
+_MINTED_BY_CONNECTION: WeakKeyDictionary[Connection, list[str]] = WeakKeyDictionary()
+
+
+_MCP_SESSION_ID_HEADER = "mcp-session-id"
+
+
+def _stable_connection_id() -> str | None:
+    """The current request's stable wire identity, for minted-session ownership: the
+    stateful `Mcp-Session-Id` request header when present — handshake-era/stdio clients
+    carry it on every request after initialize, and it names the same server-side connection
+    for the connection's whole life. Requests of the stateless (2026) era carry none (the
+    protocol forbids the server assigning it), so mints there record None.
+
+    NOTE: the low-level Connection's own `session_id` attribute is PER-REQUEST (fastmcp
+    derives and backfills a fresh uuid when none exists) and is deliberately NOT used as
+    the binding anchor — it would bind stateless mints to throwaway per-request
+    connections, killing persistence.
+    """
+    try:
+        # include_all: get_http_headers STRIPS mcp-session-id by default (list "MCP-related
+        # headers"); the stable identity is exactly the header it strips.
+        return get_http_headers(include_all=True).get(_MCP_SESSION_ID_HEADER) or None
+    except Exception:
+        return None
+
+
+def _assert_usable_from_here(session_id: str) -> None:
+    """Ownership check: a bound minted session resolves only from its minting connection."""
+    owner = _MINTED_SESSION_OWNER.get(session_id)
+    if owner is not None and owner != _stable_connection_id():
+        raise InvalidArgument(
+            f"session_id {session_id!r} belongs to a different connection: mint a fresh "
+            "one on this connection with create_session"
+        )
+
+
+def _revoke_minted(sid: str) -> None:
+    """Invalidate a minted session's server-side state: the live store, the owner record
+    and the captured fastmcp record object are dropped (deleting the fastmcp RECORD itself
+    is the async caller's job — see `_release_connection_minted`/`end_session`)."""
+    _MINTED_SESSION_STORES.pop(sid, None)
+    _MINTED_SESSION_OWNER.pop(sid, None)
+    _MINTED_SESSION_RECORD.pop(sid, None)
+
+
+async def _release_connection_minted(connection: Connection) -> None:
+    """Release every session minted over `connection` (connection teardown): stores, owner
+    records, and the fastmcp session records — so a bound id dies with the connection that
+    minted it and cannot be replayed from elsewhere afterwards."""
+    for sid in _MINTED_BY_CONNECTION.pop(connection, ()):
+        record = _MINTED_SESSION_RECORD.get(sid)
+        _revoke_minted(sid)
+        if record is not None:
+            with contextlib.suppress(Exception):
+                await record.end()  # deletes the fastmcp record via the captured object
+
+
+def _mint_ownership(sid: str, owner: str | None) -> None:
+    """Record the minting session for `sid` and arrange deterministic release.
+
+    `owner` is the minting connection's stable session id when one exists (bound: only that
+    connection may use/end it, release at its teardown), else None (unbound: stateless-era
+    minted id is the capability, lives until `end_session`)."""
+    _MINTED_SESSION_OWNER[sid] = owner
+    if owner is None:
+        return
+    connection = _connection()
+    if connection is None:
+        return  # pragma: no cover - bound mints always originate in a request
+    group = _MINTED_BY_CONNECTION.get(connection)
+    if group is None:
+        group = _MINTED_BY_CONNECTION[connection] = []
+        connection.exit_stack.push_async_callback(_release_connection_minted, connection)
+    group.append(sid)
+
 
 # The schema annotation the session-aware wrapper appends for `session_id`. It must be a
 # runtime VALUE, not just a type expression: fastmcp resolves parameter annotations via
@@ -494,15 +587,24 @@ async def _resolve_minted_session(session_id: str) -> None:
     Validation is the isolation wall (ids are minted/validated per principal under auth) AND
     the invalidation signal: ended/forgotten/expired raises `InvalidSession`, which pops this
     session's live store so a replayed id starts empty instead of resurrecting state.
+    Ownership is enforced too: a session bound to a minting connection is only resolvable
+    from that same connection (a leaked id from another connection is rejected — see
+    `_MINTED_SESSION_OWNER`); unbound (stateless-era) mints are validated-id bearer sessions.
     """
     try:
         await get_session(session_id)
     except InvalidSession:
-        _MINTED_SESSION_STORES.pop(session_id, None)
+        _revoke_minted(session_id)
         raise InvalidArgument(
             f"unknown session_id {session_id!r}: "
             "never created (call create_session) or already ended"
         ) from None
+    owner = _MINTED_SESSION_OWNER.get(session_id)
+    if owner is not None and owner != _stable_connection_id():
+        raise InvalidArgument(
+            f"session_id {session_id!r} belongs to a different connection: mint a fresh "
+            "one on this connection with create_session"
+        )
     _MINTED_SESSION_STORES.setdefault(session_id, DocumentStore())
 
 
@@ -600,10 +702,23 @@ async def create_session() -> dict[str, str]:
     argument on each tool, and that is the contract on every transport (no client injects it
     behind your back). Documents follow the session until `end_session`.
 
+    Ownership: a mint made on a stateful connection is bound to it (only that connection can
+    use or end the id, and it is discarded when the connection closes). A mint made on a
+    stateless connection cannot be bound (per-request connections, no stable identity), so
+    the minted id — unguessable uuid — is the capability.
+
     Registered with plain `@mcp.tool`, not the session-aware `@tool` alias: minting needs no
     session of its own.
     """
-    return {"session_id": await mint_session()}
+    session_id = await mint_session()
+    with contextlib.suppress(Exception):
+        # Capture the fastmcp record while the minting request is still live (principal +
+        # state store pinned inside), so connection TEARDOWN — which runs outside any
+        # request — can delete the record via `_release_connection_minted` without needing
+        # to resolve the current principal (that resolution is what fails there).
+        _MINTED_SESSION_RECORD[session_id] = await get_session(session_id)
+    _mint_ownership(session_id, _stable_connection_id())
+    return {"session_id": session_id}
 
 
 @mcp.tool
@@ -611,9 +726,13 @@ async def end_session(session_id: SessionId) -> str:
     """End a session: its id stops resolving and all documents in it are discarded.
 
     Registered with plain `@mcp.tool`, not the session-aware `@tool` alias: its own
-    `session_id` argument IS the session being ended.
+    `session_id` argument IS the session being ended. Sessions bound to a minting
+    connection can only be ended from that connection.
     """
-    _MINTED_SESSION_STORES.pop(session_id, None)
+    owner = _MINTED_SESSION_OWNER.get(session_id)
+    if owner is not None and owner != _stable_connection_id():
+        raise InvalidArgument(f"session_id {session_id!r} belongs to a different connection")
+    _revoke_minted(session_id)
     try:
         await end_minted_session(session_id)
     except InvalidSession:

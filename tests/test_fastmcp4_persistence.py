@@ -357,25 +357,30 @@ def test_combiner_forget_delete_releases_store(server: _Server) -> None:
 # must be byte-for-byte unchanged (the tests above pin that).
 
 
-def test_2026_explicit_session_id_persists_across_requests(server: _Server) -> None:
-    """A document created under a minted session survives fresh stateless connections."""
+def test_2026_minted_sessions_are_bearer_on_stateless_links(server: _Server) -> None:
+    """On a real 2026 stateless link, mints are UNBOUND (no durable wire identity to bind
+    to — each request is its own connection), so the unguessable minted id is the
+    capability: documents persist across a client's own requests AND across distinct
+    clients that present the same id. Auth (principal-scoped get_session) is the wall
+    when ids may leak; the id is unguessable otherwise."""
 
     async def scenario() -> None:
-        async with _raw_session(server.url, protocol_version=_MODERN_VERSION) as (t, session):
-            minted = await session.call_tool("create_session", {})
-            session_id = minted.structured_content["session_id"]
-            created = await session.call_tool(
+        async with await _legacy_client_auto(server.url) as alice:
+            minted = await alice.call_tool("create_session", {})
+            session_id = minted.data["session_id"]
+            created = await alice.call_tool(
                 "create_document", {"width": 400, "height": 200, "session_id": session_id}
             )
-            created.structured_content["document_id"]
+            assert not created.is_error
 
-        # A fresh connection — a new per-request Connection — resuming the same session:
-        async with _raw_session(server.url, protocol_version=_MODERN_VERSION) as (t, session):
-            created = await session.call_tool(
+        # Bob's own client connection — stateless bearer: the same id resolves and
+        # continues the original store (the counter does not restart).
+        async with await _legacy_client_auto(server.url) as bob:
+            created = await bob.call_tool(
                 "create_document", {"width": 400, "height": 200, "session_id": session_id}
             )
-            # Same registry store: the counter continued (a fresh store re-numbers doc1).
-            assert created.structured_content["document_id"] == "doc2"
+            assert not created.is_error
+            assert created.data["document_id"] == "doc2"
             assert _MINTED_SESSION_STORES[session_id].active_id == "doc2"
 
     asyncio.run(scenario())
@@ -460,20 +465,20 @@ def test_2026_sessions_are_isolated(server: _Server) -> None:
 
 
 def test_2026_ambient_header_carries_session(server: _Server) -> None:
-    """A bespoke proxy that prefers transport-level identity can carry the minted id
-    ambiently via the X-Svg-Mcp-Session header — tools need no argument. (The
-    mcp-combiner does NOT do this: the model passes session_id itself there; the header
-    is an alternative carrier, not the combiner's contract.)"""
+    """On ONE connection whose every request carries the ambient header (a bespoke
+    proxy's transport-level carrier), tools need NO session_id argument."""
 
     async def scenario() -> None:
-        async with _raw_session(server.url, protocol_version=_MODERN_VERSION) as (t, session):
-            minted = await session.call_tool("create_session", {})
-            session_id = minted.structured_content["session_id"]
+        # Mint over an auto client (stateless link → unbound mint).
+        async with await _legacy_client_auto(server.url) as alice:
+            minted = await alice.call_tool("create_session", {})
+            session_id = minted.data["session_id"]
 
         headers = {"X-Svg-Mcp-Session": session_id}
-        async with _raw_session(
-            server.url, protocol_version=_MODERN_VERSION, extra_headers=headers
-        ) as (t, session):
+        async with _raw_session(server.url, extra_headers=headers, terminate_on_close=False) as (
+            t,
+            session,
+        ):
             created = await session.call_tool("create_document", {"width": 400, "height": 200})
             assert not created.is_error
             # A second header-only request mutates the persisted drawing.
@@ -514,18 +519,48 @@ def test_2026_resource_read_without_identity_is_guided_error(server: _Server) ->
     asyncio.run(scenario())
 
 
-def test_minted_session_id_also_works_on_stateful_links(server: _Server) -> None:
-    """Uniform rule: an explicit validated session_id is honored on any era — a
-    stateful client can pass one and inherit registry-backed persistence."""
+def test_stateful_minted_session_is_bound_to_its_connection(server: _Server) -> None:
+    """A mint made on a stateful connection is OWNED by it: usable across that
+    connection's requests, unusable AND unendable from another connection, and it dies
+    with its own connection (no replay afterwards). Unbound (stateless-era) mints are
+    the bearer case — see the 2026-era tests."""
 
     async def scenario() -> None:
-        async with await _legacy_client(server.url) as client:
-            minted = await client.call_tool("create_session", {})
+        async with await _legacy_client(server.url) as alice:
+            minted = await alice.call_tool("create_session", {})
             session_id = minted.data["session_id"]
-            await client.call_tool(
+            created = await alice.call_tool(
                 "create_document", {"width": 100, "height": 100, "session_id": session_id}
             )
-        # The connection is gone; the registry store persists.
-        assert session_id in _MINTED_SESSION_STORES
+            assert not created.is_error
+
+            # Bob, a different stateful connection: alice's id is unusable AND unendable.
+            # (fastmcp client defaults to raise_on_error=True, so error results raise.)
+            async with await _legacy_client(server.url) as bob:
+                with pytest.raises(ToolError, match="different connection"):
+                    await bob.call_tool(
+                        "create_document",
+                        {"width": 100, "height": 100, "session_id": session_id},
+                    )
+                with pytest.raises(ToolError, match="different connection"):
+                    await bob.call_tool("end_session", {"session_id": session_id})
+
+            # Alice still holds it across her own later requests.
+            again = await alice.call_tool(
+                "create_document", {"width": 100, "height": 100, "session_id": session_id}
+            )
+            assert not again.is_error
+
+        # Alice leaves: the mint dies with its connection — replay from anyone fails.
+        gone_by = time.monotonic() + 10.0
+        while _MINTED_SESSION_STORES and time.monotonic() < gone_by:
+            await asyncio.sleep(0.05)
+        assert session_id not in _MINTED_SESSION_STORES
+        async with await _legacy_client(server.url) as carol:
+            with pytest.raises(ToolError, match="unknown session_id"):
+                await carol.call_tool(
+                    "create_document",
+                    {"width": 100, "height": 100, "session_id": session_id},
+                )
 
     asyncio.run(scenario())
