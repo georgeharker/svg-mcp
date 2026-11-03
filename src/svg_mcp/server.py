@@ -396,17 +396,17 @@ LIVE PREVIEW
   Reserve `render_document` for when YOU need to inspect the result, and prefer batching the
   primitives you already know you need before you stop to look.
 
-SESSION (STATELESS / 2026-ERA LINKS)
-- On stateful links (handshake-era HTTP, stdio, mcp-combiner legacy) svg-mcp tracks your
-  connection automatically: never pass session_id.
-- On a stateless (2026-07-28) link, documents only persist under a minted session: call
-  `create_session` once, then pass its `session_id` on EVERY subsequent svg-mcp call —
-  each tool's schema marks the argument, and passing it yourself is the contract (no
-  client injects it behind your back). An identity-less stateless call is rejected with
-  that guidance rather than silently losing state. A session minted on a stateful link is
-  owned by that connection alone (and dies with it); on a stateless link the unguessable
-  minted id is its capability.
-- `end_session` invalidates a session and discards its documents.
+SESSIONS (MINTED DOCUMENTS)
+- Mint a session per drawing task: call `create_session` FIRST, then pass its `session_id`
+  on EVERY svg-mcp call — each tool's schema marks the argument, and passing it yourself is
+  the contract (no client injects it behind your back). Documents persist under it: across
+  connection churn, and another chat can pick the drawing up with the same id. An
+  identity-less call that needs a session is rejected with that same guidance — run
+  create_session and retry with the id it returned.
+- `create_session` when minted on a direct/handshake connection is owned by that connection
+  (it dies with the connection); a mint made on a stateless (2026-07-28) link cannot be
+  bound — the unguessable id is its capability.
+- `end_session` invalidates a session and discards its documents. Never call it mid-task.
 
 Multiple documents can be open at once; omit `document_id` for the active one, or pass it
 explicitly to target a specific document.
