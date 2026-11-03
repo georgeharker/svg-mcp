@@ -51,7 +51,7 @@ const SHAREDSERVER_MIN_VERSION = "0.6.7"
 // scripts/bump-version.sh — a plugin shipped un-updated here served svg-mcp@0.2.6 for
 // several releases. (Track the release this tag publishes; `latest` is not published
 // to the pi extension store, so users on `@latest` can still miss releases.)
-const SVG_MCP_TOOL_VERSION = "0.9.0"
+const SVG_MCP_TOOL_VERSION = "0.10.0-dev.0"
 
 type LogFn = (level: "info" | "warn" | "error", message: string) => void
 
