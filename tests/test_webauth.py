@@ -11,6 +11,7 @@ import asyncio
 import http.client
 import json
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -307,7 +308,9 @@ class TestLogin:
     def test_logout(self, site: _Preview, signer: webauth.Signer) -> None:
         _gate_on(signer, exempt_local=False)
         cookie = _cookie(site.login(PASSWORD)[1]["set-cookie"])
-        status, headers, _ = site.get("/auth/logout", Cookie=cookie)
+        status, headers, _ = site.request(
+            "POST", "/auth/logout", headers={"Cookie": cookie}, form={}
+        )
         assert status == 303 and headers["location"] == "/auth/login"
         cleared = headers["set-cookie"]
         assert cleared.startswith(f"{webauth.COOKIE}=;") and "Max-Age=0" in cleared
@@ -419,3 +422,119 @@ class TestTickets:
         assert webgate.with_ticket("http://h/x/", "x") == "http://h/x/"
         _gate_on(signer, exempt_local=False)
         assert webgate.with_ticket("http://h/x/?a=1", "x").startswith("http://h/x/?a=1&t=")
+
+
+# ── release-review checklist (combiner 0.20.0.dev1 / 5459fa6) ──────
+
+
+class TestReservedAdmissions:
+    """In-flight + recent failures share the per-address cap, BEFORE the body is
+    read or scrypt runs; an overall failure budget crosses all addresses."""
+
+    def test_five_in_flight_block_the_sixth_and_release_reopens(self) -> None:
+        webauth.reset_failures()
+        try:
+            admitted = [webauth.login_attempt_admitted("10.0.0.9") for _ in range(5)]
+            assert all(admitted)
+            assert webauth.login_attempt_admitted("10.0.0.9") is False
+            for _ in range(5):
+                webauth.login_attempt_done("10.0.0.9")
+            assert webauth.login_attempt_admitted("10.0.0.9") is True
+            webauth.login_attempt_done("10.0.0.9")
+        finally:
+            webauth.reset_failures()
+
+    def test_recorded_failures_count_toward_the_in_flight_gate(self) -> None:
+        webauth.reset_failures()
+        try:
+            for _ in range(5):
+                webauth.record_failure("10.0.0.10")
+            assert webauth.login_attempt_admitted("10.0.0.10") is False
+        finally:
+            webauth.reset_failures()
+
+    def test_the_overall_budget_crosses_all_addresses(self) -> None:
+        webauth.reset_failures()
+        try:
+            for i in range(30):  # 30 failures spread over 30 addresses
+                webauth.record_failure(f"10.1.{i}.1")
+            assert webauth.login_attempt_admitted("10.2.0.1") is False  # fresh address
+        finally:
+            webauth.reset_failures()
+
+    def test_one_in_flight_plus_four_failures_hits_the_cap(self) -> None:
+        webauth.reset_failures()
+        try:
+            for _ in range(4):
+                webauth.record_failure("10.3.0.1")
+            assert webauth.login_attempt_admitted("10.3.0.1") is True
+            assert webauth.login_attempt_admitted("10.3.0.1") is False  # 4+1 = 5
+            webauth.login_attempt_done("10.3.0.1")
+        finally:
+            webauth.reset_failures()
+
+
+class TestScryptSlots:
+    def test_two_concurrent_scrypt_verifications(self) -> None:
+        from svg_mcp.webgate import _LOGIN_SCRYPT_SLOTS
+
+        assert _LOGIN_SCRYPT_SLOTS._value == 2  # bounds a flood of login threads
+        assert type(_LOGIN_SCRYPT_SLOTS) is threading.BoundedSemaphore
+
+
+class TestTicketOneShot:
+    def test_a_ticket_redeems_once_per_id_then_refuses(self) -> None:
+        signer = webauth.Signer(b"\x11" * 32)
+        claims = signer.verify(signer.ticket("/preview-x"), "t")
+        assert claims is not None and "j" in claims  # random id present, combiner format
+        assert webauth.ticket_admit(claims) is True
+        assert webauth.ticket_admit(claims) is False  # exhausted; no replay within the TTL
+        assert webauth.ticket_admit({"sub": "/preview-x", "exp": claims["exp"]}) is False
+
+    def test_redemptions_expire_with_the_ticket(self) -> None:
+        expired = {"v": 1, "k": "t", "sub": "/z", "j": "stale", "exp": int(time.time()) - 5}
+        assert webauth.ticket_admit(expired) is True  # seeded, immediately expired
+        assert webauth.ticket_admit(expired) is False  # expired entries never admit
+        signer = webauth.Signer(b"\x22" * 32)
+        fresh_claims = signer.verify(signer.ticket("/preview-y", ttl_s=60), "t")
+        assert fresh_claims is not None
+        assert webauth.ticket_admit(fresh_claims) is True
+
+    def test_logout_is_post_only(self, site: _Preview) -> None:
+        status, _, _ = site.get(webauth.LOGOUT_PATH, Accept="text/html")
+        assert status == 405
+
+
+class TestStrictConfig:
+    def test_unknown_web_auth_keys_fail_startup(self) -> None:
+        from typing import Any, cast
+
+        from svg_mcp.config import WebAuthConfig as C
+
+        # extra='forbid': typos must fail loudly. The kwargs are built from a str-
+        # valued dict and cast — the intentionally-typed params can't be spelled
+        # statically next to the intentionally-unknown key.
+        kwargs = cast("dict[str, Any]", {"mode": "password", "bogus_key": "x"})
+        with pytest.raises(ValidationError, match="bogus_key"):
+            C(**kwargs)
+
+    def test_strict_nested_json_fails_startup(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from svg_mcp.config import Settings
+
+        monkeypatch.setenv("SVG_MCP_WEB_AUTH", '{"mode": "password", "bogus": 1}')
+        with pytest.raises(Exception, match="bogus"):
+            Settings()
+
+
+class TestEnvPopped:
+    def test_raw_password_env_is_popped_after_hashing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from svg_mcp.config import Settings
+
+        monkeypatch.setenv("SVG_MCP_WEB_AUTH", '{"mode": "password"}')
+        monkeypatch.setenv("SVG_MCP_WEB_PASSWORD", "popped-secret")
+        Settings()
+        import os
+
+        assert "SVG_MCP_WEB_PASSWORD" not in os.environ

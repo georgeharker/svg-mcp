@@ -278,8 +278,13 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
             )
 
         def _auth_route(self, request: webgate.GateRequest) -> bool:
-            """Serve ``/auth/login`` and ``/auth/logout``; ``False`` for any other path."""
+            """Serve ``/auth/login`` (POST, and GET for the form) and ``/auth/logout``
+            (POST-only — a GET logout would be CSRF-able as a link); ``False`` for
+            any other path."""
             if request.path == webauth.LOGOUT_PATH:
+                if request.method != "POST":
+                    self._status(405, "logout is POST-only")
+                    return True
                 self._reply(webgate.logout(request))
                 return True
             if request.path != webauth.LOGIN_PATH:

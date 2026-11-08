@@ -5,14 +5,18 @@ from __future__ import annotations
 import contextlib
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class WebAuthConfig(BaseModel):
     """Browser login for the live preview (``SVG_MCP_WEB_AUTH``; see svg_mcp.webauth).
     Off by default. Same shape as mcp-combiner's ``web_auth`` (incl. the raw-password
-    mirror: ``SVG_MCP_WEB_PASSWORD``)."""
+    mirror: ``SVG_MCP_WEB_PASSWORD``) — and STRICT: unknown keys fail startup (this blob
+    is the credential source of record for a browser-facing gate; typos must not fail
+    open, and a non-bool flag is a pydantic error as usual)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     mode: Literal["off", "password"] = "off"
     #: ``svg-mcp hash-password`` output; ``$SVG_MCP_WEB_PASSWORD_HASH`` wins.
@@ -96,6 +100,9 @@ class Settings(BaseSettings):
             overrides["password_hash"] = hash_password(self.web_password)
         if overrides:
             self.web_auth = self.web_auth.model_copy(update=overrides)
+            # The raw secret must not leak into child processes (the combiner's
+            # release-review item): the hashed material lives in web_auth now.
+            _os.environ.pop("SVG_MCP_WEB_PASSWORD", None)
         stored = self.web_auth.password_hash
         if raw_mode == "password" and self.web_auth.mode != "password":
             raise ValueError(

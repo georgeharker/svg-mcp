@@ -74,6 +74,12 @@ class _State:
     signer: webauth.Signer | None
 
 
+#: Cap on concurrent scrypt verifications: each is ~16 MB and ~30 ms of work, so a
+#: flood of parallel login threads must queue (2 at a time) rather than multiply
+#: into a cheap DoS on a threaded stdlib server.
+_LOGIN_SCRYPT_SLOTS = threading.BoundedSemaphore(2)
+
+
 _lock = threading.Lock()
 _state: _State | None = None
 
@@ -147,9 +153,9 @@ def _ticket_subject(request: GateRequest) -> str | None:
 
 
 def ticket_redirect(request: GateRequest) -> Reply | None:
-    """A request carrying a valid ticket for its preview: set the session (BOUND to that
-    preview — the exchanged cookie opens no other chat's preview) and redirect to the
-    same URL without the ticket."""
+    """A request carrying a valid, UNREDEEMED ticket for its preview: set the session
+    (BOUND to that preview — the exchanged cookie opens no other chat's preview) and
+    redirect to the same URL without the ticket."""
     signer = _current().signer
     items = request.query_items()
     ticket = next((v for k, v in items if k == webauth.TICKET_PARAM), "")
@@ -158,6 +164,8 @@ def ticket_redirect(request: GateRequest) -> Reply | None:
         return None
     claims = signer.verify(ticket, "t")
     if claims is None or claims.get("sub") != subject:
+        return None
+    if not webauth.ticket_admit(claims):  # consumed: no replay within the TTL window
         return None
     query = [(k, v) for k, v in items if k != webauth.TICKET_PARAM]
     clean = request.path + (f"?{urlencode(query)}" if query else "")
@@ -217,16 +225,26 @@ def login(request: GateRequest, form: dict[str, str] | None = None) -> Reply:
     if request.method != "POST" or form is None:
         return authpages.login_page(target)
     client = request.client or "?"
-    if webauth.too_many_failures(client):
+    # Concurrency + budget reservation BEFORE the body is hashed: in-flight attempts
+    # + recorded failures share the per-address cap, the overall budget applies, and
+    # the scrypt cap bounds parallel hash work (threaded server — parallel guesses
+    # cannot each see zero failures).
+    if not webauth.login_attempt_admitted(client):
         return authpages.login_page(
             target, error="Too many attempts — wait a minute and try again.", status=429
         )
-    password = form.get("password")
-    if not password or not webauth.verify_password(password, state.config.password_hash or ""):
-        webauth.record_failure(client)
-        logger.warning("web_auth: failed login from %s", client)
-        return authpages.login_page(target, error="That password isn't right.", status=401)
-    return _redirect(_safe_next(form.get("next") or target), _session_cookie(request))
+    try:
+        with _LOGIN_SCRYPT_SLOTS:  # each scrypt is ~16 MB / ~30 ms — bound the parallel work
+            password = form.get("password")
+            if not password or not webauth.verify_password(
+                password, state.config.password_hash or ""
+            ):
+                webauth.record_failure(client)
+                logger.warning("web_auth: failed login from %s", client)
+                return authpages.login_page(target, error="That password isn't right.", status=401)
+        return _redirect(_safe_next(form.get("next") or target), _session_cookie(request))
+    finally:
+        webauth.login_attempt_done(client)
 
 
 def logout(_request: GateRequest) -> Reply:
