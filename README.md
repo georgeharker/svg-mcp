@@ -617,9 +617,13 @@ at startup.
 | Anyone else (another device, or a browser behind a local proxy such as `tailscale serve`) | Yes: pages redirect to `/auth/login`; the event stream, renders and JSON get `401` |
 
 A proxy on this machine is believed only from `127.0.0.1` / `::1`, and only when it names the
-real browser in `X-Forwarded-For`. A trusted proxy that sends NO `X-Forwarded-For` (an `ssh -L`
-hop, a misconfigured forwarder) leaves the real browser unknown — such requests are NOT treated
-as coming from this machine and still see the login. After 5 failed logins in a minute, an
+real browser in `X-Forwarded-For`.
+
+**Tunnel caveat:** loopback peers are exempt even WITHOUT that header — an `ssh -L` / `socat`
+tunnel, `tailscale serve --tcp`, or any forwarder that strips `X-Forwarded-For` makes every
+browser arriving through it look like this machine and skip the login. If you run one, set
+`exempt_local: false` (then only the ticket on `start_preview` URLs or a password admit
+tunnels too). After 5 failed logins in a minute, an
 address gets `429`, even with the right password. `/auth/logout` signs the browser out.
 Deleting the signing key (`$XDG_STATE_HOME/svg-mcp/web-auth.key`, by default
 `~/.local/state/svg-mcp/web-auth.key`) signs every browser out. The login covers only the
