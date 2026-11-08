@@ -80,12 +80,24 @@ _state: _State | None = None
 
 def configure(config: WebAuthConfig, signer: webauth.Signer | None = None) -> None:
     """Set the gate's config; a signer is loaded (or created) at the default key
-    path when ``mode`` is ``password`` and none is given."""
+    path when ``mode`` is ``password`` and none is given.
+
+    Logs the resolved state once — on a fail-open control the operator must be
+    able to tell from the logs whether the login is active (this is the exact
+    gap the pre-0.10.1 review called out)."""
     global _state
     if config.mode == "password" and signer is None:
         signer = webauth.Signer.load_or_create(webauth.default_key_path())
     with _lock:
         _state = _State(config, signer if config.mode == "password" else None)
+    if _state.config.mode == "password" and _state.signer is not None:
+        logger.info(
+            "web_auth: live-preview login gate is ON (%.0f-day cookies, exempt-local %s)",
+            _state.config.session_days,
+            _state.config.exempt_local,
+        )
+    else:
+        logger.info("live-preview pages are open — the login gate is not configured")
 
 
 def reset() -> None:
@@ -135,8 +147,9 @@ def _ticket_subject(request: GateRequest) -> str | None:
 
 
 def ticket_redirect(request: GateRequest) -> Reply | None:
-    """A request carrying a valid ticket for its preview: set the session and
-    redirect to the same URL without the ticket."""
+    """A request carrying a valid ticket for its preview: set the session (BOUND to that
+    preview — the exchanged cookie opens no other chat's preview) and redirect to the
+    same URL without the ticket."""
     signer = _current().signer
     items = request.query_items()
     ticket = next((v for k, v in items if k == webauth.TICKET_PARAM), "")
@@ -148,13 +161,25 @@ def ticket_redirect(request: GateRequest) -> Reply | None:
         return None
     query = [(k, v) for k, v in items if k != webauth.TICKET_PARAM]
     clean = request.path + (f"?{urlencode(query)}" if query else "")
-    return _redirect(clean, _session_cookie(request))
+    return _redirect(clean, _session_cookie(request, subject=subject))
 
 
 def check(request: GateRequest) -> Reply | None:
     """``None`` to serve *request*, else the reply that stands in for it."""
     if auth_path(request.path) or admitted(request):
         return None
+    # Ticket-bound scopes: a cookie minted by a TICKET (its claims carry ``sub``) opens
+    # only the preview that named it; a cookie minted by the LOGIN PAGE (sub-less) opens
+    # every preview on this server. An out-of-scope signed-in request falls through to
+    # the ticket/portal path (its ticket, if any, was already vetted for THIS subject).
+    state = _current()
+    if state.signer is not None:
+        claims = state.signer.verify(request.cookie(webauth.COOKIE), "s")
+        if claims is not None and claims.get("sub") is not None:
+            subject = _ticket_subject(request)
+            if subject is None or claims["sub"] == subject:
+                return None
+            return _redirect(f"{webauth.LOGIN_PATH}?next={quote(request.path, safe='')}")
     redirect = ticket_redirect(request)
     if redirect is not None:
         return redirect
@@ -168,8 +193,16 @@ def check(request: GateRequest) -> Reply | None:
 
 
 def _safe_next(raw: str | None) -> str:
-    """Only same-origin paths (no scheme, no //host)."""
-    if not raw or not raw.startswith("/") or raw.startswith("//") or "\\" in raw:
+    """Only same-origin paths (no scheme, no //host), and only printable ASCII —
+    a CRLF or non-Latin-1 byte in ``next`` would otherwise reach an HTTP header
+    write (header injection) or crash the response encode."""
+    if (
+        not raw
+        or not raw.startswith("/")
+        or raw.startswith("//")
+        or "\\" in raw
+        or any(not (32 <= ord(c) <= 126) for c in raw)
+    ):
         return "/"
     return raw
 
@@ -228,13 +261,14 @@ def _secure(request: GateRequest) -> bool:
     return request.header("x-forwarded-proto").lower() == "https"
 
 
-def _session_cookie(request: GateRequest) -> str:
+def _session_cookie(request: GateRequest, subject: str | None = None) -> str:
     state = _current()
     if state.signer is None:
         return ""
     days = state.config.session_days
     cookie = (
-        f"{webauth.COOKIE}={state.signer.session(days)}; Max-Age={int(days * 86400)}; "
+        f"{webauth.COOKIE}={state.signer.session(days, subject=subject)}; "
+        f"Max-Age={round(days * 86400)}; "
         "Path=/; HttpOnly; SameSite=Lax"
     )
     return cookie + ("; Secure" if _secure(request) else "")

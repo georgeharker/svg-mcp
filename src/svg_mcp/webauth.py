@@ -96,6 +96,30 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
+# ── hash artifacts ─────────────────────────────────────────────────
+
+
+def validate_hash_artifact(stored: str) -> None:
+    """Reject a malformed ``scrypt$`` artifact at LOAD (not at first login):
+    it parses into its 6 fields with numeric round parameters and a salt, and
+    carries at least a 32-byte digest — so a truncated paste out of 1Password
+    fails the server start with a clear error instead of silently failing
+    every login (or weakening the comparison to a few bytes)."""
+    try:
+        scheme, n, r, p, salt, digest = stored.split("$")
+        if scheme != "scrypt":
+            raise ValueError("not scrypt")
+        if not (int(n) >= 2**10 and int(r) >= 1 and int(p) >= 1):
+            raise ValueError("implausible round parameters")
+        if len(_unb64(salt)) < 8 or len(_unb64(digest)) < 32:
+            raise ValueError("salt/digest too short")
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"malformed web_auth password hash artifact ({exc!r}): expected "
+            "`svg-mcp hash-password` output 'scrypt$<n>$<r>$<p>$<salt32>$<hash32>'"
+        ) from None
+
+
 # ── signed tokens (session cookie, tickets) ────────────────────────
 
 
@@ -114,17 +138,28 @@ class Signer:
 
     @classmethod
     def load_or_create(cls, path: Path) -> Signer:
-        try:
+        """Load the signing key, or atomically create one (0600 via the temp+rename).
+
+        An existing key's permissions are re-checked (a key left world-readable by any
+        other means is tightened in place), so web-auth cookie signing never rides a
+        0644 file."""
+        if path.exists():
             key = path.read_bytes()
-            if len(key) >= 32:
-                return cls(key)
-        except OSError:
-            pass
+            if len(key) < 32:
+                raise RuntimeError(
+                    f"{path} is a malformed web-auth signing key (too short) — delete it "
+                    "to re-issue (this signs every browser out)"
+                )
+            if path.stat().st_mode & 0o077:
+                path.chmod(0o600)
+            return cls(key)
         key = secrets.token_bytes(32)
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        tmp = path.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as fh:
             fh.write(key)
+        os.replace(tmp, path)  # atomic: a concurrent reader sees key-or-nothing
         logger.info("web_auth: created a signing key at %s", path)
         return cls(key)
 
@@ -152,9 +187,15 @@ class Signer:
             return None
         return claims
 
-    def session(self, days: float) -> str:
+    def session(self, days: float, subject: str | None = None) -> str:
+        """A login-page cookie (``subject=None``: opens every preview) or a
+        TICKET-EXCHANGED cookie (``subject`` set: opens only the preview it named —
+        the exchange keeps the ticket's scope, per ``webgate.check``)."""
         now = int(time.time())
-        return self.sign({"v": 1, "k": "s", "iat": now, "exp": now + int(days * 86400)})
+        claims: dict[str, Any] = {"v": 1, "k": "s", "iat": now, "exp": now + int(days * 86400)}
+        if subject is not None:
+            claims["sub"] = subject
+        return self.sign(claims)
 
     def ticket(self, subject: str, ttl_s: int = TICKET_TTL_S) -> str:
         return self.sign({"v": 1, "k": "t", "sub": subject, "exp": int(time.time()) + ttl_s})
@@ -254,12 +295,17 @@ def client_address(peer: str | None, forwarded_for: list[str]) -> str | None:
     """The browser's address: *peer* itself, unless *peer* is a trusted local
     proxy sending ``X-Forwarded-For`` — then the rightmost untrusted hop in
     it (uvicorn's ``ProxyHeadersMiddleware`` rule, which mcp-combiner relies
-    on). Headers from any other peer are ignored."""
+    on). Headers from any other peer are ignored.
+
+    A trusted proxy that sends NO ``X-Forwarded-For`` names only ITSELF —
+    treating that as the browser would exempt every remote browser arriving
+    through an ``ssh -L``/``socat``-style hop — so this returns ``None`` (an
+    address that is never local) and the login gate stays on."""
     if peer is None or _canonical(peer) not in TRUSTED_PROXIES:
         return peer
     hops = [_host_of(h) for value in forwarded_for for h in value.split(",") if h.strip()]
     if not hops:
-        return peer
+        return None  # trusted proxy, no forwarding: the real browser is unknown
     for hop in reversed(hops):
         if _canonical(hop) not in TRUSTED_PROXIES:
             return hop
@@ -281,6 +327,23 @@ def _host_of(hop: str) -> str:
 _failures: defaultdict[str, deque[float]] = defaultdict(deque)
 _failures_lock = threading.Lock()
 
+#: Cap on distinct failure-tracked sources: behind a proxy the key can be
+#: browser-chosen (rotated X-Forwarded-For), so the table is bounded, not grown
+#: without limit. Pruned (not rejected) beyond the cap.
+_FAILURE_TABLE_MAX = 4096
+
+
+def _prune_locked(now: float) -> None:
+    """Drop expired windows; if the table is still over the cap, drop the rest
+    wholesale (the window rebuilds from fresh failures — losing a partial 60s
+    history for some hosts is the cost of bounding attacker-chosen keys)."""
+    if len(_failures) <= _FAILURE_TABLE_MAX:
+        return
+    for key in [k for k, w in _failures.items() if not w or now - w[0] > 60]:
+        del _failures[key]
+    while len(_failures) > _FAILURE_TABLE_MAX // 2:
+        _failures.pop(next(iter(_failures)), None)
+
 
 def too_many_failures(client_host: str) -> bool:
     with _failures_lock:
@@ -288,6 +351,7 @@ def too_many_failures(client_host: str) -> bool:
         now = time.monotonic()
         while window and now - window[0] > 60:
             window.popleft()
+        _prune_locked(now)
         return len(window) >= _FAILURES_PER_MINUTE
 
 

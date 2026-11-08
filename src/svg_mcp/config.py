@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
@@ -73,6 +74,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _resolve_web_auth(self) -> Self:
+        # A leftover SVG_MCP_WEB_AUTH__MODE=off must never silently override a mode the
+        # JSON block set to "password" (fail-open by design would then be invisible): if
+        # the raw JSON env intended "password" and the resolved mode is off, fail the load.
+        import json as _json  # noqa: PLC0415 — validator-local
+        import os as _os  # noqa: PLC0415
+
+        raw_mode = None
+        with contextlib.suppress(Exception):
+            raw_mode = (_json.loads(_os.environ["SVG_MCP_WEB_AUTH"]) or {}).get("mode")
         overrides: dict[str, str] = {}
         if self.web_password_hash:
             overrides["password_hash"] = self.web_password_hash
@@ -87,6 +97,15 @@ class Settings(BaseSettings):
         if overrides:
             self.web_auth = self.web_auth.model_copy(update=overrides)
         stored = self.web_auth.password_hash
+        if raw_mode == "password" and self.web_auth.mode != "password":
+            raise ValueError(
+                "SVG_MCP_WEB_AUTH sets web_auth.mode 'password' but an SVG_MCP_WEB_AUTH__* "
+                "override resolved the mode to 'off' — fix the leftover override"
+            )
+        if self.web_auth.mode == "password" and stored:
+            from .webauth import validate_hash_artifact  # noqa: PLC0415 — validator-local
+
+            validate_hash_artifact(stored)
         if self.web_auth.mode == "password" and not (stored and stored.startswith("scrypt$")):
             raise ValueError(
                 "web_auth.mode 'password' needs web_auth.password_hash, "

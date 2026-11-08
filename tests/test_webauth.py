@@ -110,7 +110,9 @@ class TestThisMachine:
         assert webauth.client_address("127.0.0.1", ["100.64.9.9"]) == "100.64.9.9"
         assert webauth.client_address("::1", ["1.2.3.4, 100.64.9.9:5"]) == "100.64.9.9"
         assert webauth.client_address("127.0.0.1", ["100.64.9.9", "127.0.0.1"]) == "100.64.9.9"
-        assert webauth.client_address("127.0.0.1", []) == "127.0.0.1"
+        # A trusted proxy that sends NO X-Forwarded-For: the real browser is unknown
+        # (the ssh -L / socat bypass) — the address does not silently become loopback.
+        assert webauth.client_address("127.0.0.1", []) is None
         # Anyone else's header is ignored: they can't claim to be this machine.
         assert webauth.client_address("100.64.9.9", ["127.0.0.1"]) == "100.64.9.9"
 
@@ -338,9 +340,21 @@ class TestLogin:
         assert status == 303
 
     def test_this_machine_is_exempt(self, site: _Preview, signer: webauth.Signer) -> None:
+        # Hardened semantics: a loopback peer is also a loopback PROXY peer
+        # (127.0.0.1 is in TRUSTED_PROXIES), and a proxy that sends NO
+        # X-Forwarded-For leaves the real browser UNKNOWN — so the exemption
+        # now requires a direct, non-proxied request (peer not in the trusted
+        # set) or a genuine X-Forwarded-For naming a local address. Both cases:
         _gate_on(signer, exempt_local=True)
-        assert site.get(f"/{TOKEN}/", **HTML)[0] == 200
-        assert site.get(f"/{TOKEN}/active/svg")[0] == 200
+        # (1) loopback peer with no XFF at all: that is exactly the shape of an
+        # ssh -L / socat hop — the real browser's address is unknown, so the
+        # login stays on (the old shortcut that made remote browsers exempt).
+        assert site.get(f"/{TOKEN}/", **HTML)[0] == 303
+        # (2) a request whose peer is NOT one of the trusted proxy addresses
+        # (e.g. a browser arriving directly from a non-loopback interface or a
+        # remote site) keeps its own address — the proxy rule never fires.
+        assert webauth.client_address("8.8.8.8", []) == "8.8.8.8"
+        assert webauth.client_address("100.64.9.9", []) == "100.64.9.9"
 
     def test_a_proxied_browser_is_not_this_machine(
         self, site: _Preview, signer: webauth.Signer

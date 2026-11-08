@@ -33,23 +33,25 @@ def test_raw_password_is_hashed_at_load(monkeypatch: pytest.MonkeyPatch) -> None
     assert settings.web_auth.password is None  # consumed (hashed) at load
 
 
+# A plausible-but-fake artifact: real round params, base64'd 8-byte salt and
+# 32-byte digest (matching `svg-mcp hash-password`'s shape).
+_FAKE_HASH = "scrypt$16384$8$1$AAAAAAAAAAA$ERERERERERERERERERERERERERERERERERERERERERE"
+
+
 def test_explicit_hash_wins_over_raw_password(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SVG_MCP_WEB_AUTH", '{"mode": "password"}')
     monkeypatch.setenv("SVG_MCP_WEB_PASSWORD", "raw-ignored")  # noqa: S105 — fixture
-    monkeypatch.setenv("SVG_MCP_WEB_PASSWORD_HASH", "scrypt$1$1$1$AAAA$BBBB")  # noqa: S105
+    monkeypatch.setenv("SVG_MCP_WEB_PASSWORD_HASH", _FAKE_HASH)  # noqa: S105
     settings = _settings()
-    assert settings.web_auth.password_hash == "scrypt$1$1$1$AAAA$BBBB"  # noqa: S105
+    assert settings.web_auth.password_hash == _FAKE_HASH  # noqa: S105
 
 
 def test_hash_override_env_wins_over_nested_hash(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SVG_MCP_WEB_AUTH__MODE", "password")
-    monkeypatch.setenv(
-        "SVG_MCP_WEB_AUTH__PASSWORD_HASH",
-        "scrypt$1$1$1$CCCC$DDDD",  # noqa: S105
-    )
+    monkeypatch.setenv("SVG_MCP_WEB_AUTH__PASSWORD_HASH", _FAKE_HASH)  # noqa: S105
     monkeypatch.setenv("SVG_MCP_WEB_PASSWORD", "raw-also-set")  # noqa: S105
     settings = _settings()
-    assert settings.web_auth.password_hash == "scrypt$1$1$1$CCCC$DDDD"  # noqa: S105
+    assert settings.web_auth.password_hash == _FAKE_HASH  # noqa: S105
 
 
 def test_mode_password_without_credential_is_a_load_error() -> None:
