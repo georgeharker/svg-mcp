@@ -19,6 +19,8 @@ the document is consistent) hand it an immutable serialized SVG *string* via
 :meth:`PreviewServer.publish`. Every HTTP request renders from that snapshot, so concurrent
 mutations on the asyncio thread can
 never tear a render.
+
+With ``web_auth`` on, every route but the login pages passes svg_mcp.webgate first.
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
+from . import webauth, webgate
+from .authpages import Reply
 from .render import SUPPORTED_FORMATS, export_bytes, rsvg_available
 
 _MIME: dict[str, str] = {
@@ -249,10 +253,66 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
             with _suppress_broken_pipe():
                 self.wfile.write(data)
 
+        def _reply(self, reply: Reply) -> None:
+            self.send_response(reply.status)
+            for name, value in reply.headers:
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(reply.body)))
+            self.end_headers()
+            with _suppress_broken_pipe():
+                self.wfile.write(reply.body)
+
+        # -- web_auth -----------------------------------------------------
+
+        def _gate_request(self) -> webgate.GateRequest:
+            url = urlparse(self.path)
+            headers: dict[str, list[str]] = {}
+            for name, value in self.headers.items():
+                headers.setdefault(name.lower(), []).append(value)
+            return webgate.GateRequest(
+                method=self.command,
+                path=url.path,
+                query=url.query,
+                headers=headers,
+                peer=self.client_address[0] if self.client_address else None,
+            )
+
+        def _auth_route(self, request: webgate.GateRequest) -> bool:
+            """Serve ``/auth/login`` and ``/auth/logout``; ``False`` for any other path."""
+            if request.path == webauth.LOGOUT_PATH:
+                self._reply(webgate.logout(request))
+                return True
+            if request.path != webauth.LOGIN_PATH:
+                return False
+            form: dict[str, str] | None = None
+            if request.method == "POST":
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+                if not 0 <= length <= webgate.MAX_FORM_BYTES:
+                    self.close_connection = True  # the unread body would desync keep-alive
+                    self._status(413, "form too large")
+                    return True
+                form = webgate.parse_form(self.rfile.read(length))
+            self._reply(webgate.login(request, form))
+            return True
+
         # -- routing ------------------------------------------------------
 
+        def do_POST(self) -> None:  # noqa: N802 (stdlib naming)
+            if not self._auth_route(self._gate_request()):
+                self.close_connection = True  # the unread body would desync keep-alive
+                self._status(405, "method not allowed")
+
         def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
-            path = urlparse(self.path).path
+            request = self._gate_request()
+            if self._auth_route(request):
+                return None
+            refused = webgate.check(request)
+            if refused is not None:
+                return self._reply(refused)
+            path = request.path
             parts = [p for p in path.split("/") if p]
 
             if not parts:  # bare / — no session token, nothing to show

@@ -507,6 +507,8 @@ All settings are env vars prefixed `SVG_MCP_` (or a `.env` file):
 | `SVG_MCP_AUTH_TOKEN` | unset | Optional inbound bearer token for the http `/mcp` endpoint (see [Authentication](#authentication)) |
 | `SVG_MCP_PREVIEW` | unset | Auto-start the [live preview](#live-preview) web server on boot (`1`/`true`) |
 | `SVG_MCP_PREVIEW_HOST` / `SVG_MCP_PREVIEW_PORT` | `127.0.0.1` / `8808` | Bind address for the live preview |
+| `SVG_MCP_WEB_AUTH` | off | Browser login for the live preview, as JSON (see [Web login](#web-login)); single fields as `SVG_MCP_WEB_AUTH__MODE` etc. |
+| `SVG_MCP_WEB_PASSWORD_HASH` | unset | The login's password hash (`svg-mcp hash-password`); overrides `web_auth.password_hash` |
 
 Transport, host, and port can also be set with CLI flags (which take precedence over the env
 vars): `svg-mcp --transport streamable-http --host 127.0.0.1 --port 7731`.
@@ -577,6 +579,45 @@ build in a browser while the model keeps working, with no render bytes spent on 
 
 The page just mirrors the read-only [`svg://` resources](#resources): `GET /<token>/active/render`
 is the same render as the `svg://{id}/render` resource, refreshed by the same change signal.
+
+### Web login
+
+The preview binds loopback by default. Bind it wider (`SVG_MCP_PREVIEW_HOST`, or a tailnet behind
+`tailscale serve`) and anyone who can reach the address can watch your documents. A browser
+can't send the `/mcp` bearer, so the preview has its own optional login. It's off by default.
+
+```bash
+svg-mcp hash-password                       # prompts twice, prints scrypt$16384$8$1$...
+export SVG_MCP_WEB_PASSWORD_HASH='scrypt$16384$8$1$...'
+export SVG_MCP_WEB_AUTH='{"mode": "password"}'    # or SVG_MCP_WEB_AUTH__MODE=password
+```
+
+The password, session cookie and ticket formats are the same as
+[mcp-combiner](https://github.com/georgeharker/mcp-companion)'s `web_auth`, so a hash from
+`mcp-combiner hash-password` works here unchanged. `mode: "password"` without a hash stops svg-mcp
+at startup.
+
+| Who | Asked for the password? |
+|---|---|
+| A browser on this machine (loopback, this machine's interface or tailnet address) | No, with `exempt_local` (the default) |
+| Opening the URL `start_preview` returned (it carries a 5-minute `?t=` ticket for that chat's preview) | No: the ticket signs the browser in, then redirects to the clean URL |
+| A browser holding a valid session cookie (`svgmcp_session`) | No, until it expires (`session_days`) |
+| Anyone else (another device, or a browser behind a local proxy such as `tailscale serve`) | Yes: pages redirect to `/auth/login`; the event stream, renders and JSON get `401` |
+
+A proxy on this machine connects from loopback, so its `X-Forwarded-For` names the real browser.
+That header is believed only from `127.0.0.1` / `::1`. After 5 failed logins in a minute, an
+address gets `429`, even with the right password. `/auth/logout` signs the browser out.
+Deleting the signing key (`$XDG_STATE_HOME/svg-mcp/web-auth.key`, by default
+`~/.local/state/svg-mcp/web-auth.key`) signs every browser out. The login covers only the
+preview. `/mcp` keeps its bearer ([Authentication](#authentication)).
+
+| `web_auth` option | Default | Meaning |
+|---|---|---|
+| `mode` | `"off"` | `"off"` or `"password"` |
+| `password_hash` | unset | `svg-mcp hash-password` output (`SVG_MCP_WEB_PASSWORD_HASH` wins) |
+| `session_days` | `30` | How long a browser stays signed in |
+| `tickets` | `true` | `start_preview` URLs carry a login ticket |
+| `exempt_local` | `true` | Requests from this machine's own addresses skip the login |
 
 ## Inline widget (`show_widget`)
 
