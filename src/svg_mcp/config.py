@@ -1,16 +1,64 @@
-"""Runtime configuration, sourced from environment (prefix ``SVG_MCP_``) or a ``.env`` file."""
+"""Runtime configuration: ``SVG_MCP_*`` env vars, a ``.env`` file, then a TOML config file.
+
+Precedence, highest first: explicit ``Settings(...)`` arguments, environment, ``.env``,
+the config file (``$SVG_MCP_CONFIG``, else ``$XDG_CONFIG_HOME/svg-mcp/config.toml``,
+default ``~/.config/svg-mcp/config.toml``), built-in defaults.
+"""
 
 from __future__ import annotations
 
 import contextlib
-from typing import Literal, Self
+import os
+from pathlib import Path
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    TomlConfigSettingsSource,
+)
+
+CONFIG_ENV = "SVG_MCP_CONFIG"
+
+
+def config_path() -> tuple[Path, bool]:
+    """The config file to read, and whether it was named explicitly (``$SVG_MCP_CONFIG``).
+
+    An explicitly named file must exist; the default location is optional."""
+    explicit = os.environ.get(CONFIG_ENV)
+    if explicit:
+        return Path(explicit).expanduser(), True
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "svg-mcp" / "config.toml", False
+
+
+class _ConfigFileSource(TomlConfigSettingsSource):
+    """The TOML config file, STRICT at the top level: an unknown key (a typo such as
+    ``[webauth]``) is a startup error rather than a silently ignored table — the file can
+    switch the preview login on, so a misspelling must not fail open. ``[web_auth]`` itself
+    is already strict (``extra="forbid"``)."""
+
+    def __init__(self, settings_cls: type[BaseSettings]) -> None:
+        path, explicit = config_path()
+        if explicit and not path.is_file():
+            raise ValueError(f"{CONFIG_ENV}={path} does not exist")
+        super().__init__(settings_cls, toml_file=path)
+        unknown = sorted(set(self.toml_data) - set(settings_cls.model_fields))
+        if unknown:
+            raise ValueError(
+                f"{path}: unknown setting(s) {', '.join(unknown)} — "
+                f"known: {', '.join(sorted(settings_cls.model_fields))}"
+            )
+        #: the file's own ``web_auth.mode`` (for the no-silent-downgrade check).
+        self.file_mode = (self.toml_data.get("web_auth") or {}).get("mode")
+        self.path = path
 
 
 class WebAuthConfig(BaseModel):
-    """Browser login for the live preview (``SVG_MCP_WEB_AUTH``; see svg_mcp.webauth).
+    """Browser login for the live preview (``[web_auth]`` in the config file, or
+    ``SVG_MCP_WEB_AUTH`` as JSON; see svg_mcp.webauth).
     Off by default. Same shape as mcp-combiner's ``web_auth`` (incl. the raw-password
     mirror: ``SVG_MCP_WEB_PASSWORD``) — and STRICT: unknown keys fail startup (this blob
     is the credential source of record for a browser-facing gate; typos must not fail
@@ -49,13 +97,27 @@ class WebAuthConfig(BaseModel):
 class Settings(BaseSettings):
     """Process-wide settings.
 
-    Every field can be overridden by an env var, e.g. ``SVG_MCP_RENDERER=cairo`` or
-    ``SVG_MCP_RESVG_BINARY=/opt/homebrew/bin/resvg``.
+    Every field can be set in the config file (``renderer = "cairo"``) and overridden by
+    an env var (``SVG_MCP_RENDERER=cairo``, ``SVG_MCP_RESVG_BINARY=/opt/homebrew/bin/resvg``).
     """
 
     model_config = SettingsConfigDict(
         env_prefix="SVG_MCP_", env_file=".env", extra="ignore", env_nested_delimiter="__"
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        global _file_mode
+        config_file = _ConfigFileSource(settings_cls)
+        _file_mode = (str(config_file.path), config_file.file_mode)
+        return init_settings, env_settings, dotenv_settings, config_file, file_secret_settings
 
     # --- rendering ---------------------------------------------------------
     renderer: str = "resvg"
@@ -78,10 +140,39 @@ class Settings(BaseSettings):
     render_timeout_s: float = 30.0
     """Hard timeout for a single render subprocess."""
 
+    # --- server --------------------------------------------------------------
+    transport: Literal["stdio", "http", "streamable-http", "sse"] = "stdio"
+    """MCP transport (``--transport`` wins)."""
+
+    host: str = "127.0.0.1"
+    """Bind host for the http transports (``--host`` wins)."""
+
+    port: int = 8000
+    """Bind port for the http transports (``--port`` wins)."""
+
+    shutdown_grace: int = 0
+    """Seconds uvicorn waits for in-flight connections to drain on shutdown."""
+
+    # --- live preview --------------------------------------------------------
+    preview: bool = False
+    """Start the live preview on boot (the model can also start it via ``start_preview``)."""
+
+    preview_host: str = "127.0.0.1"
+    """Bind host for the live preview."""
+
+    preview_port: int | None = None
+    """Bind port for the live preview; None picks the default (8808, or a free port)."""
+
+    @field_validator("preview", mode="before")
+    @classmethod
+    def _empty_preview_is_off(cls, value: object) -> object:
+        # SVG_MCP_PREVIEW= (set but empty) always meant off; keep it valid.
+        return False if value == "" else value
+
     # --- live preview login ------------------------------------------------
     web_auth: WebAuthConfig = Field(default_factory=WebAuthConfig)
-    """Browser login for the live preview: ``SVG_MCP_WEB_AUTH='{"mode": "password", ...}'``
-    or one field at a time (``SVG_MCP_WEB_AUTH__MODE=password``)."""
+    """Browser login for the live preview: a ``[web_auth]`` table in the config file, or
+    ``SVG_MCP_WEB_AUTH='{"mode": "password", ...}'`` (merged over the file's table)."""
 
     web_password_hash: str | None = None
     """Overrides ``web_auth.password_hash`` (``SVG_MCP_WEB_PASSWORD_HASH``)."""
@@ -101,17 +192,21 @@ class Settings(BaseSettings):
         raw_mode = None
         with contextlib.suppress(Exception):
             raw_mode = (_json.loads(_os.environ["SVG_MCP_WEB_AUTH"]) or {}).get("mode")
-        overrides: dict[str, str] = {}
+        file_path, file_mode = _file_mode
+        overrides: dict[str, Any] = {}
+        raw_password = self.web_password or self.web_auth.password
         if self.web_password_hash:
             overrides["password_hash"] = self.web_password_hash
-        elif self.web_auth.password_hash is None and self.web_password:
+        elif self.web_auth.password_hash is None and raw_password:
             # hash-over-raw precedence: an explicitly provided hash (this env, or the nested
-            # JSON) always wins; the raw password is hashed HERE, at load, with a fresh salt
-            # — held in memory only (same fail-open shape as toucan/mcp-combiner: neither
-            # set ⇒ auth off).
+            # block) always wins; the raw password (SVG_MCP_WEB_PASSWORD, else
+            # web_auth.password) is hashed HERE, at load, with a fresh salt — held in memory
+            # only (same fail-open shape as toucan/mcp-combiner: neither set ⇒ auth off).
             from .webauth import hash_password  # noqa: PLC0415 — avoid a webauth→config cycle
 
-            overrides["password_hash"] = hash_password(self.web_password)
+            overrides["password_hash"] = hash_password(raw_password)
+        if self.web_auth.password is not None:
+            overrides["password"] = None  # consumed: never kept past load
         if overrides:
             self.web_auth = self.web_auth.model_copy(update=overrides)
             # The raw secret must not leak into child processes (the combiner's
@@ -122,6 +217,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SVG_MCP_WEB_AUTH sets web_auth.mode 'password' but an SVG_MCP_WEB_AUTH__* "
                 "override resolved the mode to 'off' — fix the leftover override"
+            )
+        if file_mode == "password" and self.web_auth.mode != "password":
+            # The same rule for the config file: a leftover env var must not silently
+            # switch off a login the file turns on. Turn it off in the file instead.
+            raise ValueError(
+                f"{file_path} sets web_auth.mode 'password' but the environment resolved "
+                "it to 'off' — remove the override, or set mode = \"off\" in the file"
             )
         if self.web_auth.mode == "password" and stored:
             from .webauth import validate_hash_artifact  # noqa: PLC0415 — validator-local
@@ -137,6 +239,8 @@ class Settings(BaseSettings):
 
 
 _settings: Settings | None = None
+#: (path, ``web_auth.mode``) of the config file read by the latest Settings() build.
+_file_mode: tuple[str, str | None] = ("", None)
 
 
 def get_settings() -> Settings:
