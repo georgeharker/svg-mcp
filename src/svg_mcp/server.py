@@ -6944,11 +6944,12 @@ def show_widget_view() -> str:
 def main() -> None:
     """Console-script entrypoint (`svg-mcp`).
 
-    Transport and bind address come from CLI flags, falling back to env vars, then defaults:
+    Transport and bind address come from CLI flags, falling back to settings (env vars, then
+    the config file — see svg_mcp.config), then defaults:
 
-        --transport / SVG_MCP_TRANSPORT   stdio (default) | http | streamable-http | sse
-        --host      / SVG_MCP_HOST        bind host for http transports (default 127.0.0.1)
-        --port      / SVG_MCP_PORT        bind port for http transports (default 8000)
+        --transport / transport   stdio (default) | http | streamable-http | sse
+        --host      / host        bind host for http transports (default 127.0.0.1)
+        --port      / port        bind port for http transports (default 8000)
 
     The http / streamable-http transports serve streamable HTTP at ``/mcp``.
 
@@ -6965,23 +6966,14 @@ def main() -> None:
     from .config import get_settings
 
     parser = argparse.ArgumentParser(prog="svg-mcp", description="svg-mcp MCP server")
+    # Flag defaults are None so "not given" falls through to the settings (env, config file).
     parser.add_argument(
         "--transport",
         choices=["stdio", "http", "streamable-http", "sse"],
-        default=os.environ.get("SVG_MCP_TRANSPORT", "stdio"),
         help="MCP transport (default: stdio)",
     )
-    parser.add_argument(
-        "--host",
-        default=os.environ.get("SVG_MCP_HOST", "127.0.0.1"),
-        help="Bind host for http transports (default: 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.environ.get("SVG_MCP_PORT", "8000")),
-        help="Bind port for http transports (default: 8000)",
-    )
+    parser.add_argument("--host", help="Bind host for http transports (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, help="Bind port for http transports (default: 8000)")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser(
         "hash-password", help="Print a password hash for web_auth (the live preview's login)"
@@ -6990,12 +6982,17 @@ def main() -> None:
     if args.command == "hash-password":
         sys.exit(_hash_password_cli())
 
-    # web_auth (the live preview's browser login): a bad config stops startup here, not at the
-    # first page view; with it on, the signing key is loaded (or created) now.
+    # Settings (env vars over the config file) and web_auth (the live preview's browser
+    # login): a bad config stops startup here, not at the first page view; with the login on,
+    # the signing key is loaded (or created) now.
     try:
-        _webgate.configure(get_settings().web_auth)
-    except ValidationError as exc:
+        settings = get_settings()
+        _webgate.configure(settings.web_auth)
+    except (ValidationError, ValueError) as exc:
         sys.exit(f"svg-mcp: invalid configuration: {exc}")
+    transport = args.transport or settings.transport
+    host = args.host or settings.host
+    port = args.port if args.port is not None else settings.port
 
     # The preview server runs on daemon threads (so it never blocks exit), but its listening socket
     # should be released promptly on shutdown — both so a restart can rebind the port and so the
@@ -7019,16 +7016,14 @@ def main() -> None:
             signal.signal(_sig, _shutdown_on_signal)
 
     # Opt-in live preview (loopback web page that auto-refreshes as the drawing is built).
-    # Enabled by SVG_MCP_PREVIEW; the model can also start it on demand via `start_preview`.
-    if os.environ.get("SVG_MCP_PREVIEW", "").strip().lower() not in ("", "0", "false", "no"):
-        preview_port = os.environ.get("SVG_MCP_PREVIEW_PORT")
+    # Enabled by the ``preview`` setting; the model can also start it via `start_preview`.
+    if settings.preview:
         url, _ = _preview.server.ensure_running(
-            host=os.environ.get("SVG_MCP_PREVIEW_HOST", "127.0.0.1"),
-            port=int(preview_port) if preview_port else None,
+            host=settings.preview_host, port=settings.preview_port
         )
         print(f"svg-mcp live preview: {url}", file=sys.stderr)  # stdout is the stdio transport
 
-    if args.transport == "stdio":
+    if transport == "stdio":
         mcp.run()
     else:
         # mcp 2 / fastmcp 4 stateful HTTP sessions expire after 30 min idle by default ("auto"
@@ -7046,8 +7041,8 @@ def main() -> None:
         # Bound how long uvicorn waits for in-flight connections to drain on shutdown. uvicorn's
         # own default is None (wait forever), which would hang a stop signal while a long-lived MCP
         # connection stays open; FastMCP currently overrides it to 0, but pin it ourselves so we
-        # don't depend on that default holding across versions. Override via SVG_MCP_SHUTDOWN_GRACE.
-        grace = int(os.environ.get("SVG_MCP_SHUTDOWN_GRACE", "0"))
+        # don't depend on that default holding across versions. Override via shutdown_grace.
+        grace = settings.shutdown_grace
         # Optional inbound bearer auth on /mcp (off unless SVG_MCP_AUTH_TOKEN is
         # set). inbound_auth.py is vendored byte-identical from mcp-companion's
         # combiner — no dependency on it. /health stays open.
@@ -7062,9 +7057,9 @@ def main() -> None:
                 Middleware(BearerAuthMiddleware, token=_tok, is_protected=lambda p: p != "/health")
             )
         mcp.run(
-            transport=args.transport,
-            host=args.host,
-            port=args.port,
+            transport=transport,
+            host=host,
+            port=port,
             middleware=_mw,
             uvicorn_config={"timeout_graceful_shutdown": grace, **_PROXY_HEADERS},
         )

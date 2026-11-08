@@ -492,27 +492,58 @@ the librsvg `rsvg-convert` binary; raster output never does.
 
 ## Configuration
 
-All settings are env vars prefixed `SVG_MCP_` (or a `.env` file):
+Settings come from a TOML config file and from env vars prefixed `SVG_MCP_`. Highest wins:
 
-| Var | Default | Meaning |
+1. CLI flags (`--transport`, `--host`, `--port`)
+2. env vars (`SVG_MCP_PORT=7731`), or a `.env` file in the working directory
+3. the config file
+4. built-in defaults
+
+The config file is `~/.config/svg-mcp/config.toml` (`$XDG_CONFIG_HOME/svg-mcp/config.toml`), or
+the path in `$SVG_MCP_CONFIG`. It's optional. A named `$SVG_MCP_CONFIG` that doesn't exist, an
+unknown key, or a misspelt table (`[webauth]`) stops svg-mcp at startup rather than being
+ignored. Keys are the setting names below; `web_auth` is a table:
+
+```toml
+# ~/.config/svg-mcp/config.toml
+renderer = "resvg"
+transport = "streamable-http"
+port = 7731
+
+[web_auth]          # the live preview's browser login, see Web login
+mode = "password"
+session_days = 30
+```
+
+Each key's env var is `SVG_MCP_` plus the name in capitals. `web_auth` takes JSON in the env
+var, merged over the file's table:
+
+```bash
+export SVG_MCP_WEB_AUTH='{"mode": "password", "session_days": 7}'
+```
+
+| Setting (env var: `SVG_MCP_` + name) | Default | Meaning |
 |---|---|---|
-| `SVG_MCP_RENDERER` | `resvg` | Render backend: `resvg` (CLI if present, else in-process) · `resvg-py` · `resvg-cli` · `cairo` · `inkscape` |
-| `SVG_MCP_RESVG_BINARY` | auto | Path to the resvg CLI |
-| `SVG_MCP_INKSCAPE_BINARY` | auto | Path to the Inkscape CLI |
-| `SVG_MCP_FEEDBACK_MAX_EDGE` | unset | Optional long-edge cap (px); unset = raw image handed back directly as base64 |
-| `SVG_MCP_DEFAULT_BACKGROUND` | transparent | Default render background (CSS color) |
-| `SVG_MCP_RENDER_TIMEOUT_S` | `30` | Per-render subprocess timeout |
-| `SVG_MCP_TRANSPORT` | `stdio` | Server transport: `stdio` · `http` · `streamable-http` · `sse` |
-| `SVG_MCP_HOST` / `SVG_MCP_PORT` | `127.0.0.1` / `8000` | Bind address for the http transports |
-| `SVG_MCP_AUTH_TOKEN` | unset | Optional inbound bearer token for the http `/mcp` endpoint (see [Authentication](#authentication)) |
-| `SVG_MCP_PREVIEW` | unset | Auto-start the [live preview](#live-preview) web server on boot (`1`/`true`) |
-| `SVG_MCP_PREVIEW_HOST` / `SVG_MCP_PREVIEW_PORT` | `127.0.0.1` / `8808` | Bind address for the live preview |
-| `SVG_MCP_WEB_AUTH` | off | Browser login for the live preview, as JSON (see [Web login](#web-login)); single fields as `SVG_MCP_WEB_AUTH__MODE` etc. |
-| `SVG_MCP_WEB_PASSWORD_HASH` | unset | The login's password hash (`svg-mcp hash-password`); overrides `web_auth.password_hash` |
-| `SVG_MCP_WEB_PASSWORD` | unset | The login password, RAW — hashed with a fresh salt at startup, in memory only (1Password launch-resolves this; the explicit hash wins when both are set) |
+| `renderer` | `resvg` | Render backend: `resvg` (CLI if present, else in-process) · `resvg-py` · `resvg-cli` · `cairo` · `inkscape` |
+| `resvg_binary` | auto | Path to the resvg CLI |
+| `inkscape_binary` | auto | Path to the Inkscape CLI |
+| `feedback_max_edge` | unset | Optional long-edge cap (px); unset = raw image handed back directly as base64 |
+| `default_background` | transparent | Default render background (CSS color) |
+| `render_timeout_s` | `30` | Per-render subprocess timeout |
+| `transport` | `stdio` | Server transport: `stdio` · `http` · `streamable-http` · `sse` |
+| `host` / `port` | `127.0.0.1` / `8000` | Bind address for the http transports |
+| `shutdown_grace` | `0` | Seconds to let in-flight http connections drain on shutdown |
+| `preview` | `false` | Auto-start the [live preview](#live-preview) web server on boot |
+| `preview_host` / `preview_port` | `127.0.0.1` / `8808` | Bind address for the live preview |
+| `web_auth` | off | Browser login for the live preview (see [Web login](#web-login)) |
+| `web_password_hash` | unset | The login's password hash (`svg-mcp hash-password`); overrides `web_auth.password_hash` |
+| `web_password` | unset | The login password, RAW — hashed with a fresh salt at startup, in memory only (the explicit hash wins when both are set) |
 
-Transport, host, and port can also be set with CLI flags (which take precedence over the env
-vars): `svg-mcp --transport streamable-http --host 127.0.0.1 --port 7731`.
+Two settings are env-only: `SVG_MCP_AUTH_TOKEN`, the optional bearer token for the http `/mcp`
+endpoint (see [Authentication](#authentication)), and `SVG_MCP_CONFIG`.
+
+Keep secrets out of a config file you share: put the password in `SVG_MCP_WEB_PASSWORD` (e.g. a
+launch script that reads it from 1Password), not in the file.
 
 ### Authentication
 
@@ -552,7 +583,7 @@ mypy src        # types (no Any / object — precise types only)
 ```bash
 svg-mcp                                          # FastMCP server over stdio (default)
 svg-mcp --transport streamable-http --port 7731  # or streamable HTTP at 127.0.0.1:7731/mcp
-# env vars work too: SVG_MCP_TRANSPORT=http SVG_MCP_PORT=7731 svg-mcp
+# or set transport/port in ~/.config/svg-mcp/config.toml, or SVG_MCP_TRANSPORT=http SVG_MCP_PORT=7731
 ```
 
 A long-running HTTP server is handy for a shared/persistent endpoint a bridge can connect to
@@ -571,7 +602,7 @@ build in a browser while the model keeps working, with no render bytes spent on 
 
 - **Start it:** the model is instructed to open a preview and hand you the URL up front on any
   non-trivial drawing, so you can watch (and redirect) as it builds. You can also ask for it
-  outright — *"show me"*, *"open a preview"* — or set `SVG_MCP_PREVIEW=1` to auto-start on boot.
+  outright — *"show me"*, *"open a preview"* — or set `preview = true` (`SVG_MCP_PREVIEW=1`) to auto-start on boot.
 - **Watch it:** open the URL once and leave it — it repaints on each change. Toggle **PNG**
   (faithful resvg output) vs **SVG** (crisp vector), zoom, drag to pan, and **Save** the current
   frame as PNG/SVG/WebP/JPEG/PDF straight from the page.
@@ -587,18 +618,30 @@ The preview binds loopback by default. Bind it wider (`SVG_MCP_PREVIEW_HOST`, or
 `tailscale serve`) and anyone who can reach the address can watch your documents. A browser
 can't send the `/mcp` bearer, so the preview has its own optional login. It's off by default.
 
-```bash
-svg-mcp hash-password                       # prompts twice, prints scrypt$16384$8$1$...
-export SVG_MCP_WEB_PASSWORD_HASH='scrypt$16384$8$1$...'
-export SVG_MCP_WEB_AUTH='{"mode": "password"}'    # or SVG_MCP_WEB_AUTH__MODE=password
+Turn it on in the config file:
+
+```toml
+[web_auth]
+mode = "password"
 ```
 
-Or ship the password RAW and let svg-mcp hash it at startup (e.g. a launch script that reads it
-from 1Password with `op read`):
+or in the environment: `export SVG_MCP_WEB_AUTH='{"mode": "password"}'`. Then give it a
+password, either as a hash:
+
+```bash
+svg-mcp hash-password                       # prompts twice, prints scrypt$16384$8$1$...
+export SVG_MCP_WEB_PASSWORD_HASH='scrypt$16384$8$1$...'   # or password_hash in [web_auth]
+```
+
+or RAW, and let svg-mcp hash it at startup (e.g. a launch script that reads it from 1Password
+with `op read`):
 
 ```bash
 export SVG_MCP_WEB_PASSWORD='<the password>'  # hashed at load, fresh salt, never persisted
 ```
+
+When the config file turns the login on, an env var can't silently turn it off: a resolved
+`mode` of `"off"` stops svg-mcp at startup. Switch it off in the file instead.
 
 An explicit `SVG_MCP_WEB_PASSWORD_HASH` wins over this. `mode: "password"` with neither
 credential stops svg-mcp at startup; mode `password` with neither is refused, and web login
@@ -633,8 +676,10 @@ preview. `/mcp` keeps its bearer ([Authentication](#authentication)).
 |---|---|---|
 | `mode` | `"off"` | `"off"` or `"password"` |
 | `password_hash` | unset | `svg-mcp hash-password` output (`SVG_MCP_WEB_PASSWORD_HASH` wins) |
+| `password` | unset | RAW password, hashed at startup (`SVG_MCP_WEB_PASSWORD` wins; prefer the env var) |
 | `session_days` | `30` | How long a browser stays signed in |
 | `tickets` | `true` | `start_preview` URLs carry a login ticket |
+| `ticket_uses` | `1` | How many times one ticket can sign a browser in |
 | `exempt_local` | `true` | Requests from this machine's own addresses skip the login |
 
 ## Inline widget (`show_widget`)
