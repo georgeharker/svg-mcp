@@ -47,7 +47,7 @@ def _clean(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for var in ("SVG_MCP_WEB_AUTH", "SVG_MCP_WEB_AUTH__MODE", "SVG_MCP_WEB_PASSWORD_HASH"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"192.168.1.20"})
-    monkeypatch.setattr(webauth, "_tailnet_ip", lambda: "100.66.1.2")
+    monkeypatch.setattr(webauth, "_tailnet_info", lambda: ("box.tail1234.ts.net.", "100.66.1.2"))
     webauth.reset_local_addresses()
     webauth.refresh_local_addresses()
     webauth.reset_failures()
@@ -557,7 +557,7 @@ class TestLocalAddressRefresh:
         webauth.reset_local_addresses()
         try:
             monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"192.168.1.20"})
-            monkeypatch.setattr(webauth, "_tailnet_ip", lambda: None)
+            monkeypatch.setattr(webauth, "_tailnet_info", lambda: (None, None))
             # (the mirror keeps a tailnet module; svg-mcp stays in webauth — see file header)
             webauth.refresh_local_addresses()
             assert "192.168.1.20" in webauth._local  # noqa: SLF001 — under test
@@ -574,7 +574,7 @@ class TestLocalAddressRefresh:
         webauth.reset_local_addresses()
         try:
             monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"192.168.1.20"})
-            monkeypatch.setattr(webauth, "_tailnet_ip", lambda: None)
+            monkeypatch.setattr(webauth, "_tailnet_info", lambda: (None, None))
             # (the mirror keeps a tailnet module; svg-mcp stays in webauth — see header)
             webauth.refresh_local_addresses()
             assert webauth._local == frozenset({"192.168.1.20"})  # noqa: SLF001
@@ -634,3 +634,74 @@ class TestLocalAddressRefresh:
             lambda name: "/usr/sbin/ip" if name == "ip" else None,
         )
         assert webauth._interface_addresses() == frozenset({"10.9.9.9"})
+
+
+class TestLocalHost:
+    """'This machine' also needs the Host header to name it (mcp-combiner eb26663):
+    a DNS-rebinding page connects from loopback but says Host: attacker.example."""
+
+    def test_names_that_count(self) -> None:
+        webauth.set_local_names({"preview.example.internal"})
+        for host in (
+            "localhost",
+            "localhost:7731",
+            "127.0.0.1:7731",
+            "[::1]:7731",
+            "192.168.1.20",  # own LAN address
+            "100.66.1.2:8808",  # tailnet address
+            "BOX.Tail1234.TS.net",  # MagicDNS name, mixed case, refreshed
+            "box.tail1234.ts.net.:8808",  # trailing dot
+            "Preview.Example.Internal:8808",  # configured name
+        ):
+            assert webauth.is_local_host(host), host
+
+    def test_names_that_dont(self) -> None:
+        for host in ("attacker.example:7731", "evil.localhost.example", "8.8.8.8", "", None):
+            assert not webauth.is_local_host(host), host
+
+    def test_host_name_parsing(self) -> None:
+        assert webauth.host_name("[::1]:9741") == "::1"
+        assert webauth.host_name("Box.Example:80") == "box.example"
+        assert webauth.host_name("::1") == "::1"  # several colons: an address, not host:port
+        assert webauth.host_name("box.example.") == "box.example"
+        assert webauth.host_name("") is None
+        assert webauth.host_name(None) is None
+
+    def test_configured_names_count_at_once_and_survive_refreshes(self) -> None:
+        webauth.set_local_names({"Later.Example"})
+        assert webauth.is_local_host("later.example:1")
+        webauth.refresh_local_addresses()
+        assert webauth.is_local_host("later.example:1")
+        assert webauth.is_local_host("box.tail1234.ts.net")
+
+    def test_the_magicdns_name_is_taken_fresh_on_each_refresh(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(webauth, "_tailnet_info", lambda: ("other.tail9.ts.net.", None))
+        webauth.refresh_local_addresses()
+        assert webauth.is_local_host("other.tail9.ts.net")
+        assert not webauth.is_local_host("box.tail1234.ts.net")
+
+    def test_a_rebinding_page_is_not_this_machine(
+        self, site: _Preview, signer: webauth.Signer
+    ) -> None:
+        _gate_on(signer, exempt_local=True)
+        rebound = {"Host": f"attacker.example:{site.port}", "Accept": "text/html"}
+        status, headers, _ = site.request("GET", f"/{TOKEN}/", headers=rebound)
+        assert status == 303 and headers["location"].startswith("/auth/login")
+        named = {"Host": f"localhost:{site.port}", "Accept": "text/html"}
+        assert site.request("GET", f"/{TOKEN}/", headers=named)[0] == 200
+
+    def test_password_mode_starts_the_address_refresh_once(
+        self, monkeypatch: pytest.MonkeyPatch, signer: webauth.Signer
+    ) -> None:
+        starts: list[int] = []
+        monkeypatch.setattr(webgate, "_refresh_started", False)
+        monkeypatch.setattr(webauth, "start_local_refresh", lambda: starts.append(1))
+        webgate.configure(WebAuthConfig())
+        assert starts == []  # off: nothing reads the addresses
+        _gate_on(signer, exempt_local=False)
+        assert starts == []  # no exemption: nothing reads them either
+        _gate_on(signer, exempt_local=True)
+        _gate_on(signer, exempt_local=True)
+        assert starts == [1]

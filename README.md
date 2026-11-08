@@ -654,10 +654,15 @@ at startup.
 
 | Who | Asked for the password? |
 |---|---|
-| A browser on this machine (loopback, this machine's interface or tailnet address) | No, with `exempt_local` (the default) |
+| A browser on this machine (loopback, this machine's interface or tailnet address, opening a URL that names this machine) | No, with `exempt_local` (the default) |
 | Opening the URL `start_preview` returned (it carries a 5-minute `?t=` ticket for that chat's preview) | No: the ticket signs the browser in, then redirects to the clean URL |
 | A browser holding a valid session cookie (`svgmcp_session`) | No, until it expires (`session_days`) |
 | Anyone else (another device, or a browser behind a local proxy such as `tailscale serve`) | Yes: pages redirect to `/auth/login`; the event stream, renders and JSON get `401` |
+
+"Names this machine" means the `Host` header is `localhost`, one of its addresses, its tailnet
+(MagicDNS) name, or the preview's bind host. That stops DNS rebinding: a web page that points
+its own domain at `127.0.0.1` connects from loopback, but its requests still say
+`Host: attacker.example`, so they get the login.
 
 A proxy on this machine is believed only from `127.0.0.1` / `::1`, and only when it names the
 real browser in `X-Forwarded-For`.
@@ -680,7 +685,7 @@ preview. `/mcp` keeps its bearer ([Authentication](#authentication)).
 | `session_days` | `30` | How long a browser stays signed in |
 | `tickets` | `true` | `start_preview` URLs carry a login ticket |
 | `ticket_uses` | `1` | How many times one ticket can sign a browser in |
-| `exempt_local` | `true` | Requests from this machine's own addresses skip the login |
+| `exempt_local` | `true` | Requests from this machine (its own address, and a `Host` naming it) skip the login |
 
 ## Inline widget (`show_widget`)
 

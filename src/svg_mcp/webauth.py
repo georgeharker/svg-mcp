@@ -6,8 +6,9 @@ live-preview pages (``/<token>/...``, see svg_mcp.preview) ask for a password
 once per ``session_days`` per browser, then ride a session cookie. Three ways
 through, checked in order:
 
-- a request from this machine itself (any of its own addresses: loopback,
-  the interface addresses, the tailnet address) — exempt;
+- a request from this machine itself (from one of its own addresses —
+  loopback, the interface addresses, the tailnet address — AND with a
+  ``Host`` header naming it) — exempt;
 - a valid session cookie (``svgmcp_session``);
 - a valid ticket (``?t=``) on a preview URL svg-mcp handed an MCP client
   (``start_preview``): exchanged for the cookie, then a redirect to the clean
@@ -16,13 +17,14 @@ through, checked in order:
 Otherwise: a redirect to ``/auth/login`` (pages) or 401 (everything else).
 
 KEEP IN DIFF with mcp-combiner: this module deliberately mirrors
-``mcp-combiner``'s ``combiner/mcp_combiner/webauth.py`` (dev @ 5459fa6,
-"fix(web_auth): release-review hardening"): same names, signatures, ordering,
+``mcp-combiner``'s ``combiner/mcp_combiner/webauth.py`` (dev @ eb26663, "feat: /status page;
+Host check for 'this machine'"): same names, signatures, ordering,
 docstrings and section order — passwords (``hash_password`` /
 ``verify_password`` / ``adopt_password_env`` / ``env_password_hash``),
 Signer (+ ``_read_key``), ``TicketLedger``, this machine
-(``refresh_local_addresses`` / ``start_local_refresh`` / ``is_local`` /
-``_canonical`` / ``_interface_addresses`` / ``parse_addresses``), and
+(``refresh_local_addresses`` / ``set_local_names`` / ``start_local_refresh`` /
+``is_local`` / ``is_local_host`` / ``host_name`` / ``_canonical`` /
+``_interface_addresses`` / ``parse_addresses``), and
 ``LoginLimiter`` — so a fix in one ports to the other by diff. The
 NECESSARY differences are confined and commented per symbol:
 
@@ -313,6 +315,11 @@ def default_key_path() -> Path:
 #: lock on the request path; replaced whole by :func:`refresh_local_addresses`
 #: off it. Empty until the first refresh: only loopback counts as local then.
 _local: frozenset[str] = frozenset()
+#: Names that mean this machine in a ``Host`` header besides ``localhost`` and
+#: its addresses: the tailnet MagicDNS name (refreshed) and configured ones
+#: (svg-mcp: the preview's bind host when it is a name — :func:`set_local_names`).
+_local_names: frozenset[str] = frozenset()
+_configured_names: frozenset[str] = frozenset()
 _refresh_stop = threading.Event()
 _REFRESH_INTERVAL_S = 60.0
 
@@ -324,13 +331,24 @@ def local_addresses() -> frozenset[str]:
 def refresh_local_addresses() -> frozenset[str]:
     """Look the addresses up now (blocking: runs ``ifconfig``/``ip`` and
     ``tailscale``) and publish them."""
-    global _local
+    global _local, _local_names
     found = set(_interface_addresses())
-    ip = _tailnet_ip()
+    # combiner: ``from mcp_combiner.tailnet import fresh_tailnet_info``.
+    name, ip = _tailnet_info()
     if ip:
         found.add(ip)
     _local = frozenset(_canonical(a) for a in found)
+    _local_names = _configured_names | ({name.lower().rstrip(".")} if name else set())
     return _local
+
+
+def set_local_names(names: set[str]) -> None:
+    """Host names that are this machine (svg-mcp: the preview's bind host when
+    it is a name; combiner: ``oauth.public_url``'s host, the widget origin's
+    host). Kept across refreshes."""
+    global _configured_names, _local_names
+    _configured_names = frozenset(n.lower().rstrip(".") for n in names if n)
+    _local_names = _local_names | _configured_names
 
 
 def start_local_refresh(interval_s: float = _REFRESH_INTERVAL_S) -> None:
@@ -358,8 +376,10 @@ def reset_local_addresses() -> None:
     """svg-mcp-specific (test isolation): clear the refreshed set AND stop the
     daemon, so a test's mocks re-run deterministically on its own refresh."""
     stop_local_refresh()
-    global _local
+    global _local, _local_names, _configured_names
     _local = frozenset()
+    _local_names = frozenset()
+    _configured_names = frozenset()
 
 
 #: Tailscale's reserved address block (Shared Address Space / CGNAT range).
@@ -375,7 +395,39 @@ def is_local(client_host: str | None) -> bool:
             return True
     except ValueError:
         return False
-    return canonical in local_addresses()
+    return canonical in _local
+
+
+def is_local_host(host_header: str | None) -> bool:
+    """Whether a ``Host`` header names this machine.
+
+    The other half of "this machine": a page that rebinds its own domain to
+    127.0.0.1 connects from loopback, but its requests still say
+    ``Host: attacker.example`` — they must not inherit the exemption.
+    """
+    hostname = host_name(host_header)
+    if hostname is None:
+        return False
+    if hostname == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(_canonical(hostname))
+    except ValueError:
+        return hostname in _local_names
+    return ip.is_loopback or str(ip) in _local
+
+
+def host_name(host_header: str | None) -> str | None:
+    """The host part of a ``Host`` header, lower-cased (``[::1]:9741`` → ``::1``)."""
+    if not host_header:
+        return None
+    host = host_header.strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[1:end] if end > 0 else None
+    if host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    return host.rstrip(".") or None
 
 
 def _canonical(address: str) -> str:
@@ -418,14 +470,15 @@ def parse_addresses(text: str) -> set[str]:
     return found
 
 
-def _tailnet_ip() -> str | None:
+def _tailnet_info() -> tuple[str | None, str | None]:
     """svg-mcp-specific stand-in for mcp-combiner's tailnet module
-    (``fresh_tailnet_ip`` lives in ``mcp_combiner.tailnet``): the machine's
-    tailnet address, fresh — ``tailscale status --json --peers=false`` →
-    ``Self.TailscaleIPs``, falling back to ``tailscale ip -4`` — never any
-    per-process cache."""
+    (``fresh_tailnet_info`` lives in ``mcp_combiner.tailnet``): the machine's
+    (MagicDNS name, tailnet address), fresh — ``tailscale status --json
+    --peers=false`` → ``Self.DNSName`` / ``Self.TailscaleIPs``, the address
+    falling back to ``tailscale ip -4`` — never any per-process cache."""
     if shutil.which("tailscale") is None:
-        return None
+        return None, None
+    name: str | None = None
     try:
         out = subprocess.run(
             ["tailscale", "status", "--json", "--peers=false"],
@@ -435,14 +488,16 @@ def _tailnet_ip() -> str | None:
             check=False,
         ).stdout
         parsed = json.loads(out or "{}")
-        ips: list[str] = list(((parsed.get("Self") or {}).get("TailscaleIPs")) or [])
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+        own = parsed.get("Self") or {}
+        ips: list[str] = list(own.get("TailscaleIPs") or [])
+        name = str(own.get("DNSName") or "") or None
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
         ips = []
     for ip in ips:
         try:
             if ipaddress.ip_address(ip) not in _TAILSCALE_V4_NET and ":" not in ip:
                 continue
-            return ip
+            return name, ip
         except ValueError:
             continue
     try:
@@ -450,14 +505,14 @@ def _tailnet_ip() -> str | None:
             ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=2.0, check=False
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return name, None
     for line in (out or "").splitlines():
         try:
             if ipaddress.ip_address(line.strip()) in _TAILSCALE_V4_NET:
-                return line.strip()
+                return name, line.strip()
         except ValueError:
             continue
-    return None
+    return name, None
 
 
 # ── the browser's address behind a local proxy ─────────────────────

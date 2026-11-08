@@ -83,6 +83,8 @@ _LOGIN_SCRYPT_SLOTS = threading.BoundedSemaphore(2)
 
 _lock = threading.Lock()
 _state: _State | None = None
+#: the "this machine" address refresh runs once per process (a daemon thread).
+_refresh_started = False
 
 
 def configure(config: WebAuthConfig, signer: webauth.Signer | None = None) -> None:
@@ -97,6 +99,8 @@ def configure(config: WebAuthConfig, signer: webauth.Signer | None = None) -> No
         signer = webauth.Signer.load_or_create(webauth.default_key_path())
     with _lock:
         _state = _State(config, signer if config.mode == "password" else None)
+    if _state.config.mode == "password" and _state.config.exempt_local:
+        _start_local_refresh()
     if _state.config.mode == "password" and _state.signer is not None:
         logger.info(
             "web_auth: live-preview login gate is ON (%.0f-day cookies, exempt-local %s)",
@@ -105,6 +109,17 @@ def configure(config: WebAuthConfig, signer: webauth.Signer | None = None) -> No
         )
     else:
         logger.info("live-preview pages are open — the login gate is not configured")
+
+
+def _start_local_refresh() -> None:
+    """Start the address refresh the exemption reads (until it first runs,
+    only loopback is this machine). Once per process: configure can rerun."""
+    global _refresh_started
+    with _lock:
+        if _refresh_started:
+            return
+        _refresh_started = True
+    webauth.start_local_refresh()
 
 
 def reset() -> None:
@@ -137,12 +152,18 @@ def auth_path(path: str) -> bool:
     return path in (webauth.LOGIN_PATH, webauth.LOGOUT_PATH)
 
 
+def from_this_machine(request: GateRequest) -> bool:
+    """Connected from one of this machine's addresses AND addressed to one of
+    its names (a DNS-rebinding page fails the second)."""
+    return webauth.is_local(request.client) and webauth.is_local_host(request.header("host"))
+
+
 def admitted(request: GateRequest) -> bool:
     """Off, from this machine, or signed in (a valid session cookie)."""
     state = _current()
     if state.config.mode != "password" or state.signer is None:
         return True
-    if state.config.exempt_local and webauth.is_local(request.client):
+    if state.config.exempt_local and from_this_machine(request):
         return True
     return state.signer.verify(request.cookie(webauth.COOKIE), "s") is not None
 
