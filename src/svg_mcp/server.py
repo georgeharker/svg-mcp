@@ -66,6 +66,7 @@ from pydantic import AnyUrl, BaseModel
 
 from . import ops
 from . import preview as _preview
+from . import webgate as _webgate
 from . import widget as _widget
 from .model.document import Document
 from .model.errors import InvalidArgument, NoSession
@@ -6832,10 +6833,13 @@ def start_preview(
 
     Idempotent: if a preview is already running it just returns the existing URL. After calling
     this, give the returned ``url`` to the user (e.g. "Live preview: <url> — refreshes on each
-    change").
+    change"). Give it exactly as returned: with web login on it carries a short-lived ticket
+    (``?t=``) that signs the user's browser in.
     """
     _base, bound = _preview.server.ensure_running(host=host, port=port)
-    url = _preview.server.url_for(_session_token())  # per-session URL: /<token>/
+    token = _session_token()
+    # per-session URL: /<token>/, plus a login ticket for that token when web_auth is on
+    url = _webgate.with_ticket(_preview.server.url_for(token), token)
     with contextlib.suppress(Exception):
         _publish_preview()  # prime so the page isn't blank on first open
     return {"url": url, "port": bound, "running": True}
@@ -6947,11 +6951,18 @@ def main() -> None:
         --port      / SVG_MCP_PORT        bind port for http transports (default 8000)
 
     The http / streamable-http transports serve streamable HTTP at ``/mcp``.
+
+    ``svg-mcp hash-password`` prints a ``web_auth.password_hash`` for the live preview's login.
     """
     import argparse
     import atexit
     import os
     import signal
+    import sys
+
+    from pydantic import ValidationError
+
+    from .config import get_settings
 
     parser = argparse.ArgumentParser(prog="svg-mcp", description="svg-mcp MCP server")
     parser.add_argument(
@@ -6971,7 +6982,20 @@ def main() -> None:
         default=int(os.environ.get("SVG_MCP_PORT", "8000")),
         help="Bind port for http transports (default: 8000)",
     )
+    commands = parser.add_subparsers(dest="command")
+    commands.add_parser(
+        "hash-password", help="Print a password hash for web_auth (the live preview's login)"
+    )
     args = parser.parse_args()
+    if args.command == "hash-password":
+        sys.exit(_hash_password_cli())
+
+    # web_auth (the live preview's browser login): a bad config stops startup here, not at the
+    # first page view; with it on, the signing key is loaded (or created) now.
+    try:
+        _webgate.configure(get_settings().web_auth)
+    except ValidationError as exc:
+        sys.exit(f"svg-mcp: invalid configuration: {exc}")
 
     # The preview server runs on daemon threads (so it never blocks exit), but its listening socket
     # should be released promptly on shutdown — both so a restart can rebind the port and so the
@@ -6997,8 +7021,6 @@ def main() -> None:
     # Opt-in live preview (loopback web page that auto-refreshes as the drawing is built).
     # Enabled by SVG_MCP_PREVIEW; the model can also start it on demand via `start_preview`.
     if os.environ.get("SVG_MCP_PREVIEW", "").strip().lower() not in ("", "0", "false", "no"):
-        import sys
-
         preview_port = os.environ.get("SVG_MCP_PREVIEW_PORT")
         url, _ = _preview.server.ensure_running(
             host=os.environ.get("SVG_MCP_PREVIEW_HOST", "127.0.0.1"),
@@ -7044,8 +7066,37 @@ def main() -> None:
             host=args.host,
             port=args.port,
             middleware=_mw,
-            uvicorn_config={"timeout_graceful_shutdown": grace},
+            uvicorn_config={"timeout_graceful_shutdown": grace, **_PROXY_HEADERS},
         )
+
+
+#: A local reverse proxy (e.g. ``tailscale serve``) connects from loopback;
+#: uvicorn then reports the browser's address from X-Forwarded-For, trusted
+#: from loopback only. Pinned rather than left to uvicorn's defaults. (The
+#: live preview is a stdlib server and applies the same rule itself:
+#: svg_mcp.webauth.client_address.)
+_PROXY_HEADERS: dict[str, bool | str] = {
+    "proxy_headers": True,
+    "forwarded_allow_ips": "127.0.0.1,::1",
+}
+
+
+def _hash_password_cli() -> int:
+    """``svg-mcp hash-password``: prompt twice, print the hash for ``web_auth``."""
+    import getpass
+    import sys
+
+    from .webauth import hash_password
+
+    first = getpass.getpass("Web password: ")
+    if not first:
+        print("error: empty password", file=sys.stderr)
+        return 2
+    if getpass.getpass("Again: ") != first:
+        print("error: the passwords don't match", file=sys.stderr)
+        return 2
+    print(hash_password(first))
+    return 0
 
 
 if __name__ == "__main__":
