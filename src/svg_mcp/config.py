@@ -10,11 +10,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class WebAuthConfig(BaseModel):
     """Browser login for the live preview (``SVG_MCP_WEB_AUTH``; see svg_mcp.webauth).
-    Off by default. Same shape as mcp-combiner's ``web_auth``."""
+    Off by default. Same shape as mcp-combiner's ``web_auth`` (incl. the raw-password
+    mirror: ``SVG_MCP_WEB_PASSWORD``)."""
 
     mode: Literal["off", "password"] = "off"
     #: ``svg-mcp hash-password`` output; ``$SVG_MCP_WEB_PASSWORD_HASH`` wins.
     password_hash: str | None = None
+    #: RAW password; ``$SVG_MCP_WEB_PASSWORD`` wins. Hashed AT LOAD with a fresh salt
+    #: (in-memory only — never persisted; the cookies' signing key file is separate).
+    #: Explicit hash wins over this (the hash-artifact path keeps working).
+    password: str | None = None
     session_days: float = 30.0
     #: preview URLs handed to MCP clients (``start_preview``) carry a login ticket.
     tickets: bool = True
@@ -62,17 +67,31 @@ class Settings(BaseSettings):
     web_password_hash: str | None = None
     """Overrides ``web_auth.password_hash`` (``SVG_MCP_WEB_PASSWORD_HASH``)."""
 
+    web_password: str | None = None
+    """Raw password override (``SVG_MCP_WEB_PASSWORD``): hashed at load into
+    ``web_auth.password_hash`` with a fresh salt; the explicit hash env wins."""
+
     @model_validator(mode="after")
     def _resolve_web_auth(self) -> Self:
+        overrides: dict[str, str] = {}
         if self.web_password_hash:
-            self.web_auth = self.web_auth.model_copy(
-                update={"password_hash": self.web_password_hash}
-            )
+            overrides["password_hash"] = self.web_password_hash
+        elif self.web_auth.password_hash is None and self.web_password:
+            # hash-over-raw precedence: an explicitly provided hash (this env, or the nested
+            # JSON) always wins; the raw password is hashed HERE, at load, with a fresh salt
+            # — held in memory only (same fail-open shape as toucan/mcp-combiner: neither
+            # set ⇒ auth off).
+            from .webauth import hash_password  # noqa: PLC0415 — avoid a webauth→config cycle
+
+            overrides["password_hash"] = hash_password(self.web_password)
+        if overrides:
+            self.web_auth = self.web_auth.model_copy(update=overrides)
         stored = self.web_auth.password_hash
         if self.web_auth.mode == "password" and not (stored and stored.startswith("scrypt$")):
             raise ValueError(
-                "web_auth.mode 'password' needs web_auth.password_hash "
-                "(or SVG_MCP_WEB_PASSWORD_HASH) — run `svg-mcp hash-password`"
+                "web_auth.mode 'password' needs web_auth.password_hash, "
+                "web_auth.password (SVG_MCP_WEB_PASSWORD) or SVG_MCP_WEB_PASSWORD_HASH "
+                "— run `svg-mcp hash-password`"
             )
         return self
 
