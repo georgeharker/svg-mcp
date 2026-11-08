@@ -286,66 +286,67 @@ class Signer:
 
 # ── "this machine" ─────────────────────────────────────────────────
 
+#: The machine's OWN NON-LOOPBACK addresses, replaced whole by the refresher and
+#: read WITHOUT a lock on the request path (an atomic frozenset swap — the
+#: combiner's shape). Refreshed at gate-configuration time and then every 60s by
+#: a daemon thread; UNTIL THE FIRST REFRESH COMPLETES it is empty, so only
+#: loopback counts as local (fail closed per the spec).
+_own_addresses: frozenset[str] = frozenset()
+_own_lock = threading.Lock()
+_own_refresher: threading.Thread | None = None
+_LOCAL_REFRESH_S = 60.0
+
+
+def refresh_local_addresses() -> None:
+    """Re-compute the machine's own non-loopback addresses, REPLACING the set whole.
+
+    One refresh = `ifconfig -a` (falling back to `ip -o addr show` for Linux
+    without net-tools), parsing the `inet X` / `inet addr:X` / `inet X/24` forms,
+    plus the tailnet IP asked fresh (`tailscale status --json --peers=false` →
+    Self.TailscaleIPs, falling back to `tailscale ip -4`) — the tailnet address is
+    NOT cached across refreshes (a laptop that changes networks is picked up on
+    the next one). Owned addresses that no longer exist drop out the same way. A
+    failed refresh keeps the last good set."""
+    global _own_addresses
+    try:
+        found = _interface_addresses() | _tailnet_ips()
+        found = {a for a in found if not _is_loopback_str(a)}
+        _own_addresses = frozenset(_canonical(a) for a in found)
+    except Exception:
+        logger.warning("web_auth: local-address refresh failed; keeping the last good set")
+
+
+def start_local_refresh() -> None:
+    """Start the daemon refresher (refresh once, then every 60s) — called by
+    `configure` when web_auth is on AND exempt_local is true; idempotent."""
+    global _own_refresher
+    with _own_lock:
+        if _own_refresher is not None:
+            return
+        _own_refresher = threading.Thread(
+            target=_refresh_loop, daemon=True, name="webauth-local-refresh"
+        )
+        _own_refresher.start()
+
+
+def _refresh_loop() -> None:
+    refresh_local_addresses()  # at startup (of the thread)
+    while True:
+        time.sleep(_LOCAL_REFRESH_S)
+        refresh_local_addresses()
+
+
 _local_lock = threading.Lock()
-_local: frozenset[str] | None = None
+_own_lock = threading.Lock()
 
 #: Tailscale's reserved address block (Shared Address Space / CGNAT range).
 _TAILSCALE_V4_NET = ipaddress.ip_network("100.64.0.0/10")
 
 
-def local_addresses() -> frozenset[str]:
-    """Every address of this machine (loopback, interfaces, tailnet), cached.
-
-    Cold start runs the subprocesses ON THE REQUEST PATH once (bounded by their 2s
-    timeouts); afterwards a background thread refreshes the set every 60s (the
-    mirror's periodic-refresh item — requests never run the subprocesses again, so
-    a flapping interface updates without stalling a gate check)."""
-    global _local, _refresher
-    with _local_lock:
-        if _local is not None:
-            return _local
-        found = {"127.0.0.1", "::1"}
-        found.update(_interface_addresses())
-        ip = _tailnet_ip()
-        if ip:
-            found.add(ip)
-        _local = frozenset(_canonical(a) for a in found)
-    if _refresher is None:
-        _refresher = threading.Thread(
-            target=_refresh_loop, daemon=True, name="webauth-local-refresh"
-        )
-        _refresher.start()
-    return _local
-
-
-_local_refresh_interval = 60.0
-_refresher: threading.Thread | None = None
-
-
-def _refresh_loop() -> None:
-    """Re-compute the machine's address set every 60s, OFF the request path."""
-    while True:
-        time.sleep(_local_refresh_interval)
-        try:
-            found = {"127.0.0.1", "::1"}
-            found.update(_interface_addresses())
-            ip = _tailnet_ip()
-            if ip:
-                found.add(ip)
-            with _local_lock:
-                global _local
-                _local = frozenset(_canonical(a) for a in found)
-        except Exception:
-            logger.warning("local-address refresh failed; keeping the previous set")
-
-
-def reset_local_addresses() -> None:
-    global _local
-    with _local_lock:
-        _local = None
-
-
 def is_local(client_host: str | None) -> bool:
+    """Loopback is ALWAYS local; everything else must be in the refreshed set of
+    this machine's own non-loopback addresses (empty until the first refresh —
+    fail closed per the spec)."""
     if not client_host:
         return False
     canonical = _canonical(client_host)
@@ -354,7 +355,14 @@ def is_local(client_host: str | None) -> bool:
             return True
     except ValueError:
         return False
-    return canonical in local_addresses()
+    return canonical in _own_addresses
+
+
+def reset_local_addresses() -> None:
+    """Clear the refreshed set (test isolation)."""
+    global _own_addresses
+    with _own_lock:
+        _own_addresses = frozenset()
 
 
 def _canonical(address: str) -> str:
@@ -366,41 +374,89 @@ def _canonical(address: str) -> str:
     return str(mapped or ip)
 
 
-def _interface_addresses() -> set[str]:
-    ifc = shutil.which("ifconfig")
-    if ifc is None:
-        return set()
+def _is_loopback_str(address: str) -> bool:
     try:
-        out = subprocess.run(
-            [ifc, "-a"], capture_output=True, text=True, timeout=2.0, check=False
-        ).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return set()
+        return ipaddress.ip_address(_canonical(address)).is_loopback
+    except ValueError:
+        return False
+
+
+def _interface_addresses() -> set[str]:
+    """Interface addresses: `ifconfig -a`, falling back to (and ALSO trying in
+    parallel-order) `ip -o addr show` (Linux without net-tools). Understands the
+    `inet X`, `inet addr:X` and `inet X/24` output forms — both tools' results
+    accumulate (one machine can have both tools and multiple interfaces)."""
     found: set[str] = set()
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0] in ("inet", "inet6"):
-            found.add(parts[1].removeprefix("addr:"))
+    for argv in (
+        (shutil.which("ifconfig") or "", "-a"),
+        (shutil.which("ip") or "", "-o", "addr", "show"),
+    ):
+        if not argv[0]:
+            continue
+        try:
+            out = subprocess.run(
+                [argv[0], *argv[1:]],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                check=False,
+            ).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        for line in (out or "").splitlines():
+            parts = line.split()
+            for entry_index, part in enumerate(parts):
+                if part not in ("inet", "inet6") or entry_index + 1 >= len(parts):
+                    continue
+                candidate = parts[entry_index + 1]
+                if candidate.startswith("addr:"):
+                    candidate = candidate.removeprefix("addr:")
+                candidate = candidate.partition("/")[0]  # inet X/24 (ip -o form)
+                if candidate and not candidate.endswith("%"):
+                    found.add(candidate)
     return found
 
 
-def _tailnet_ip() -> str | None:
-    """This machine's tailnet IPv4 (``tailscale ip -4``), or ``None``."""
+def _tailnet_ips() -> set[str]:
+    """This machine's tailnet addresses, asked FRESH on every refresh.
+
+    `tailscale status --json --peers=false` (Self.TailscaleIPs) falling back to
+    `tailscale ip -4`; the per-process address cache is not consulted."""
     if shutil.which("tailscale") is None:
-        return None
+        return set()
+    ips: set[str] = set()
+    try:
+        out = subprocess.run(
+            ["tailscale", "status", "--json", "--peers=false"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        ).stdout
+        parsed = json.loads(out or "{}")
+        for ip in ((parsed.get("Self") or {}).get("TailscaleIPs")) or []:
+            try:
+                if ipaddress.ip_address(ip) in _TAILSCALE_V4_NET or ":" in ip:
+                    ips.add(str(ip))
+            except ValueError:
+                continue
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+    if ips:
+        return ips
     try:
         out = subprocess.run(
             ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=2.0, check=False
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return ips
     for line in (out or "").splitlines():
         try:
             if ipaddress.ip_address(line.strip()) in _TAILSCALE_V4_NET:
-                return line.strip()
+                ips.add(line.strip())
         except ValueError:
             continue
-    return None
+    return ips
 
 
 # ── the browser's address behind a local proxy ─────────────────────
@@ -412,15 +468,14 @@ def client_address(peer: str | None, forwarded_for: list[str]) -> str | None:
     it (uvicorn's ``ProxyHeadersMiddleware`` rule, which mcp-combiner relies
     on). Headers from any other peer are ignored.
 
-    A trusted proxy that sends NO ``X-Forwarded-For`` names only ITSELF —
-    treating that as the browser would exempt every remote browser arriving
-    through an ``ssh -L``/``socat``-style hop — so this returns ``None`` (an
-    address that is never local) and the login gate stays on."""
+    A loopback peer with NO ``X-Forwarded-For`` IS loopback — always local, per
+    the combiner's trust model (a direct local browser, or a tunnel hop, both
+    count as this machine)."""
     if peer is None or _canonical(peer) not in TRUSTED_PROXIES:
         return peer
     hops = [_host_of(h) for value in forwarded_for for h in value.split(",") if h.strip()]
     if not hops:
-        return None  # trusted proxy, no forwarding: the real browser is unknown
+        return peer
     for hop in reversed(hops):
         if _canonical(hop) not in TRUSTED_PROXIES:
             return hop

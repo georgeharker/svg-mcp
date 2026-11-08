@@ -15,6 +15,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
@@ -23,6 +24,11 @@ from pydantic import ValidationError
 
 from svg_mcp import config, preview, webauth, webgate
 from svg_mcp.config import Settings, WebAuthConfig
+
+#: The REAL interface-address function, captured before the autouse fixture mocks it
+#: (the parsing test restores it so it can run fake subprocess output through the
+#: real parser).
+_REAL_INTERFACE_ADDRESSES = webauth._interface_addresses
 
 PASSWORD = "correct horse battery staple"
 #: ``mcp-combiner hash-password`` output for PASSWORD: the formats are shared.
@@ -40,8 +46,9 @@ def _clean(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for var in ("SVG_MCP_WEB_AUTH", "SVG_MCP_WEB_AUTH__MODE", "SVG_MCP_WEB_PASSWORD_HASH"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"192.168.1.20"})
-    monkeypatch.setattr(webauth, "_tailnet_ip", lambda: "100.66.1.2")
+    monkeypatch.setattr(webauth, "_tailnet_ips", lambda: {"100.66.1.2"})
     webauth.reset_local_addresses()
+    webauth.refresh_local_addresses()
     webauth.reset_failures()
     webgate.configure(WebAuthConfig())
     yield
@@ -111,9 +118,10 @@ class TestThisMachine:
         assert webauth.client_address("127.0.0.1", ["100.64.9.9"]) == "100.64.9.9"
         assert webauth.client_address("::1", ["1.2.3.4, 100.64.9.9:5"]) == "100.64.9.9"
         assert webauth.client_address("127.0.0.1", ["100.64.9.9", "127.0.0.1"]) == "100.64.9.9"
-        # A trusted proxy that sends NO X-Forwarded-For: the real browser is unknown
-        # (the ssh -L / socat bypass) — the address does not silently become loopback.
-        assert webauth.client_address("127.0.0.1", []) is None
+        # A loopback peer with NO X-Forwarded-For IS loopback — always local, per
+        # the combiner's trust model (George's directive supersedes the earlier
+        # 0.10.2 ssh -L hardening): peers themselves, not unknowns.
+        assert webauth.client_address("127.0.0.1", []) == "127.0.0.1"
         # Anyone else's header is ignored: they can't claim to be this machine.
         assert webauth.client_address("100.64.9.9", ["127.0.0.1"]) == "100.64.9.9"
 
@@ -343,19 +351,12 @@ class TestLogin:
         assert status == 303
 
     def test_this_machine_is_exempt(self, site: _Preview, signer: webauth.Signer) -> None:
-        # Hardened semantics: a loopback peer is also a loopback PROXY peer
-        # (127.0.0.1 is in TRUSTED_PROXIES), and a proxy that sends NO
-        # X-Forwarded-For leaves the real browser UNKNOWN — so the exemption
-        # now requires a direct, non-proxied request (peer not in the trusted
-        # set) or a genuine X-Forwarded-For naming a local address. Both cases:
+        # Combiner trust model: a loopback peer IS this machine (whether a direct
+        # browser or an ssh -L proxy hop) — exempt with or without X-Forwarded-For.
         _gate_on(signer, exempt_local=True)
-        # (1) loopback peer with no XFF at all: that is exactly the shape of an
-        # ssh -L / socat hop — the real browser's address is unknown, so the
-        # login stays on (the old shortcut that made remote browsers exempt).
-        assert site.get(f"/{TOKEN}/", **HTML)[0] == 303
-        # (2) a request whose peer is NOT one of the trusted proxy addresses
-        # (e.g. a browser arriving directly from a non-loopback interface or a
-        # remote site) keeps its own address — the proxy rule never fires.
+        assert site.get(f"/{TOKEN}/", **HTML)[0] == 200
+        # (2) peers that are not trusted-proxy addresses keep their own address —
+        # the proxy rule never fires for them.
         assert webauth.client_address("8.8.8.8", []) == "8.8.8.8"
         assert webauth.client_address("100.64.9.9", []) == "100.64.9.9"
 
@@ -507,14 +508,12 @@ class TestTicketOneShot:
 
 class TestStrictConfig:
     def test_unknown_web_auth_keys_fail_startup(self) -> None:
-        from typing import Any, cast
-
         from svg_mcp.config import WebAuthConfig as C
 
         # extra='forbid': typos must fail loudly. The kwargs are built from a str-
-        # valued dict and cast — the intentionally-typed params can't be spelled
-        # statically next to the intentionally-unknown key.
-        kwargs = cast("dict[str, Any]", {"mode": "password", "bogus_key": "x"})
+        # valued dict — the intentionally-typed params can't be spelled statically
+        # next to the intentionally-unknown key.
+        kwargs: dict[str, Any] = {"mode": "password", "bogus_key": "x"}  # unknown key
         with pytest.raises(ValidationError, match="bogus_key"):
             C(**kwargs)
 
@@ -538,3 +537,79 @@ class TestEnvPopped:
         import os
 
         assert "SVG_MCP_WEB_PASSWORD" not in os.environ
+
+
+class TestLocalAddressRefresh:
+    def test_before_the_first_refresh_only_loopback_is_local(self) -> None:
+        webauth.reset_local_addresses()  # sets the empty (fail-closed) set
+        try:
+            assert webauth.is_local("127.0.0.1") is True  # loopback always
+            assert webauth.is_local("192.168.1.20") is False  # not yet refreshed
+            assert webauth.is_local("100.66.1.2") is False
+        finally:
+            webauth.refresh_local_addresses()
+
+    def test_a_refresh_picks_up_and_drops_addresses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        webauth.reset_local_addresses()
+        try:
+            monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"192.168.1.20"})
+            monkeypatch.setattr(webauth, "_tailnet_ips", lambda: set())
+            webauth.refresh_local_addresses()
+            assert "192.168.1.20" in webauth._own_addresses  # noqa: SLF001 — under test
+            # A laptop changes networks: the old address is dropped, the new picked up.
+            monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"10.9.9.9"})
+            webauth.refresh_local_addresses()
+            assert webauth._own_addresses == frozenset({"10.9.9.9"})  # noqa: SLF001
+        finally:
+            webauth.refresh_local_addresses()
+
+    def test_a_failed_refresh_keeps_the_last_good_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        webauth.reset_local_addresses()
+        try:
+            monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"192.168.1.20"})
+            monkeypatch.setattr(webauth, "_tailnet_ips", lambda: set())
+            webauth.refresh_local_addresses()
+            assert webauth._own_addresses == frozenset({"192.168.1.20"})  # noqa: SLF001
+
+            def _boom() -> set[str]:
+                raise RuntimeError("ifconfig exploded")
+
+            monkeypatch.setattr(webauth, "_interface_addresses", _boom)
+            webauth.refresh_local_addresses()  # must not raise
+            assert webauth._own_addresses == frozenset({"192.168.1.20"})  # noqa: SLF001
+        finally:
+            webauth.refresh_local_addresses()
+
+    def test_interface_parsing_forms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # `ifconfig -a` and `ip -o addr show` output forms, incl. the addr: and /len
+        # shapes and an inet6 zone-suffix: all canonicalised into the same address.
+
+        def fake_run(argv: list[str], **kwargs: Any) -> Any:
+            out = ""
+            if "ifconfig" in argv[0]:
+                out = "en0: flags=...\n\tinet 192.168.1.20 netmask 0xffffff00\n"
+            elif "addr" in argv:
+                out = (
+                    "2: enp3s0    inet 10.9.9.9/24 brd 10.9.9.255\n"
+                    "3: enp3s0    inet6 fe80::1%enp3s0/64\n"
+                )
+
+            class _Result:
+                stdout = out
+
+            return _Result()
+
+        monkeypatch.setattr("svg_mcp.webauth.shutil.which", lambda name: "/usr/sbin/" + name)
+        monkeypatch.setattr("svg_mcp.webauth.subprocess.run", fake_run)
+        # Restore the REAL interface function (the fixture mocked it): the point here is
+        # the PARSER, run through real subprocess output via the fake `subprocess.run`.
+        monkeypatch.setattr(webauth, "_interface_addresses", _REAL_INTERFACE_ADDRESSES)
+        monkeypatch.setattr(webauth, "_tailnet_ips", lambda: set())
+        webauth.reset_local_addresses()
+        try:
+            webauth.refresh_local_addresses()
+            assert webauth._own_addresses >= frozenset({"192.168.1.20", "10.9.9.9"})  # noqa: SLF001
+        finally:
+            webauth.refresh_local_addresses()
