@@ -31,6 +31,17 @@ class WebAuthConfig(BaseModel):
     #: requests from this machine's own addresses skip the login.
     exempt_local: bool = True
 
+    @model_validator(mode="after")
+    def _validate_session_days(self) -> Self:
+        if self.session_days <= 0:
+            raise ValueError(
+                f"web_auth.session_days must be positive (got {self.session_days}) — "
+                "a non-positive session is an unbounded or expired login, never a "
+                "sensible default (the strict-config rule: non-positive values are "
+                "startup errors, not silent defaults)"
+            )
+        return self
+
 
 class Settings(BaseSettings):
     """Process-wide settings.

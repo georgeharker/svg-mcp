@@ -215,8 +215,38 @@ def _safe_next(raw: str | None) -> str:
     return raw
 
 
-def login(request: GateRequest, form: dict[str, str] | None = None) -> Reply:
-    """``GET /auth/login`` shows the form; ``POST`` (with *form*) checks it."""
+def reserve_login(request: GateRequest) -> Reply | None:
+    """Reserve the login concurrency slot BEFORE the body is read (mirror-faithful
+    ordering): per-address in-flight + recorded failures against the cap, plus the
+    overall budget. ``None`` = reserved (release with `release_login`); a Reply =
+    the 429 refusal."""
+    state = _current()
+    if state.config.mode != "password" or state.signer is None:
+        return None
+    client = request.client or "?"
+    if not webauth.login_attempt_admitted(client):
+        return authpages.login_page(
+            "/", error="Too many attempts — wait a minute and try again.", status=429
+        )
+    return None
+
+
+def release_login(request: GateRequest) -> None:
+    """Release the reservation made by `reserve_login` (call from a finally)."""
+    webauth.login_attempt_done(request.client or "?")
+
+
+def login(
+    request: GateRequest,
+    form: dict[str, str] | None = None,
+    *,
+    admitted_already: bool = False,
+) -> Reply:
+    """``GET /auth/login`` shows the form; ``POST`` (with *form*) checks it.
+
+    `admitted_already`: the caller (preview's `_auth_route`) reserved the
+    concurrency slot BEFORE the body was read — the admission is not repeated
+    here, and its release stays with the caller."""
     state = _current()
     if state.config.mode != "password" or state.signer is None:
         return _plain(404, "web login is not enabled")
@@ -225,11 +255,10 @@ def login(request: GateRequest, form: dict[str, str] | None = None) -> Reply:
     if request.method != "POST" or form is None:
         return authpages.login_page(target)
     client = request.client or "?"
-    # Concurrency + budget reservation BEFORE the body is hashed: in-flight attempts
-    # + recorded failures share the per-address cap, the overall budget applies, and
-    # the scrypt cap bounds parallel hash work (threaded server — parallel guesses
-    # cannot each see zero failures).
-    if not webauth.login_attempt_admitted(client):
+    # Concurrency + budget reservation before the body is hashed when the caller has
+    # not already reserved (in-flight + failures share the per-address cap, the
+    # overall budget applies) — direct/testing callers reserve here.
+    if not admitted_already and not webauth.login_attempt_admitted(client):
         return authpages.login_page(
             target, error="Too many attempts — wait a minute and try again.", status=429
         )
