@@ -45,6 +45,47 @@ logger = logging.getLogger(__name__)
 COOKIE = "svgmcp_session"
 TICKET_PARAM = "t"
 TICKET_TTL_S = 300
+#: A ticket is a one-shot capability by default (the combiner's format note: tickets
+#: carry a random id "j"); redemptions are counted in memory until expiry — there is
+#: no replay within the 5-minute window for a URL that leaks into a transcript.
+TICKET_USES = 1
+
+#: ``(j, subject) -> (exp, remaining_uses)`` — in-memory redemption ledger."""
+_ticket_ledger: dict[tuple[str, str], tuple[float, int]] = {}
+
+
+def ticket_admit(claims: dict[str, Any]) -> bool:
+    """Count one redemption of the ``j``-identified ticket in `claims`.
+
+    Ledger entries live until the ticket's own expiry; a j-less legacy ticket (or
+    an exhausted/absent id) is refused. An EXPIRED ledger entry keeps its dead
+    state for the same id — re-seeding a replayed j must not re-admit."""
+    j = claims.get("j")
+    subject = claims.get("sub")
+    exp = claims.get("exp")
+    if not isinstance(j, str) or not isinstance(subject, str) or not isinstance(exp, (int, float)):
+        return False
+    key = (j, subject)
+    now = time.time()
+    existing = _ticket_ledger.get(key)
+    if existing is not None:
+        expires, left = existing
+        if expires < now:  # dead: the same j must not re-seed on a replay
+            return False
+        if left <= 0:
+            return False
+        _ticket_ledger[key] = (expires, left - 1)
+        return True
+    for key2 in [k for k, (when, _left) in _ticket_ledger.items() if when < now]:
+        del _ticket_ledger[key2]
+    _ticket_ledger[key] = (float(exp), TICKET_USES - 1)
+    return True
+
+
+#: A ticket is a one-shot capability by default (the combiner's format note: tickets
+#: carry a random id "j"); redemptions are counted in memory until expiry — there is
+#: no replay within the 5-minute window for a URL that leaks into a transcript.
+TICKET_USES = 1
 LOGIN_PATH = "/auth/login"
 LOGOUT_PATH = "/auth/logout"
 
@@ -198,7 +239,17 @@ class Signer:
         return self.sign(claims)
 
     def ticket(self, subject: str, ttl_s: int = TICKET_TTL_S) -> str:
-        return self.sign({"v": 1, "k": "t", "sub": subject, "exp": int(time.time()) + ttl_s})
+        """One-shot ticket with a random id (claim ``j`` — combiner format): the id is
+        redeemed `TICKET_USES` times at most, counted in memory until expiry."""
+        return self.sign(
+            {
+                "v": 1,
+                "k": "t",
+                "sub": subject,
+                "j": secrets.token_urlsafe(6),
+                "exp": int(time.time()) + ttl_s,
+            }
+        )
 
 
 # ── "this machine" ─────────────────────────────────────────────────
@@ -355,11 +406,57 @@ def too_many_failures(client_host: str) -> bool:
         return len(window) >= _FAILURES_PER_MINUTE
 
 
+# In-flight logins + cross-address budget: a threaded server serves parallel logins,
+# which the completed-failures window alone does not count — 40 parallel wrong
+# guesses would each see zero failures. Attempts are RESERVED (before the body is
+# read or scrypt runs) and released on completion, and an OVERALL failure budget
+# across all addresses caps rotated-XFF flooding.
+_LOGIN_BUDGET: deque[float] = deque()
+_FAILURE_BUDGET_ALL = 30
+_LOGIN_INFLIGHT: defaultdict[str, int] = defaultdict(int)
+_LOGIN_INFLIGHT_MAX = _FAILURES_PER_MINUTE
+
+
+def login_attempt_admitted(client_host: str) -> bool:
+    """Reserve an in-flight login attempt BEFORE the body is read or scrypt runs.
+
+    Per-address: in-flight + recently failed must stay under the cap. Overall: the
+    cross-address failure budget applies. Release with `login_attempt_done`."""
+    with _failures_lock:
+        now = time.monotonic()
+        window = _failures[client_host]
+        while window and now - window[0] > 60:
+            window.popleft()
+        _prune_locked(now)
+        while _LOGIN_BUDGET and now - _LOGIN_BUDGET[0] > 60:
+            _LOGIN_BUDGET.popleft()
+        if len(window) + _LOGIN_INFLIGHT[client_host] >= _LOGIN_INFLIGHT_MAX:
+            return False
+        if len(_LOGIN_BUDGET) >= _FAILURE_BUDGET_ALL:
+            return False
+        _LOGIN_INFLIGHT[client_host] += 1
+        return True
+
+
+def login_attempt_done(client_host: str) -> None:
+    """Release the in-flight reservation — call unconditionally, from `finally`."""
+    with _failures_lock:
+        if _LOGIN_INFLIGHT[client_host] > 0:
+            _LOGIN_INFLIGHT[client_host] -= 1
+
+
 def record_failure(client_host: str) -> None:
     with _failures_lock:
-        _failures[client_host].append(time.monotonic())
+        now = time.monotonic()
+        _failures[client_host].append(now)
+        _LOGIN_BUDGET.append(now)  # the overall budget counts every failed address
 
 
 def reset_failures() -> None:
+    """Clear everything the limiter tracks (per-address windows, the overall
+    budget, in-flight reservations, the ticket ledger) — test isolation."""
     with _failures_lock:
         _failures.clear()
+        _LOGIN_BUDGET.clear()
+        _LOGIN_INFLIGHT.clear()
+    _ticket_ledger.clear()
