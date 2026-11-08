@@ -28,6 +28,9 @@ class WebAuthConfig(BaseModel):
     session_days: float = 30.0
     #: preview URLs handed to MCP clients (``start_preview``) carry a login ticket.
     tickets: bool = True
+    #: how many times a ticket id is redeemable (mcp-combiner parity: counted by
+    #: ``j`` in memory until expiry). Default one-shot.
+    ticket_uses: int = 1
     #: requests from this machine's own addresses skip the login.
     exempt_local: bool = True
 

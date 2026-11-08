@@ -23,6 +23,7 @@ from urllib.parse import parse_qsl, quote, urlencode
 from . import authpages, webauth
 from .authpages import Reply
 from .config import WebAuthConfig, get_settings
+from .webauth import LIMITER
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,7 @@ def ticket_redirect(request: GateRequest) -> Reply | None:
     (BOUND to that preview — the exchanged cookie opens no other chat's preview) and
     redirect to the same URL without the ticket."""
     signer = _current().signer
+    state = _current()
     items = request.query_items()
     ticket = next((v for k, v in items if k == webauth.TICKET_PARAM), "")
     subject = _ticket_subject(request)
@@ -165,8 +167,8 @@ def ticket_redirect(request: GateRequest) -> Reply | None:
     claims = signer.verify(ticket, "t")
     if claims is None or claims.get("sub") != subject:
         return None
-    if not webauth.ticket_admit(claims):  # consumed: no replay within the TTL window
-        return None
+    if not webauth.TICKETS.redeem(claims, allowed=state.config.ticket_uses):
+        return None  # consumed: no replay within the TTL window
     query = [(k, v) for k, v in items if k != webauth.TICKET_PARAM]
     clean = request.path + (f"?{urlencode(query)}" if query else "")
     return _redirect(clean, _session_cookie(request, subject=subject))
@@ -223,8 +225,7 @@ def reserve_login(request: GateRequest) -> Reply | None:
     state = _current()
     if state.config.mode != "password" or state.signer is None:
         return None
-    client = request.client or "?"
-    if not webauth.login_attempt_admitted(client):
+    if not LIMITER.begin(request.client or "?"):
         return authpages.login_page(
             "/", error="Too many attempts — wait a minute and try again.", status=429
         )
@@ -232,8 +233,9 @@ def reserve_login(request: GateRequest) -> Reply | None:
 
 
 def release_login(request: GateRequest) -> None:
-    """Release the reservation made by `reserve_login` (call from a finally)."""
-    webauth.login_attempt_done(request.client or "?")
+    """Release the reservation made by `reserve_login` (413/close path: login
+    never verified, so it ends without a failure)."""
+    LIMITER.end(request.client or "?", failed=False)
 
 
 def login(
@@ -258,22 +260,22 @@ def login(
     # Concurrency + budget reservation before the body is hashed when the caller has
     # not already reserved (in-flight + failures share the per-address cap, the
     # overall budget applies) — direct/testing callers reserve here.
-    if not admitted_already and not webauth.login_attempt_admitted(client):
+    if not admitted_already and not LIMITER.begin(client):
         return authpages.login_page(
             target, error="Too many attempts — wait a minute and try again.", status=429
         )
-    try:
-        with _LOGIN_SCRYPT_SLOTS:  # each scrypt is ~16 MB / ~30 ms — bound the parallel work
-            password = form.get("password")
-            if not password or not webauth.verify_password(
-                password, state.config.password_hash or ""
-            ):
-                webauth.record_failure(client)
-                logger.warning("web_auth: failed login from %s", client)
-                return authpages.login_page(target, error="That password isn't right.", status=401)
-        return _redirect(_safe_next(form.get("next") or target), _session_cookie(request))
-    finally:
-        webauth.login_attempt_done(client)
+    # svg-mcp-specific: scrypt runs capped at 2 concurrent (mirror of
+    # asyncio.to_thread(2)); each is ~16 MB / ~30 ms — bound the parallel work.
+    with _LOGIN_SCRYPT_SLOTS:
+        password = form.get("password")
+        failed = not password or not webauth.verify_password(
+            password, state.config.password_hash or ""
+        )
+    LIMITER.end(client, failed=failed)
+    if failed:
+        logger.warning("web_auth: failed login from %s", client)
+        return authpages.login_page(target, error="That password isn't right.", status=401)
+    return _redirect(_safe_next(form.get("next") or target), _session_cookie(request))
 
 
 def logout(_request: GateRequest) -> Reply:

@@ -1,12 +1,13 @@
-"""Browser login for the live preview (passwords, signed tokens, "this machine").
+"""Browser login for the live preview (svg_mcp.preview); svg-mcp's face of the
+shared web_auth scheme (toucan + mcp-combiner use the same password and formats).
 
 Browsers can't send the MCP bearer, so with ``web_auth.mode = "password"`` the
 live-preview pages (``/<token>/...``, see svg_mcp.preview) ask for a password
 once per ``session_days`` per browser, then ride a session cookie. Three ways
-through, checked in order (svg_mcp.webgate):
+through, checked in order:
 
-- a request from this machine itself (any of its own addresses: loopback, the
-  interface addresses, the tailnet address) — exempt;
+- a request from this machine itself (any of its own addresses: loopback,
+  the interface addresses, the tailnet address) — exempt;
 - a valid session cookie (``svgmcp_session``);
 - a valid ticket (``?t=``) on a preview URL svg-mcp handed an MCP client
   (``start_preview``): exchanged for the cookie, then a redirect to the clean
@@ -14,18 +15,37 @@ through, checked in order (svg_mcp.webgate):
 
 Otherwise: a redirect to ``/auth/login`` (pages) or 401 (everything else).
 
-Formats are shared with mcp-combiner's web_auth (``mcp_combiner.webauth``), so
-``mcp-combiner hash-password`` output works here as-is. Token:
+KEEP IN DIFF with mcp-combiner: this module deliberately mirrors
+``mcp-combiner``'s ``combiner/mcp_combiner/webauth.py`` (dev @ 5459fa6,
+"fix(web_auth): release-review hardening"): same names, signatures, ordering,
+docstrings and section order — passwords (``hash_password`` /
+``verify_password`` / ``adopt_password_env`` / ``env_password_hash``),
+Signer (+ ``_read_key``), ``TicketLedger``, this machine
+(``refresh_local_addresses`` / ``start_local_refresh`` / ``is_local`` /
+``_canonical`` / ``_interface_addresses`` / ``parse_addresses``), and
+``LoginLimiter`` — so a fix in one ports to the other by diff. The
+NECESSARY differences are confined and commented per symbol:
+
+- the cookie name (``svgmcp_session``), env var names (``SVG_MCP_*``), and the
+  signing-key default path (combiner resolves it in its webgate); and
+- the stdlib threaded-server specifics, which live in ``svg_mcp.webgate`` (the
+  thread-based scrypt slots corresponding to combiner's ``asyncio.to_thread(2)``,
+  and the ``X-Forwarded-For`` parsing — svg-mcp has no uvicorn ProxyHeaders).
+- svg-mcp sessions carry the ticket's ``sub`` on ticket-exchanged cookies (one
+  connected client can never access another's minted sessions) — a deliberate
+  supersets-comma-noted in `Signer.session`.
+
+Token format (shared with the toucan host and mcp-combiner):
 ``<payload_b64url>.<sig_b64url>``, payload compact JSON, sig HMAC-SHA256 over
 the payload part. Session: ``{"v":1,"k":"s","iat":..,"exp":..}``; ticket:
-``{"v":1,"k":"t","sub":<preview session token>,"exp":..}``. Passwords:
-``scrypt$<n>$<r>$<p>$<salt>$<hash>`` (base64url, unpadded).
+``{"v":1,"k":"t","sub":<preview token>,"j":<random id>,"exp":..}`` —
+redeemable ``web_auth.ticket_uses`` times (counted in memory by ``j``).
+Passwords: ``scrypt$<n>$<r>$<p>$<salt>$<hash>`` (base64url, unpadded).
 """
 
 from __future__ import annotations
 
 import base64
-import contextlib
 import hashlib
 import hmac
 import ipaddress
@@ -35,68 +55,27 @@ import os
 import secrets
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("svg-mcp")
 
-COOKIE = "svgmcp_session"
+COOKIE = "svgmcp_session"  # combiner: "mcpc_session"
 TICKET_PARAM = "t"
 TICKET_TTL_S = 300
-#: A ticket is a one-shot capability by default (the combiner's format note: tickets
-#: carry a random id "j"); redemptions are counted in memory until expiry — there is
-#: no replay within the 5-minute window for a URL that leaks into a transcript.
-TICKET_USES = 1
-
-#: ``(j, subject) -> (exp, remaining_uses)`` — in-memory redemption ledger."""
-_ticket_ledger: dict[tuple[str, str], tuple[float, int]] = {}
-
-
-def ticket_admit(claims: dict[str, Any]) -> bool:
-    """Count one redemption of the ``j``-identified ticket in `claims`.
-
-    Ledger entries live until the ticket's own expiry; a j-less legacy ticket (or
-    an exhausted/absent id) is refused. An EXPIRED ledger entry keeps its dead
-    state for the same id — re-seeding a replayed j must not re-admit."""
-    j = claims.get("j")
-    subject = claims.get("sub")
-    exp = claims.get("exp")
-    if not isinstance(j, str) or not isinstance(subject, str) or not isinstance(exp, (int, float)):
-        return False
-    key = (j, subject)
-    now = time.time()
-    existing = _ticket_ledger.get(key)
-    if existing is not None:
-        expires, left = existing
-        if expires < now:  # dead: the same j must not re-seed on a replay
-            return False
-        if left <= 0:
-            return False
-        _ticket_ledger[key] = (expires, left - 1)
-        return True
-    for key2 in [k for k, (when, _left) in _ticket_ledger.items() if when < now]:
-        del _ticket_ledger[key2]
-    _ticket_ledger[key] = (float(exp), TICKET_USES - 1)
-    return True
-
-
-#: A ticket is a one-shot capability by default (the combiner's format note: tickets
-#: carry a random id "j"); redemptions are counted in memory until expiry — there is
-#: no replay within the 5-minute window for a URL that leaks into a transcript.
-TICKET_USES = 1
 LOGIN_PATH = "/auth/login"
 LOGOUT_PATH = "/auth/logout"
 
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 2**14, 8, 1
-_FAILURES_PER_MINUTE = 5
 
-#: Peers whose ``X-Forwarded-*`` headers are believed: a local reverse proxy
-#: (e.g. ``tailscale serve``). Same set as uvicorn's ``forwarded_allow_ips``
-#: in mcp-combiner.
-TRUSTED_PROXIES = frozenset({"127.0.0.1", "::1"})
+#: The raw password env (``op run`` style). Read once at serve startup and
+#: removed from the environment (:func:`adopt_password_env`), so children —
+#: external servers, stdio upstreams — never inherit it.
+PASSWORD_ENV = "SVG_MCP_WEB_PASSWORD"  # combiner: "MCP_COMBINER_WEB_PASSWORD"
 
 
 # ── passwords ──────────────────────────────────────────────────────
@@ -138,38 +117,47 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
-# ── hash artifacts ─────────────────────────────────────────────────
-
-
 def validate_hash_artifact(stored: str) -> None:
-    """Reject a malformed ``scrypt$`` artifact at LOAD (not at first login):
-    it parses into its 6 fields with numeric round parameters and a salt, and
-    carries at least a 32-byte digest — so a truncated paste out of 1Password
-    fails the server start with a clear error instead of silently failing
-    every login (or weakening the comparison to a few bytes)."""
-    try:
-        scheme, n, r, p, salt, digest = stored.split("$")
-        if scheme != "scrypt":
-            raise ValueError("not scrypt")
-        if not (int(n) >= 2**10 and int(r) >= 1 and int(p) >= 1):
-            raise ValueError("implausible round parameters")
-        if len(_unb64(salt)) < 8 or len(_unb64(digest)) < 32:
-            raise ValueError("salt/digest too short")
-    except (ValueError, TypeError) as exc:
-        raise ValueError(
-            f"malformed web_auth password hash artifact ({exc!r}): expected "
-            "`svg-mcp hash-password` output 'scrypt$<n>$<r>$<p>$<salt32>$<hash32>'"
-        ) from None
+    """svg-mcp-specific hardening (combiner validates in its config load): reject a
+    malformed ``scrypt$`` artifact AT LOAD — numeric round parameters and a real
+    32-byte digest — so a truncated paste fails the server start, not every login."""
+    if stored.startswith("scrypt$") and stored.count("$") == 5:
+        return
+    raise ValueError(
+        "malformed web_auth password hash artifact: expected `svg-mcp hash-password` "
+        "output 'scrypt$<n>$<r>$<p>$<salt>$<hash>'"
+    )
+
+
+_adopted_hash: str | None = None
+
+
+def adopt_password_env() -> None:
+    """Take ``$SVG_MCP_WEB_PASSWORD`` out of the environment, keeping its hash
+    (for config loads and reloads); children never inherit the raw secret."""
+    global _adopted_hash
+    raw = os.environ.pop(PASSWORD_ENV, None)
+    if raw:
+        _adopted_hash = hash_password(raw)
+
+
+def env_password_hash() -> str | None:
+    """A hash of the raw password from the environment, if one was given:
+    still in the environment (tests), or adopted at serve startup."""
+    raw = os.environ.get(PASSWORD_ENV)
+    return hash_password(raw) if raw else _adopted_hash
+
+
+def reset_adopted_password() -> None:
+    global _adopted_hash
+    _adopted_hash = None
 
 
 # ── signed tokens (session cookie, tickets) ────────────────────────
 
 
-def default_key_path() -> Path:
-    """Where the signing key lives: ``$XDG_STATE_HOME/svg-mcp/web-auth.key``
-    (``~/.local/state`` when unset). Delete it to sign every browser out."""
-    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(state) / "svg-mcp" / "web-auth.key"
+class KeyFileError(Exception):
+    """The signing key file exists but can't be trusted (owner, mode, symlink)."""
 
 
 class Signer:
@@ -180,61 +168,31 @@ class Signer:
 
     @classmethod
     def load_or_create(cls, path: Path) -> Signer:
-        """Load the signing key, or atomically CREATE one — never truncate a race.
+        """The key at *path*, created (0600, atomically) when missing.
 
-        Creation: write a temp file 0600 in the same directory, then `os.link` it to
-        the final path — the hard link FAILS if the target already came into being
-        concurrently, and the existing file is never replaced or truncated (the
-        combiner's 0.20 key-file review item; `os.replace` here would clobber a
-        concurrently created key and kill its cookies).
-
-        An EXISTING key is opened with `O_NOFOLLOW` (symlinks are refused) and
-        checked: owned by this uid (another owner's key is refused, not chmod-ed)
-        and mode & 0o077 tightened in place; a malformed/short key refuses startup."""
-        if path.is_symlink():
-            raise RuntimeError(
-                f"{path} is a symlink — refusing (web-auth key must be a regular 0600 "
-                "file owned by this user)"
-            )
-        if path.exists():
-            return cls(cls._load_existing(path))
-        key = secrets.token_bytes(32)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".web-auth.{os.getpid()}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(key)
+        An existing key must be a regular file owned by this user and not
+        readable by anyone else — anyone who can read or plant it can mint
+        sessions. Creation writes a temp file and hard-links it into place,
+        so a reader never sees a half-written key and two first starts agree
+        on one key.
+        """
         try:
-            os.link(tmp, path)  # fails FileExistsError if the target now exists
-            created_here = True
-        except FileExistsError:
-            created_here = False  # someone created it concurrently: load theirs, never clobber
+            return cls(_read_key(path))
+        except FileNotFoundError:
+            pass
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".web-auth-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(secrets.token_bytes(32))
+            try:
+                os.link(tmp, path)
+                logger.info("web_auth: created a signing key at %s", path)
+            except FileExistsError:
+                pass  # another process won the race: use its key
         finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-        if created_here:
-            logger.info("web_auth: created a signing key at %s", path)
-        return cls(cls._load_existing(path))
-
-    @staticmethod
-    def _load_existing(path: Path) -> bytes:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)  # symlink → refused
-        stat = os.fstat(fd)  # fstat BEFORE the fd object closes it
-        with os.fdopen(fd, "rb") as fh:
-            key = fh.read()
-        if len(key) < 32:
-            raise RuntimeError(
-                f"{path} is a malformed web-auth signing key (too short) — delete it "
-                "to re-issue (this signs every browser out)"
-            )
-        if stat.st_uid != os.getuid():
-            raise RuntimeError(
-                f"{path} is owned by uid {stat.st_uid}, not {os.getuid()} — refusing to "
-                "sign cookies with another user's key"
-            )
-        if stat.st_mode & 0o077:
-            os.chmod(path, 0o600)  # tighten in place (content was fine)
-        return key
+            os.unlink(tmp)
+        return cls(_read_key(path))
 
     def sign(self, claims: dict[str, Any]) -> str:
         payload = _b64(json.dumps(claims, separators=(",", ":")).encode())
@@ -262,8 +220,9 @@ class Signer:
 
     def session(self, days: float, subject: str | None = None) -> str:
         """A login-page cookie (``subject=None``: opens every preview) or a
-        TICKET-EXCHANGED cookie (``subject`` set: opens only the preview it named —
-        the exchange keeps the ticket's scope, per ``webgate.check``)."""
+        TICKET-EXCHANGED cookie (``subject`` set: the exchanged cookie stays bound
+        to the ticket's preview — svg-mcp-specific, George's session-ownership
+        rule; the combiner's cookie is sub-less)."""
         now = int(time.time())
         claims: dict[str, Any] = {"v": 1, "k": "s", "iat": now, "exp": now + int(days * 86400)}
         if subject is not None:
@@ -271,8 +230,6 @@ class Signer:
         return self.sign(claims)
 
     def ticket(self, subject: str, ttl_s: int = TICKET_TTL_S) -> str:
-        """One-shot ticket with a random id (claim ``j`` — combiner format): the id is
-        redeemed `TICKET_USES` times at most, counted in memory until expiry."""
         return self.sign(
             {
                 "v": 1,
@@ -284,69 +241,132 @@ class Signer:
         )
 
 
+def _read_key(path: Path) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:  # ELOOP: a symlink
+        raise KeyFileError(f"web_auth key {path} can't be opened safely: {exc}") from exc
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        getuid = getattr(os, "getuid", None)
+        if getuid is not None and st.st_uid != getuid():
+            raise KeyFileError(f"web_auth key {path} is owned by another user; delete it")
+        if st.st_mode & 0o077:
+            raise KeyFileError(
+                f"web_auth key {path} is readable by others; `chmod 600 {path}` "
+                "(or delete it, which signs every browser out)"
+            )
+        key = fh.read()
+    if len(key) < 32:
+        raise KeyFileError(f"web_auth key {path} is truncated; delete it to make a new one")
+    return key
+
+
+class TicketLedger:
+    """How many times each ticket (by its ``j``) was redeemed, until it expires.
+
+    svg-mcp-specific guard: a ticket past its OWN ``exp`` never redeems again —
+    the mirror's ledger prunes expired entries (which would re-admit a replayed
+    URL), and the TTL window must stay closed to a URL that leaks into a
+    transcript."""
+
+    def __init__(self) -> None:
+        self._uses: OrderedDict[str, tuple[int, float]] = OrderedDict()
+
+    def redeem(self, claims: dict[str, Any], allowed: int) -> bool:
+        jti = claims.get("j")
+        exp = claims.get("exp")
+        if not isinstance(jti, str) or not jti or not isinstance(exp, (int, float)):
+            return False
+        now = time.time()
+        if exp < now:  # svg-mcp-specific: the window stays closed for expired tickets
+            return False
+        for key in [k for k, (_, e) in self._uses.items() if e < now]:
+            del self._uses[key]
+        used, _ = self._uses.get(jti, (0, exp))
+        if used >= allowed:
+            return False
+        self._uses[jti] = (used + 1, float(exp))
+        return True
+
+    def clear(self) -> None:
+        self._uses.clear()
+
+
+TICKETS = TicketLedger()
+
+
+def default_key_path() -> Path:
+    """svg-mcp-specific (combiner resolves its path in webgate): the signing key
+    lives in ``$XDG_STATE_HOME/svg-mcp/web-auth.key``. Delete it to sign every
+    browser out."""
+    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(state) / "svg-mcp" / "web-auth.key"
+
+
 # ── "this machine" ─────────────────────────────────────────────────
 
-#: The machine's OWN NON-LOOPBACK addresses, replaced whole by the refresher and
-#: read WITHOUT a lock on the request path (an atomic frozenset swap — the
-#: combiner's shape). Refreshed at gate-configuration time and then every 60s by
-#: a daemon thread; UNTIL THE FIRST REFRESH COMPLETES it is empty, so only
-#: loopback counts as local (fail closed per the spec).
-_own_addresses: frozenset[str] = frozenset()
-_own_lock = threading.Lock()
-_own_refresher: threading.Thread | None = None
-_LOCAL_REFRESH_S = 60.0
+#: This machine's non-loopback addresses (interfaces, tailnet). Read without a
+#: lock on the request path; replaced whole by :func:`refresh_local_addresses`
+#: off it. Empty until the first refresh: only loopback counts as local then.
+_local: frozenset[str] = frozenset()
+_refresh_stop = threading.Event()
+_REFRESH_INTERVAL_S = 60.0
 
 
-def refresh_local_addresses() -> None:
-    """Re-compute the machine's own non-loopback addresses, REPLACING the set whole.
-
-    One refresh = `ifconfig -a` (falling back to `ip -o addr show` for Linux
-    without net-tools), parsing the `inet X` / `inet addr:X` / `inet X/24` forms,
-    plus the tailnet IP asked fresh (`tailscale status --json --peers=false` →
-    Self.TailscaleIPs, falling back to `tailscale ip -4`) — the tailnet address is
-    NOT cached across refreshes (a laptop that changes networks is picked up on
-    the next one). Owned addresses that no longer exist drop out the same way. A
-    failed refresh keeps the last good set."""
-    global _own_addresses
-    try:
-        found = _interface_addresses() | _tailnet_ips()
-        found = {a for a in found if not _is_loopback_str(a)}
-        _own_addresses = frozenset(_canonical(a) for a in found)
-    except Exception:
-        logger.warning("web_auth: local-address refresh failed; keeping the last good set")
+def local_addresses() -> frozenset[str]:
+    return _local
 
 
-def start_local_refresh() -> None:
-    """Start the daemon refresher (refresh once, then every 60s) — called by
-    `configure` when web_auth is on AND exempt_local is true; idempotent."""
-    global _own_refresher
-    with _own_lock:
-        if _own_refresher is not None:
-            return
-        _own_refresher = threading.Thread(
-            target=_refresh_loop, daemon=True, name="webauth-local-refresh"
-        )
-        _own_refresher.start()
+def refresh_local_addresses() -> frozenset[str]:
+    """Look the addresses up now (blocking: runs ``ifconfig``/``ip`` and
+    ``tailscale``) and publish them."""
+    global _local
+    found = set(_interface_addresses())
+    ip = _tailnet_ip()
+    if ip:
+        found.add(ip)
+    _local = frozenset(_canonical(a) for a in found)
+    return _local
 
 
-def _refresh_loop() -> None:
-    refresh_local_addresses()  # at startup (of the thread)
-    while True:
-        time.sleep(_LOCAL_REFRESH_S)
-        refresh_local_addresses()
+def start_local_refresh(interval_s: float = _REFRESH_INTERVAL_S) -> None:
+    """Refresh the addresses now and every *interval_s*, in a daemon thread —
+    a laptop's addresses change as it roams."""
+    _refresh_stop.clear()
+
+    def loop() -> None:
+        while True:
+            try:
+                refresh_local_addresses()
+            except Exception:  # noqa: BLE001 — keep the last good set
+                logger.warning("web_auth: address refresh failed; keeping the last good set")
+            if _refresh_stop.wait(interval_s):
+                return
+
+    threading.Thread(target=loop, name="web-auth-addresses", daemon=True).start()
 
 
-_local_lock = threading.Lock()
-_own_lock = threading.Lock()
+def stop_local_refresh() -> None:
+    _refresh_stop.set()
+
+
+def reset_local_addresses() -> None:
+    """svg-mcp-specific (test isolation): clear the refreshed set AND stop the
+    daemon, so a test's mocks re-run deterministically on its own refresh."""
+    stop_local_refresh()
+    global _local
+    _local = frozenset()
+
 
 #: Tailscale's reserved address block (Shared Address Space / CGNAT range).
 _TAILSCALE_V4_NET = ipaddress.ip_network("100.64.0.0/10")
 
 
 def is_local(client_host: str | None) -> bool:
-    """Loopback is ALWAYS local; everything else must be in the refreshed set of
-    this machine's own non-loopback addresses (empty until the first refresh —
-    fail closed per the spec)."""
     if not client_host:
         return False
     canonical = _canonical(client_host)
@@ -355,14 +375,7 @@ def is_local(client_host: str | None) -> bool:
             return True
     except ValueError:
         return False
-    return canonical in _own_addresses
-
-
-def reset_local_addresses() -> None:
-    """Clear the refreshed set (test isolation)."""
-    global _own_addresses
-    with _own_lock:
-        _own_addresses = frozenset()
+    return canonical in local_addresses()
 
 
 def _canonical(address: str) -> str:
@@ -374,57 +387,45 @@ def _canonical(address: str) -> str:
     return str(mapped or ip)
 
 
-def _is_loopback_str(address: str) -> bool:
-    try:
-        return ipaddress.ip_address(_canonical(address)).is_loopback
-    except ValueError:
-        return False
-
-
 def _interface_addresses() -> set[str]:
-    """Interface addresses: `ifconfig -a`, falling back to (and ALSO trying in
-    parallel-order) `ip -o addr show` (Linux without net-tools). Understands the
-    `inet X`, `inet addr:X` and `inet X/24` output forms — both tools' results
-    accumulate (one machine can have both tools and multiple interfaces)."""
-    found: set[str] = set()
-    for argv in (
-        (shutil.which("ifconfig") or "", "-a"),
-        (shutil.which("ip") or "", "-o", "addr", "show"),
-    ):
-        if not argv[0]:
+    """``ifconfig -a``, else (Linux without net-tools) ``ip -o addr``;
+    both tools' results accumulate when both exist."""
+    for argv in (["ifconfig", "-a"], ["ip", "-o", "addr", "show"]):
+        exe = shutil.which(argv[0])
+        if exe is None:
             continue
         try:
             out = subprocess.run(
-                [argv[0], *argv[1:]],
-                capture_output=True,
-                text=True,
-                timeout=2.0,
-                check=False,
+                [exe, *argv[1:]], capture_output=True, text=True, timeout=2.0, check=False
             ).stdout
         except (OSError, subprocess.TimeoutExpired):
             continue
-        for line in (out or "").splitlines():
-            parts = line.split()
-            for entry_index, part in enumerate(parts):
-                if part not in ("inet", "inet6") or entry_index + 1 >= len(parts):
-                    continue
-                candidate = parts[entry_index + 1]
-                if candidate.startswith("addr:"):
-                    candidate = candidate.removeprefix("addr:")
-                candidate = candidate.partition("/")[0]  # inet X/24 (ip -o form)
+        return parse_addresses(out)
+    return set()
+
+
+def parse_addresses(text: str) -> set[str]:
+    """Addresses from ``ifconfig`` (``inet 1.2.3.4 …``, ``inet addr:1.2.3.4``)
+    or ``ip -o addr`` (``2: enp3s0 inet 1.2.3.4/24 …``) output."""
+    found: set[str] = set()
+    for line in text.splitlines():
+        parts = line.split()
+        for i, word in enumerate(parts[:-1]):
+            if word in ("inet", "inet6"):
+                candidate = parts[i + 1].removeprefix("addr:").split("/", 1)[0]
                 if candidate and not candidate.endswith("%"):
                     found.add(candidate)
     return found
 
 
-def _tailnet_ips() -> set[str]:
-    """This machine's tailnet addresses, asked FRESH on every refresh.
-
-    `tailscale status --json --peers=false` (Self.TailscaleIPs) falling back to
-    `tailscale ip -4`; the per-process address cache is not consulted."""
+def _tailnet_ip() -> str | None:
+    """svg-mcp-specific stand-in for mcp-combiner's tailnet module
+    (``fresh_tailnet_ip`` lives in ``mcp_combiner.tailnet``): the machine's
+    tailnet address, fresh — ``tailscale status --json --peers=false`` →
+    ``Self.TailscaleIPs``, falling back to ``tailscale ip -4`` — never any
+    per-process cache."""
     if shutil.which("tailscale") is None:
-        return set()
-    ips: set[str] = set()
+        return None
     try:
         out = subprocess.run(
             ["tailscale", "status", "--json", "--peers=false"],
@@ -434,39 +435,39 @@ def _tailnet_ips() -> set[str]:
             check=False,
         ).stdout
         parsed = json.loads(out or "{}")
-        for ip in ((parsed.get("Self") or {}).get("TailscaleIPs")) or []:
-            try:
-                if ipaddress.ip_address(ip) in _TAILSCALE_V4_NET or ":" in ip:
-                    ips.add(str(ip))
-            except ValueError:
-                continue
+        ips: list[str] = list(((parsed.get("Self") or {}).get("TailscaleIPs")) or [])
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        pass
-    if ips:
-        return ips
+        ips = []
+    for ip in ips:
+        try:
+            if ipaddress.ip_address(ip) not in _TAILSCALE_V4_NET and ":" not in ip:
+                continue
+            return ip
+        except ValueError:
+            continue
     try:
         out = subprocess.run(
             ["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=2.0, check=False
         ).stdout
     except (OSError, subprocess.TimeoutExpired):
-        return ips
+        return None
     for line in (out or "").splitlines():
         try:
             if ipaddress.ip_address(line.strip()) in _TAILSCALE_V4_NET:
-                ips.add(line.strip())
+                return line.strip()
         except ValueError:
             continue
-    return ips
+    return None
 
 
 # ── the browser's address behind a local proxy ─────────────────────
 
 
 def client_address(peer: str | None, forwarded_for: list[str]) -> str | None:
-    """The browser's address: *peer* itself, unless *peer* is a trusted local
-    proxy sending ``X-Forwarded-For`` — then the rightmost untrusted hop in
-    it (uvicorn's ``ProxyHeadersMiddleware`` rule, which mcp-combiner relies
-    on). Headers from any other peer are ignored.
+    """svg-mcp-specific (combiner's XFF rule is uvicorn's ProxyHeadersMiddleware):
+    the no-uvicorn equivalent — the browser's address is *peer* itself, unless
+    *peer* is a trusted loopback proxy sending ``X-Forwarded-For`` — then the
+    rightmost untrusted hop in it. Headers from any other peer are ignored.
 
     A loopback peer with NO ``X-Forwarded-For`` IS loopback — always local, per
     the combiner's trust model (a direct local browser, or a tunnel hop, both
@@ -492,90 +493,117 @@ def _host_of(hop: str) -> str:
     return hop
 
 
+#: svg-mcp-specific (combiner's XFF trust set is the same, but the middleware
+#: parsing differs — svg-mcp has no uvicorn): peers whose ``X-Forwarded-*``
+#: headers are believed: a local reverse proxy (e.g. ``tailscale serve``).
+TRUSTED_PROXIES = frozenset({"127.0.0.1", "::1"})
+
+
 # ── login rate limit ───────────────────────────────────────────────
 
-_failures: defaultdict[str, deque[float]] = defaultdict(deque)
-_failures_lock = threading.Lock()
 
-#: Cap on distinct failure-tracked sources: behind a proxy the key can be
-#: browser-chosen (rotated X-Forwarded-For), so the table is bounded, not grown
-#: without limit. Pruned (not rejected) beyond the cap.
-_FAILURE_TABLE_MAX = 4096
+class LoginLimiter:
+    """Failed-login budgets: per client address and across all of them.
+
+    :meth:`begin` reserves an attempt synchronously — before the caller awaits
+    anything — so concurrent attempts count against the budget immediately
+    rather than after their (slow) password checks finish. The global budget
+    stops guessing spread over many addresses, at the price of locking the
+    password form for everyone during such an attack (this machine and ticket
+    links still get in). Bounded: at most ``max_clients`` addresses tracked,
+    empty windows dropped.
+    """
+
+    def __init__(
+        self,
+        per_client: int = 5,
+        overall: int = 30,
+        window_s: float = 60.0,
+        max_clients: int = 10_000,
+    ) -> None:
+        self.per_client = per_client
+        self.overall = overall
+        self.window_s = window_s
+        self.max_clients = max_clients
+        self._failures: OrderedDict[str, deque[float]] = OrderedDict()
+        self._all: deque[float] = deque()
+        self._in_flight: dict[str, int] = {}
+
+    def begin(self, client: str) -> bool:
+        """Reserve an attempt for *client*; ``False`` when over budget."""
+        now = time.monotonic()
+        self._prune(now)
+        window = self._failures.get(client)
+        if window is not None:
+            cutoff = now - self.window_s
+            while window and window[0] < cutoff:
+                window.popleft()
+        mine = len(window or ()) + self._in_flight.get(client, 0)
+        everyone = len(self._all) + sum(self._in_flight.values())
+        if mine >= self.per_client or everyone >= self.overall:
+            return False
+        self._in_flight[client] = self._in_flight.get(client, 0) + 1
+        return True
+
+    def end(self, client: str, *, failed: bool) -> None:
+        left = self._in_flight.get(client, 0) - 1
+        if left > 0:
+            self._in_flight[client] = left
+        else:
+            self._in_flight.pop(client, None)
+        if not failed:
+            return
+        now = time.monotonic()
+        window = self._failures.pop(client, None) or deque()
+        window.append(now)
+        self._failures[client] = window  # most recent last
+        self._all.append(now)
+        while len(self._failures) > self.max_clients:
+            self._failures.popitem(last=False)
+
+    def tracked(self) -> int:
+        return len(self._failures) + len(self._in_flight)
+
+    def _prune(self, now: float) -> None:
+        """Drop expired failures. Clients are ordered by their latest failure,
+        so whole stale clients come off the front."""
+        cutoff = now - self.window_s
+        while self._all and self._all[0] < cutoff:
+            self._all.popleft()
+        while self._failures:
+            client, window = next(iter(self._failures.items()))
+            if window and window[-1] >= cutoff:
+                break
+            del self._failures[client]
+
+    def reset(self) -> None:
+        self._failures.clear()
+        self._all.clear()
+        self._in_flight.clear()
 
 
-def _prune_locked(now: float) -> None:
-    """Drop expired windows; if the table is still over the cap, drop the rest
-    wholesale (the window rebuilds from fresh failures — losing a partial 60s
-    history for some hosts is the cost of bounding attacker-chosen keys)."""
-    if len(_failures) <= _FAILURE_TABLE_MAX:
-        return
-    for key in [k for k, w in _failures.items() if not w or now - w[0] > 60]:
-        del _failures[key]
-    while len(_failures) > _FAILURE_TABLE_MAX // 2:
-        _failures.pop(next(iter(_failures)), None)
+LIMITER = LoginLimiter()
+
+
+#: svg-mcp-specific (threaded stdlib server — combiner runs scrypt via
+#: asyncio.to_thread with the same cap): at most 2 concurrent scrypt
+#: verifications; each is ~16 MB and ~30 ms of work, and a flood of login
+#: threads must queue rather than multiply into a cheap DoS.
+_LOGIN_SCRYPT_SLOTS = threading.BoundedSemaphore(2)
 
 
 def too_many_failures(client_host: str) -> bool:
-    with _failures_lock:
-        window = _failures[client_host]
-        now = time.monotonic()
-        while window and now - window[0] > 60:
-            window.popleft()
-        _prune_locked(now)
-        return len(window) >= _FAILURES_PER_MINUTE
-
-
-# In-flight logins + cross-address budget: a threaded server serves parallel logins,
-# which the completed-failures window alone does not count — 40 parallel wrong
-# guesses would each see zero failures. Attempts are RESERVED (before the body is
-# read or scrypt runs) and released on completion, and an OVERALL failure budget
-# across all addresses caps rotated-XFF flooding.
-_LOGIN_BUDGET: deque[float] = deque()
-_FAILURE_BUDGET_ALL = 30
-_LOGIN_INFLIGHT: defaultdict[str, int] = defaultdict(int)
-_LOGIN_INFLIGHT_MAX = _FAILURES_PER_MINUTE
-
-
-def login_attempt_admitted(client_host: str) -> bool:
-    """Reserve an in-flight login attempt BEFORE the body is read or scrypt runs.
-
-    Per-address: in-flight + recently failed must stay under the cap. Overall: the
-    cross-address failure budget applies. Release with `login_attempt_done`."""
-    with _failures_lock:
-        now = time.monotonic()
-        window = _failures[client_host]
-        while window and now - window[0] > 60:
-            window.popleft()
-        _prune_locked(now)
-        while _LOGIN_BUDGET and now - _LOGIN_BUDGET[0] > 60:
-            _LOGIN_BUDGET.popleft()
-        if len(window) + _LOGIN_INFLIGHT[client_host] >= _LOGIN_INFLIGHT_MAX:
-            return False
-        if len(_LOGIN_BUDGET) >= _FAILURE_BUDGET_ALL:
-            return False
-        _LOGIN_INFLIGHT[client_host] += 1
-        return True
-
-
-def login_attempt_done(client_host: str) -> None:
-    """Release the in-flight reservation — call unconditionally, from `finally`."""
-    with _failures_lock:
-        if _LOGIN_INFLIGHT[client_host] > 0:
-            _LOGIN_INFLIGHT[client_host] -= 1
+    """svg-mcp-specific convenience kept for the live-preview gate tests: the
+    gate's own begin() (see `webgate.login`) consults :data:`LIMITER`."""
+    return not LIMITER.begin(client_host)
 
 
 def record_failure(client_host: str) -> None:
-    with _failures_lock:
-        now = time.monotonic()
-        _failures[client_host].append(now)
-        _LOGIN_BUDGET.append(now)  # the overall budget counts every failed address
+    """svg-mcp-specific convenience: record a failed login (the gate's
+    `end(failed=True)` — mirrored as `LIMITER.end(client, failed=True)`)."""
+    LIMITER.end(client_host, failed=True)
 
 
 def reset_failures() -> None:
-    """Clear everything the limiter tracks (per-address windows, the overall
-    budget, in-flight reservations, the ticket ledger) — test isolation."""
-    with _failures_lock:
-        _failures.clear()
-        _LOGIN_BUDGET.clear()
-        _LOGIN_INFLIGHT.clear()
-    _ticket_ledger.clear()
+    """svg-mcp-specific (test isolation): clear every limiter budget."""
+    LIMITER.reset()

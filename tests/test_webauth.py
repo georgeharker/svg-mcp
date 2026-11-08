@@ -8,6 +8,7 @@ Tests run on loopback, so the ones that need the login prompt set ``exempt_local
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import http.client
 import json
 import sys
@@ -46,7 +47,7 @@ def _clean(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for var in ("SVG_MCP_WEB_AUTH", "SVG_MCP_WEB_AUTH__MODE", "SVG_MCP_WEB_PASSWORD_HASH"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"192.168.1.20"})
-    monkeypatch.setattr(webauth, "_tailnet_ips", lambda: {"100.66.1.2"})
+    monkeypatch.setattr(webauth, "_tailnet_ip", lambda: "100.66.1.2")
     webauth.reset_local_addresses()
     webauth.refresh_local_addresses()
     webauth.reset_failures()
@@ -433,46 +434,46 @@ class TestReservedAdmissions:
     read or scrypt runs; an overall failure budget crosses all addresses."""
 
     def test_five_in_flight_block_the_sixth_and_release_reopens(self) -> None:
-        webauth.reset_failures()
+        webauth.LIMITER.reset()
         try:
-            admitted = [webauth.login_attempt_admitted("10.0.0.9") for _ in range(5)]
+            admitted = [webauth.LIMITER.begin("10.0.0.9") for _ in range(5)]
             assert all(admitted)
-            assert webauth.login_attempt_admitted("10.0.0.9") is False
+            assert webauth.LIMITER.begin("10.0.0.9") is False
             for _ in range(5):
-                webauth.login_attempt_done("10.0.0.9")
-            assert webauth.login_attempt_admitted("10.0.0.9") is True
-            webauth.login_attempt_done("10.0.0.9")
+                webauth.LIMITER.end("10.0.0.9", failed=False)
+            assert webauth.LIMITER.begin("10.0.0.9") is True
+            webauth.LIMITER.end("10.0.0.9", failed=False)
         finally:
-            webauth.reset_failures()
+            webauth.LIMITER.reset()
 
     def test_recorded_failures_count_toward_the_in_flight_gate(self) -> None:
-        webauth.reset_failures()
+        webauth.LIMITER.reset()
         try:
             for _ in range(5):
-                webauth.record_failure("10.0.0.10")
-            assert webauth.login_attempt_admitted("10.0.0.10") is False
+                webauth.LIMITER.end("10.0.0.10", failed=True)
+            assert webauth.LIMITER.begin("10.0.0.10") is False
         finally:
-            webauth.reset_failures()
+            webauth.LIMITER.reset()
 
     def test_the_overall_budget_crosses_all_addresses(self) -> None:
-        webauth.reset_failures()
+        webauth.LIMITER.reset()
         try:
             for i in range(30):  # 30 failures spread over 30 addresses
-                webauth.record_failure(f"10.1.{i}.1")
-            assert webauth.login_attempt_admitted("10.2.0.1") is False  # fresh address
+                webauth.LIMITER.end(f"10.1.{i}.1", failed=True)
+            assert webauth.LIMITER.begin("10.2.0.1") is False  # fresh address
         finally:
-            webauth.reset_failures()
+            webauth.LIMITER.reset()
 
     def test_one_in_flight_plus_four_failures_hits_the_cap(self) -> None:
-        webauth.reset_failures()
+        webauth.LIMITER.reset()
         try:
             for _ in range(4):
-                webauth.record_failure("10.3.0.1")
-            assert webauth.login_attempt_admitted("10.3.0.1") is True
-            assert webauth.login_attempt_admitted("10.3.0.1") is False  # 4+1 = 5
-            webauth.login_attempt_done("10.3.0.1")
+                webauth.LIMITER.end("10.3.0.1", failed=True)
+            assert webauth.LIMITER.begin("10.3.0.1") is True
+            assert webauth.LIMITER.begin("10.3.0.1") is False  # 4+1 = 5
+            webauth.LIMITER.end("10.3.0.1", failed=False)
         finally:
-            webauth.reset_failures()
+            webauth.LIMITER.reset()
 
 
 class TestScryptSlots:
@@ -488,18 +489,21 @@ class TestTicketOneShot:
         signer = webauth.Signer(b"\x11" * 32)
         claims = signer.verify(signer.ticket("/preview-x"), "t")
         assert claims is not None and "j" in claims  # random id present, combiner format
-        assert webauth.ticket_admit(claims) is True
-        assert webauth.ticket_admit(claims) is False  # exhausted; no replay within the TTL
-        assert webauth.ticket_admit({"sub": "/preview-x", "exp": claims["exp"]}) is False
+        assert webauth.TICKETS.redeem(claims, allowed=1) is True
+        assert webauth.TICKETS.redeem(claims, allowed=1) is False  # one-shot; no replay
+        assert webauth.TICKETS.redeem({"sub": "/preview-x", "exp": claims["exp"]}, 1) is False
 
     def test_redemptions_expire_with_the_ticket(self) -> None:
+        # svg-mcp-specific (vs the mirror's prune-then-fresh): an EXPIRED ticket
+        # never redeems at all — the TTL window stays closed for a URL that leaks
+        # into a transcript, even for the j that seeded the ledger.
         expired = {"v": 1, "k": "t", "sub": "/z", "j": "stale", "exp": int(time.time()) - 5}
-        assert webauth.ticket_admit(expired) is True  # seeded, immediately expired
-        assert webauth.ticket_admit(expired) is False  # expired entries never admit
+        assert webauth.TICKETS.redeem(expired, allowed=1) is False
+        assert webauth.TICKETS.redeem(expired, allowed=1) is False
         signer = webauth.Signer(b"\x22" * 32)
         fresh_claims = signer.verify(signer.ticket("/preview-y", ttl_s=60), "t")
         assert fresh_claims is not None
-        assert webauth.ticket_admit(fresh_claims) is True
+        assert webauth.TICKETS.redeem(fresh_claims, allowed=1) is True
 
     def test_logout_is_post_only(self, site: _Preview) -> None:
         status, _, _ = site.get(webauth.LOGOUT_PATH, Accept="text/html")
@@ -553,13 +557,14 @@ class TestLocalAddressRefresh:
         webauth.reset_local_addresses()
         try:
             monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"192.168.1.20"})
-            monkeypatch.setattr(webauth, "_tailnet_ips", lambda: set())
+            monkeypatch.setattr(webauth, "_tailnet_ip", lambda: None)
+            # (the mirror keeps a tailnet module; svg-mcp stays in webauth — see file header)
             webauth.refresh_local_addresses()
-            assert "192.168.1.20" in webauth._own_addresses  # noqa: SLF001 — under test
+            assert "192.168.1.20" in webauth._local  # noqa: SLF001 — under test
             # A laptop changes networks: the old address is dropped, the new picked up.
             monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"10.9.9.9"})
             webauth.refresh_local_addresses()
-            assert webauth._own_addresses == frozenset({"10.9.9.9"})  # noqa: SLF001
+            assert webauth._local == frozenset({"10.9.9.9"})  # noqa: SLF001
         finally:
             webauth.refresh_local_addresses()
 
@@ -569,47 +574,63 @@ class TestLocalAddressRefresh:
         webauth.reset_local_addresses()
         try:
             monkeypatch.setattr(webauth, "_interface_addresses", lambda: {"192.168.1.20"})
-            monkeypatch.setattr(webauth, "_tailnet_ips", lambda: set())
+            monkeypatch.setattr(webauth, "_tailnet_ip", lambda: None)
+            # (the mirror keeps a tailnet module; svg-mcp stays in webauth — see header)
             webauth.refresh_local_addresses()
-            assert webauth._own_addresses == frozenset({"192.168.1.20"})  # noqa: SLF001
+            assert webauth._local == frozenset({"192.168.1.20"})  # noqa: SLF001
 
             def _boom() -> set[str]:
                 raise RuntimeError("ifconfig exploded")
 
             monkeypatch.setattr(webauth, "_interface_addresses", _boom)
-            webauth.refresh_local_addresses()  # must not raise
-            assert webauth._own_addresses == frozenset({"192.168.1.20"})  # noqa: SLF001
+            # mirror-faithful: the refresh propagates failures and the daemon loop
+            # (which this test fakes) keeps the last good set on its own catch:
+            with pytest.raises(RuntimeError, match="exploded"):
+                webauth.refresh_local_addresses()
+            assert webauth._local == frozenset({"192.168.1.20"})  # noqa: SLF001
         finally:
-            webauth.refresh_local_addresses()
+            with contextlib.suppress(RuntimeError):
+                webauth.refresh_local_addresses()
 
     def test_interface_parsing_forms(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # `ifconfig -a` and `ip -o addr show` output forms, incl. the addr: and /len
-        # shapes and an inet6 zone-suffix: all canonicalised into the same address.
-
+        # The shared parser handles BOTH tool output forms
         def fake_run(argv: list[str], **kwargs: Any) -> Any:
             out = ""
             if "ifconfig" in argv[0]:
-                out = "en0: flags=...\n\tinet 192.168.1.20 netmask 0xffffff00\n"
-            elif "addr" in argv:
                 out = (
-                    "2: enp3s0    inet 10.9.9.9/24 brd 10.9.9.255\n"
-                    "3: enp3s0    inet6 fe80::1%enp3s0/64\n"
+                    "en0: flags=...\n\tinet 192.168.1.20 netmask 0xffffff00\n"
+                    "en1: flags=...\n\tinet addr:10.20.30.40 Bcast 10.20.30.255\n"
                 )
+            else:
+                assert "addr" in argv, argv
+                out = "2: enp3s0    inet 10.9.9.9/24 brd 10.9.9.255\n"
 
             class _Result:
                 stdout = out
 
             return _Result()
 
+        # The shared parser handles BOTH tool output forms: ifconfig's
+        # `inet X` and `inet addr:X`, and `ip -o addr`'s `inet X/24`.
+        ifconfig_text = (
+            "en0: flags=...\n\tinet 192.168.1.20 netmask 0xffffff00\n"
+            "en1: flags=...\n\tinet addr:10.20.30.40 Bcast 10.20.30.255\n"
+        )
+        ip_text = "2: enp3s0    inet 10.9.9.9/24 brd 10.9.9.255\n"
+        assert webauth.parse_addresses(ifconfig_text) == frozenset({"192.168.1.20", "10.20.30.40"})
+        assert webauth.parse_addresses(ip_text) == frozenset({"10.9.9.9"})
+
+        # Tool selection: the FIRST AVAILABLE tool wins (ifconfig if present,
+        # falling back to `ip -o addr show` only when ifconfig is absent) —
+        # direct call, real function, fake subprocess (fake_run: both tools
+        # produce distinct outputs).
         monkeypatch.setattr("svg_mcp.webauth.shutil.which", lambda name: "/usr/sbin/" + name)
         monkeypatch.setattr("svg_mcp.webauth.subprocess.run", fake_run)
-        # Restore the REAL interface function (the fixture mocked it): the point here is
-        # the PARSER, run through real subprocess output via the fake `subprocess.run`.
         monkeypatch.setattr(webauth, "_interface_addresses", _REAL_INTERFACE_ADDRESSES)
-        monkeypatch.setattr(webauth, "_tailnet_ips", lambda: set())
-        webauth.reset_local_addresses()
-        try:
-            webauth.refresh_local_addresses()
-            assert webauth._own_addresses >= frozenset({"192.168.1.20", "10.9.9.9"})  # noqa: SLF001
-        finally:
-            webauth.refresh_local_addresses()
+        assert webauth._interface_addresses() == frozenset({"192.168.1.20", "10.20.30.40"})
+
+        monkeypatch.setattr(
+            "svg_mcp.webauth.shutil.which",
+            lambda name: "/usr/sbin/ip" if name == "ip" else None,
+        )
+        assert webauth._interface_addresses() == frozenset({"10.9.9.9"})
