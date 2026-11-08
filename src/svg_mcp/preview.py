@@ -291,16 +291,26 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
                 return False
             form: dict[str, str] | None = None
             if request.method == "POST":
-                try:
-                    length = int(self.headers.get("Content-Length") or 0)
-                except ValueError:
-                    length = 0
-                if not 0 <= length <= webgate.MAX_FORM_BYTES:
-                    self.close_connection = True  # the unread body would desync keep-alive
-                    self._status(413, "form too large")
+                # Reserve the concurrency slot BEFORE the body is read (the mirror's
+                # synchronous-first item): a 40-connection guess-flood gets its 429s
+                # without any body being parsed, let alone hashed.
+                refusal = webgate.reserve_login(request)
+                if refusal is not None:
+                    self._reply(refusal)
                     return True
-                form = webgate.parse_form(self.rfile.read(length))
-            self._reply(webgate.login(request, form))
+                try:
+                    try:
+                        length = int(self.headers.get("Content-Length") or 0)
+                    except ValueError:
+                        length = 0
+                    if not 0 <= length <= webgate.MAX_FORM_BYTES:
+                        self.close_connection = True  # the unread body would desync keep-alive
+                        self._status(413, "form too large")
+                        return True
+                    form = webgate.parse_form(self.rfile.read(length))
+                finally:
+                    webgate.release_login(request)
+            self._reply(webgate.login(request, form, admitted_already=True))
             return True
 
         # -- routing ------------------------------------------------------

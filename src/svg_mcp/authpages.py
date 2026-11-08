@@ -92,7 +92,9 @@ def _page(title: str, body: str, status: int = 200) -> Reply:
         f'<div class="brand">{LOGO}<div class="wordmark">svg<span>-mcp</span></div></div>'
         f"{body}</main></body></html>"
     )
-    # Not cached, not framed, and the form only posts back here.
+    # Not cached, not framed, and the form only posts back here. CSP: zero scripts
+    # on these pages (mirror-list #7 replaces the previous 'unsafe-inline' allowance;
+    # no `script-src` at all is then strictly stronger than a per-response nonce).
     headers = [
         ("Content-Type", "text/html; charset=utf-8"),
         ("Cache-Control", "no-store"),
@@ -100,8 +102,8 @@ def _page(title: str, body: str, status: int = 200) -> Reply:
         ("X-Frame-Options", "DENY"),
         (
             "Content-Security-Policy",
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
-            "img-src data:; form-action 'self'; frame-ancestors 'none'",
+            "default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+            "form-action 'self'; frame-ancestors 'none'",
         ),
     ]
     return Reply(status, headers, document.encode("utf-8"))

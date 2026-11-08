@@ -25,6 +25,7 @@ the payload part. Session: ``{"v":1,"k":"s","iat":..,"exp":..}``; ticket:
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import ipaddress
@@ -179,30 +180,61 @@ class Signer:
 
     @classmethod
     def load_or_create(cls, path: Path) -> Signer:
-        """Load the signing key, or atomically create one (0600 via the temp+rename).
+        """Load the signing key, or atomically CREATE one — never truncate a race.
 
-        An existing key's permissions are re-checked (a key left world-readable by any
-        other means is tightened in place), so web-auth cookie signing never rides a
-        0644 file."""
+        Creation: write a temp file 0600 in the same directory, then `os.link` it to
+        the final path — the hard link FAILS if the target already came into being
+        concurrently, and the existing file is never replaced or truncated (the
+        combiner's 0.20 key-file review item; `os.replace` here would clobber a
+        concurrently created key and kill its cookies).
+
+        An EXISTING key is opened with `O_NOFOLLOW` (symlinks are refused) and
+        checked: owned by this uid (another owner's key is refused, not chmod-ed)
+        and mode & 0o077 tightened in place; a malformed/short key refuses startup."""
+        if path.is_symlink():
+            raise RuntimeError(
+                f"{path} is a symlink — refusing (web-auth key must be a regular 0600 "
+                "file owned by this user)"
+            )
         if path.exists():
-            key = path.read_bytes()
-            if len(key) < 32:
-                raise RuntimeError(
-                    f"{path} is a malformed web-auth signing key (too short) — delete it "
-                    "to re-issue (this signs every browser out)"
-                )
-            if path.stat().st_mode & 0o077:
-                path.chmod(0o600)
-            return cls(key)
+            return cls(cls._load_existing(path))
         key = secrets.token_bytes(32)
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        tmp = path.with_name(f".web-auth.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "wb") as fh:
             fh.write(key)
-        os.replace(tmp, path)  # atomic: a concurrent reader sees key-or-nothing
-        logger.info("web_auth: created a signing key at %s", path)
-        return cls(key)
+        try:
+            os.link(tmp, path)  # fails FileExistsError if the target now exists
+            created_here = True
+        except FileExistsError:
+            created_here = False  # someone created it concurrently: load theirs, never clobber
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+        if created_here:
+            logger.info("web_auth: created a signing key at %s", path)
+        return cls(cls._load_existing(path))
+
+    @staticmethod
+    def _load_existing(path: Path) -> bytes:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)  # symlink → refused
+        stat = os.fstat(fd)  # fstat BEFORE the fd object closes it
+        with os.fdopen(fd, "rb") as fh:
+            key = fh.read()
+        if len(key) < 32:
+            raise RuntimeError(
+                f"{path} is a malformed web-auth signing key (too short) — delete it "
+                "to re-issue (this signs every browser out)"
+            )
+        if stat.st_uid != os.getuid():
+            raise RuntimeError(
+                f"{path} is owned by uid {stat.st_uid}, not {os.getuid()} — refusing to "
+                "sign cookies with another user's key"
+            )
+        if stat.st_mode & 0o077:
+            os.chmod(path, 0o600)  # tighten in place (content was fine)
+        return key
 
     def sign(self, claims: dict[str, Any]) -> str:
         payload = _b64(json.dumps(claims, separators=(",", ":")).encode())
@@ -246,7 +278,7 @@ class Signer:
                 "v": 1,
                 "k": "t",
                 "sub": subject,
-                "j": secrets.token_urlsafe(6),
+                "j": secrets.token_urlsafe(12),
                 "exp": int(time.time()) + ttl_s,
             }
         )
@@ -262,17 +294,49 @@ _TAILSCALE_V4_NET = ipaddress.ip_network("100.64.0.0/10")
 
 
 def local_addresses() -> frozenset[str]:
-    """Every address of this machine (loopback, interfaces, tailnet), cached."""
-    global _local
+    """Every address of this machine (loopback, interfaces, tailnet), cached.
+
+    Cold start runs the subprocesses ON THE REQUEST PATH once (bounded by their 2s
+    timeouts); afterwards a background thread refreshes the set every 60s (the
+    mirror's periodic-refresh item — requests never run the subprocesses again, so
+    a flapping interface updates without stalling a gate check)."""
+    global _local, _refresher
     with _local_lock:
-        if _local is None:
+        if _local is not None:
+            return _local
+        found = {"127.0.0.1", "::1"}
+        found.update(_interface_addresses())
+        ip = _tailnet_ip()
+        if ip:
+            found.add(ip)
+        _local = frozenset(_canonical(a) for a in found)
+    if _refresher is None:
+        _refresher = threading.Thread(
+            target=_refresh_loop, daemon=True, name="webauth-local-refresh"
+        )
+        _refresher.start()
+    return _local
+
+
+_local_refresh_interval = 60.0
+_refresher: threading.Thread | None = None
+
+
+def _refresh_loop() -> None:
+    """Re-compute the machine's address set every 60s, OFF the request path."""
+    while True:
+        time.sleep(_local_refresh_interval)
+        try:
             found = {"127.0.0.1", "::1"}
             found.update(_interface_addresses())
             ip = _tailnet_ip()
             if ip:
                 found.add(ip)
-            _local = frozenset(_canonical(a) for a in found)
-        return _local
+            with _local_lock:
+                global _local
+                _local = frozenset(_canonical(a) for a in found)
+        except Exception:
+            logger.warning("local-address refresh failed; keeping the previous set")
 
 
 def reset_local_addresses() -> None:
