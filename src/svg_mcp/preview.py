@@ -116,6 +116,9 @@ class PreviewServer:
                 self._httpd = httpd
                 self._host = host
                 self._port = httpd.server_address[1]
+                # The URLs handed out name this host: when it's a name (not an address),
+                # the login's "this machine" Host check must accept it.
+                webauth.set_local_names({host})
                 threading.Thread(
                     target=httpd.serve_forever, name="svg-mcp-preview", daemon=True
                 ).start()
