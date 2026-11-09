@@ -9,12 +9,14 @@
         "extensions": [
             "./src/index.ts"
         ],
-        "image": "https://cdn.jsdelivr.net/npm/@geohar/pi-svg-mcp/assets/preview.png"
+        "image": "https://cdn.jsdelivr.net/npm/@geohar/pi-svg-mcp/assets/preview.png",
+        "changelogPath": "./CHANGELOG.md"
     },
     "files": [
         "src",
         "dist",
         "instructions.txt",
+        "CHANGELOG.md",
         "mcp.json.example",
         "README.md",
         "LICENSE",
@@ -24,7 +26,7 @@
         "build": "tsc",
         "clean": "rm -rf dist",
         "typecheck": "tsc --noEmit",
-        "prepack": "node -e \"require('fs').copyFileSync('../../CLAUDE.md.example', './instructions.txt')\"",
+        "prepack": "node -e \"const fs = require('fs'); fs.copyFileSync('../../CLAUDE.md.example', './instructions.txt'); fs.copyFileSync('../../CHANGELOG.md', './CHANGELOG.md')\"",
         "prepublishOnly": "npm run clean && npm run build"
     },
     "keywords": [

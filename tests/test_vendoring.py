@@ -31,3 +31,14 @@ def test_every_plugin_carries_a_byte_identical_regular_file_copy() -> None:
             f"{path} drifted from CLAUDE.md.example; re-sync it "
             "(scripts/bump-version.sh re-copies on any bump)"
         )
+
+
+def test_the_pi_package_carries_the_changelog_as_a_regular_file_copy() -> None:
+    # Pi reads CHANGELOG.md from the package root (package.json changelogPath) after an
+    # update; npm and marketplace copies drop or dangle symlinks, as with instructions.txt.
+    source = ROOT / "CHANGELOG.md"
+    path = ROOT / "plugins" / "pi" / "CHANGELOG.md"
+    assert not path.is_symlink(), f"{path} must be a regular file, not a symlink"
+    assert path.read_bytes() == source.read_bytes(), (
+        f"{path} drifted from CHANGELOG.md — scripts/bump-version.sh re-syncs it"
+    )
