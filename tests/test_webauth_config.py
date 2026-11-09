@@ -169,3 +169,10 @@ def test_main_takes_the_file_and_flags_win(monkeypatch: pytest.MonkeyPatch, tmp_
     finally:
         config._settings = None
     assert (seen["transport"], seen["host"], seen["port"]) == ("streamable-http", "0.0.0.0", 9999)
+
+
+def test_a_file_enabled_login_without_a_password_names_the_file(tmp_path: Any) -> None:
+    path = _write_config(tmp_path, '[web_auth]\nmode = "password"\n')
+    with pytest.raises(ValueError, match="every svg-mcp launch reads") as err:
+        _settings()
+    assert str(path) in str(err.value)

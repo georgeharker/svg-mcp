@@ -230,8 +230,16 @@ class Settings(BaseSettings):
 
             validate_hash_artifact(stored)
         if self.web_auth.mode == "password" and not (stored and stored.startswith("scrypt$")):
+            # Name the file when it is what turned the login on: the config file applies to
+            # every launch, so a stdio client started without the password fails here.
+            source = (
+                f" (set by {file_path}, which every svg-mcp launch reads — keep [web_auth] "
+                "in a file only the web server selects with SVG_MCP_CONFIG)"
+                if file_mode == "password"
+                else ""
+            )
             raise ValueError(
-                "web_auth.mode 'password' needs web_auth.password_hash, "
+                f"web_auth.mode 'password'{source} needs web_auth.password_hash, "
                 "web_auth.password (SVG_MCP_WEB_PASSWORD) or SVG_MCP_WEB_PASSWORD_HASH "
                 "— run `svg-mcp hash-password`"
             )
