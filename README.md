@@ -502,11 +502,23 @@ Settings come from a TOML config file and from env vars prefixed `SVG_MCP_`. Hig
 The config file is `~/.config/svg-mcp/config.toml` (`$XDG_CONFIG_HOME/svg-mcp/config.toml`), or
 the path in `$SVG_MCP_CONFIG`. It's optional. A named `$SVG_MCP_CONFIG` that doesn't exist, an
 unknown key, or a misspelt table (`[webauth]`) stops svg-mcp at startup rather than being
-ignored. Keys are the setting names below; `web_auth` is a table:
+ignored. Keys are the setting names below; `web_auth` is a table.
+
+**Every launch reads the default file**, including stdio servers that MCP clients (Claude
+Desktop, the plugins) start on their own. Keep it to settings they should all share:
 
 ```toml
 # ~/.config/svg-mcp/config.toml
 renderer = "resvg"
+default_background = "white"
+```
+
+Settings for one server, such as a shared HTTP server with the web login, go in a file of their
+own, selected by `$SVG_MCP_CONFIG` in that server's launch script. Otherwise a stdio client starts
+an HTTP server, or refuses to start for want of the web password:
+
+```toml
+# ~/.config/svg-mcp/web.toml — launched with SVG_MCP_CONFIG=~/.config/svg-mcp/web.toml
 transport = "streamable-http"
 port = 7731
 
@@ -514,6 +526,9 @@ port = 7731
 mode = "password"
 session_days = 30
 ```
+
+`$SVG_MCP_CONFIG` replaces the default file rather than adding to it, so repeat any shared
+settings there.
 
 Each key's env var is `SVG_MCP_` plus the name in capitals. `web_auth` takes JSON in the env
 var, merged over the file's table:
@@ -618,7 +633,8 @@ The preview binds loopback by default. Bind it wider (`SVG_MCP_PREVIEW_HOST`, or
 `tailscale serve`) and anyone who can reach the address can watch your documents. A browser
 can't send the `/mcp` bearer, so the preview has its own optional login. It's off by default.
 
-Turn it on in the config file:
+Turn it on in the web server's config file (the one its launch script names in
+`$SVG_MCP_CONFIG`, see [Configuration](#configuration)):
 
 ```toml
 [web_auth]

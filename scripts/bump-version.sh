@@ -188,6 +188,13 @@ if [ "$(highest "$base" "$new")" = "$base" ] && [ "$new" != "$base" ]; then
   die "new version $new is lower than baseline $base; refusing to go backwards"
 fi
 
+# Every release gets its notes first: Pi shows CHANGELOG.md entries newer than the
+# version a user last saw, matched by their `## [X.Y.Z]` heading against package.json.
+if [ -f "$ROOT/CHANGELOG.md" ]; then
+  grep -qE "^## \[$(printf '%s' "$new" | sed 's/[.]/\\./g')\]" "$ROOT/CHANGELOG.md" \
+    || die "CHANGELOG.md has no '## [$new]' heading; add the release notes first"
+fi
+
 if [ "$dry_run" = 1 ]; then echo "(dry run) no files changed"; exit 0; fi
 
 if [ "$do_commit" = 1 ]; then
@@ -221,6 +228,14 @@ for _plugdir in "$ROOT/plugins/claude" "$ROOT/plugins/opencode" "$ROOT/plugins/p
   INSTRS+=("$_plugdir/instructions.txt")
   echo "  synced ${_plugdir#"$ROOT"/}/instructions.txt from CLAUDE.md.example"
 done
+# The Pi package ships CHANGELOG.md (its package.json changelogPath) — a real copy for the
+# same reason as instructions.txt; its npm prepack copies it again as a belt.
+if [ -d "$ROOT/plugins/pi" ] && [ -f "$ROOT/CHANGELOG.md" ]; then
+  rm -f "$ROOT/plugins/pi/CHANGELOG.md"
+  cp "$ROOT/CHANGELOG.md" "$ROOT/plugins/pi/CHANGELOG.md"
+  INSTRS+=("$ROOT/plugins/pi/CHANGELOG.md")
+  echo "  synced plugins/pi/CHANGELOG.md from CHANGELOG.md"
+fi
 
 # Keep any lockfile next to a bumped toml manifest in sync — the package's own
 # self-version entry, so a `--locked` build/publish (cargo) or `uv sync --locked`

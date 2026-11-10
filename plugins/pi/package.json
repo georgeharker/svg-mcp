@@ -1,6 +1,6 @@
 {
     "name": "@geohar/pi-svg-mcp",
-    "version": "0.10.6",
+    "version": "0.10.7",
     "description": "Pi extension: run the svg-mcp MCP server via sharedserver and inject the diagram-authoring directive. Pairs with pi-mcp-adapter, which makes svg-mcp's tools reachable from Pi.",
     "type": "module",
     "main": "dist/index.js",
@@ -9,12 +9,14 @@
         "extensions": [
             "./src/index.ts"
         ],
-        "image": "https://cdn.jsdelivr.net/npm/@geohar/pi-svg-mcp/assets/preview.png"
+        "image": "https://cdn.jsdelivr.net/npm/@geohar/pi-svg-mcp/assets/preview.png",
+        "changelogPath": "./CHANGELOG.md"
     },
     "files": [
         "src",
         "dist",
         "instructions.txt",
+        "CHANGELOG.md",
         "mcp.json.example",
         "README.md",
         "LICENSE",
@@ -24,7 +26,7 @@
         "build": "tsc",
         "clean": "rm -rf dist",
         "typecheck": "tsc --noEmit",
-        "prepack": "node -e \"require('fs').copyFileSync('../../CLAUDE.md.example', './instructions.txt')\"",
+        "prepack": "node -e \"const fs = require('fs'); fs.copyFileSync('../../CLAUDE.md.example', './instructions.txt'); fs.copyFileSync('../../CHANGELOG.md', './CHANGELOG.md')\"",
         "prepublishOnly": "npm run clean && npm run build"
     },
     "keywords": [
