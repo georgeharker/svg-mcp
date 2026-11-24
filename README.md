@@ -779,8 +779,8 @@ define_linear_gradient(document_id="doc1", x1=0, y1=0, x2=1, y2=0,
 add_rect(document_id="doc1", x=0, y=0, width=320, height=120, rx=16, style={fill:"@brand"})
 
 add_text(…, x=160, y=72, content="svg-mcp", name="title",
-    style={font_family:"Helvetica", font_size:"40px", font_weight:"bold",
-           text_anchor:"middle", fill:"#ffffff"})
+    style={"font-family":"Helvetica", "font-size":"40px", "font-weight":"bold",
+           "text-anchor":"middle", fill:"#ffffff"})
 apply_drop_shadow(…, target="title", dx=0, dy=2, blur=3, color="#000", opacity=0.4)
 
 render_document(…, scale=2)     # returns the rendered PNG inline — look, then adjust
@@ -806,8 +806,9 @@ export_svg(…)                   # final SVG source string
 - **Stacking.** Later siblings paint on top. Restack relative to a sibling with
   `reparent(target, above=<node>)` / `below=<node>` instead of counting child indices.
 - **Coordinates.** User units, origin top-left, y increases downward.
-- **Style.** A structured object — `fill`, `stroke`, `stroke_width`, `opacity`, plus typography
-  (`font_family`, `font_size`, `font_weight`, `font_style`, `text_anchor`). Colors accept hex /
+- **Style.** A structured object keyed by CSS property names — `fill`, `stroke`, `stroke-width`,
+  `opacity`, plus typography (`font-family`, `font-size`, `font-weight`, `font-style`,
+  `text-anchor`). Use the hyphenated names: they are what the schema accepts. Colors accept hex /
   `rgb()` / CSS names / `none`, **or** a paint reference `url(#id)` / `@name` to a defined
   gradient or pattern.
 - **Resources** follow *create → define → reference/apply*: `define_*` returns an id you use as

@@ -180,12 +180,12 @@ COORDINATES
 - User units, origin at top-left, x→right, y→down. The viewBox defaults to `0 0 width height`.
 
 STYLING & PAINT
-- `style` is a structured object: `fill`, `stroke`, `stroke_width`, `opacity`, `fill_opacity`,
-  `stroke_opacity`, `stroke_dasharray`, `stroke_linecap`, `stroke_linejoin`, plus typography
-  (`font_family`, `font_size`, `font_weight`, `font_style`, `text_anchor`, `letter_spacing`, …).
-- Keys accept **either** snake_case (`font_size`) **or** the CSS name (`font-size`); `font_size`
-  also takes a bare number (px). Unknown/misspelled keys are REJECTED with an error (not dropped),
-  so set the whole style in one call and trust it stuck.
+- `style` is a structured object keyed by CSS property names: `fill`, `stroke`, `stroke-width`,
+  `opacity`, `fill-opacity`, `stroke-opacity`, `stroke-dasharray`, `stroke-linecap`,
+  `stroke-linejoin`, plus typography (`font-family`, `font-size`, `font-weight`, `font-style`,
+  `text-anchor`, `letter-spacing`, …). Use the hyphenated CSS names: they are what the schema
+  accepts. `font-size` also takes a bare number (px). Unknown/misspelled keys are REJECTED with
+  an error (not dropped), so set the whole style in one call and trust it stuck.
 - Colors accept hex (`#ff0000`), `rgb()/rgba()`, CSS names (`tomato`), or `none`.
 - A fill/stroke may also reference a defined resource by id `url(#<id>)`, the shorthand `@<name>`,
   or `url(#<name>)` — all resolve to the defined gradient/pattern. Define the resource first.
@@ -355,9 +355,10 @@ TEXT
   do not delete + re-add (that drops the node's id/clip/filters/z-order).
 - Do NOT estimate text width by chars × size — call `measure_text` (below); it's why it exists.
 - Fonts: `list_fonts()` returns the family names installed on this machine — pick one and set it
-  via `style.font_family`. `font_size`, `font_weight` (`bold`/`700`), `font_style` (`italic`),
-  `text_anchor` (start/middle/end), `letter_spacing`, `word_spacing`, `text_decoration`,
-  `dominant_baseline` (vertical align), and `paint_order` are all settable on `style`.
+  via `style["font-family"]`. `font-size`, `font-weight` (`bold`/`700`), `font-style`
+  (`italic`), `text-anchor` (start/middle/end), `letter-spacing`, `word-spacing`,
+  `text-decoration`, `dominant-baseline` (vertical align), and `paint-order` are all settable on
+  `style`.
 - `measure_text(content, style)` returns `{width, height}` in user units from the font's own
   metrics — use it to fit/center text and size boxes BEFORE rendering (no render round-trip).
   inkex does not shape glyphs, so geometric bbox queries return empty for text; `measure_text`
@@ -1415,7 +1416,7 @@ def add_line(
 ) -> dict[str, str | None | list[str]]:
     """Add a straight line segment from (x1,y1) to (x2,y2).
 
-    Give it a visible stroke via style (e.g. stroke and stroke_width); lines have no fill.
+    Give it a visible stroke via style (e.g. stroke and stroke-width); lines have no fill.
 
     Args:
         x1: Start x in user units.
@@ -2273,7 +2274,7 @@ def add_text_block(
     """Add a MULTI-LINE text block — split `content` on `\\n` into evenly-spaced lines.
 
     No manual per-line `y` math: each line is a `<tspan>` at `x` with `dy = line_height` em
-    (`line_height` is a multiple of font size; 1.2 ≈ normal). Set `text_anchor` in `style` to
+    (`line_height` is a multiple of font size; 1.2 ≈ normal). Set `text-anchor` in `style` to
     align all lines. Re-flow later with `edit_text_block` (adding/removing a line re-spaces the
     rest automatically).
 
@@ -6345,8 +6346,11 @@ def set_document_metadata(
     creator: str | None = None,
     rights: str | None = None,
     date: str | None = None,
-) -> dict[str, str | None]:
+) -> dict[str, str]:
     """Set document-level metadata. Only the provided fields are written.
+
+    Written as Inkscape's RDF block (``<metadata>``); ``title`` also sets the root ``<title>``
+    that browsers and screen readers use.
 
     Args:
         title: Document title.
@@ -6355,7 +6359,7 @@ def set_document_metadata(
         date: Date string.
 
     Returns:
-        A map of the fields that were applied.
+        A map of the fields that were applied (title, creator, rights, date).
     """
     return ops.set_document_metadata(
         _doc(document_id), title=title, creator=creator, rights=rights, date=date
@@ -6805,7 +6809,7 @@ def measure_text(content: str, style: ShapeStyle | None = None) -> dict[str, flo
 
     Args:
         content: The text to measure.
-        style: Font properties (font_family, font_size, font_weight, font_style); defaults to
+        style: Font properties (font-family, font-size, font-weight, font-style); defaults to
             sans-serif at 16px when omitted.
 
     Returns:

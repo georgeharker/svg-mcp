@@ -5,7 +5,7 @@ released together under one version. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.11.0] - 2026-11-23
 
 ### Changed
 - **Breaking:** every tool that touches session state needs a `session_id` from
@@ -44,8 +44,16 @@ released together under one version. The format follows
   documents.
 - `start_preview` no longer takes a `host`: the preview binds to the configured
   `preview_host` (loopback by default), so the model can't choose the exposure.
+- Style keys are documented as the CSS property names (`stroke-width`, `font-size`), the
+  only spelling the published schema accepts. The instructions used to list the snake_case
+  field names, which schema-validating clients such as mcp-combiner reject.
 - `list_documents` returns `{document_ids, index}`; `current_context` returns the session and
   its open documents, without an outline.
+
+### Fixed
+- `set_document_metadata` never worked: inkex 1.4.1 exposes the metadata fields as
+  read-only properties, so every field failed. svg-mcp now writes Inkscape's RDF block itself,
+  and `title` also sets the root `<title>` that browsers and screen readers use.
 
 ## [0.10.7] - 2026-11-09
 
@@ -160,6 +168,7 @@ released together under one version. The format follows
 ### Fixed
 - Exports no longer try to fsync a directory on Windows.
 
+[0.11.0]: https://github.com/georgeharker/svg-mcp/compare/v0.10.7...v0.11.0
 [0.10.7]: https://github.com/georgeharker/svg-mcp/compare/v0.10.6...v0.10.7
 [0.10.6]: https://github.com/georgeharker/svg-mcp/compare/v0.10.5...v0.10.6
 [0.10.5]: https://github.com/georgeharker/svg-mcp/compare/v0.10.4...v0.10.5

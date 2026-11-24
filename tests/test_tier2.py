@@ -118,3 +118,34 @@ def test_extract_image() -> None:
     img = ops.add_image(doc, x=0, y=0, width=10, height=10, data_base64="QUJD", mime="image/png")
     extracted = extract_image(doc, img.id)
     assert extracted == {"mime": "image/png", "data_base64": "QUJD"}
+
+
+def test_document_metadata_round_trips_and_sets_the_root_title() -> None:
+    # inkex 1.4.1's Metadata fields are read-only properties; svg-mcp writes the RDF itself.
+    from svg_mcp.serialize import export_svg
+
+    _, doc = DocumentStore().create(10, 10)
+    applied = ops.set_document_metadata(
+        doc, title="Flag", creator="George", rights="CC-BY", date="2026-11-24"
+    )
+    assert applied == {
+        "title": "Flag",
+        "creator": "George",
+        "rights": "CC-BY",
+        "date": "2026-11-24",
+    }
+    assert ops.get_document_metadata(doc) == applied
+    ops.set_document_metadata(doc, title="Flag 2")  # updates in place, no duplicate nodes
+    assert ops.get_document_metadata(doc)["title"] == "Flag 2"
+    svg = export_svg(doc)
+    assert svg.count("<dc:title>Flag 2</dc:title>") == 1
+    assert "<cc:Agent><dc:title>George</dc:title></cc:Agent>" in svg
+    assert "<title>Flag 2</title>" in svg
+    reloaded = ops.load_svg_document(svg=svg)
+    assert ops.get_document_metadata(reloaded)["creator"] == "George"
+
+
+def test_document_metadata_with_nothing_given_writes_nothing() -> None:
+    _, doc = DocumentStore().create(10, 10)
+    assert ops.set_document_metadata(doc) == {}
+    assert ops.get_document_metadata(doc) == {}

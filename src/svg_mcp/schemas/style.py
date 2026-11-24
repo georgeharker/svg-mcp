@@ -42,9 +42,11 @@ Color = Annotated[str, AfterValidator(_validate_color)]
 class ShapeStyle(BaseModel):
     """A presentation-attribute bundle for a shape, validated then flattened to a style dict.
 
-    Accepts each property by **either** its snake_case name (``font_size``) **or** the CSS
-    hyphenated name (``font-size``) — so natural CSS-style input is honored, not silently dropped.
-    Genuinely unknown / misspelled keys raise a validation error instead of being ignored.
+    The wire contract is the CSS hyphenated name (``font-size``): the published JSON schema lists
+    only those, with ``additionalProperties: false``, so a schema-validating client or proxy (the
+    mcp-combiner) refuses anything else — and the instructions and docs say so. Direct Python use
+    may still pass the snake_case field name (``font_size``). Genuinely unknown / misspelled keys
+    raise a validation error instead of being ignored.
     """
 
     model_config = ConfigDict(

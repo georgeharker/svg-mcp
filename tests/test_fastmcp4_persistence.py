@@ -925,3 +925,16 @@ def test_start_preview_takes_no_host(server: _Server) -> None:
         assert "host" not in tools["start_preview"].input_schema["properties"]
 
     asyncio.run(scenario())
+
+
+def test_style_schema_names_only_css_properties() -> None:
+    """The style schema lists only hyphenated CSS names and rejects others, so the
+    instructions must teach those names, never the snake_case field names."""
+    from svg_mcp.schemas import ShapeStyle
+    from svg_mcp.server import _INSTRUCTIONS
+
+    schema = ShapeStyle.model_json_schema()
+    assert schema.get("additionalProperties") is False
+    assert "stroke-width" in schema["properties"] and "stroke_width" not in schema["properties"]
+    for snake in ("stroke_width", "font_size", "font_family", "text_anchor", "fill_opacity"):
+        assert snake not in _INSTRUCTIONS, snake
