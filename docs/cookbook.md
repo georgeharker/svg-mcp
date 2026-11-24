@@ -7,8 +7,8 @@ Practical, copy-pasteable recipes. Each step is an MCP tool call; arguments are 
 
 svg-mcp is a *render-and-see* tool. The rhythm is always:
 
-1. `create_document(width, height)` → returns a `document_id` and makes it the **active** document
-   (so you can omit `document_id` afterwards).
+1. `create_session()` once, then `create_document(width, height)` → a `document_id`. Pass the
+   `session_id` on every call and the `document_id` on every call that acts on the document.
 2. Add content (`add_squircle`, `add_path`, `add_text`, …). Each returns the new node's
    `{id, tag, name}` — keep the `id`, or pass a `name` to refer back by name.
 3. `render_document(scale=…)` to **see** the result, then adjust. For a window the user can watch

@@ -1,37 +1,34 @@
-"""Active-document default + contextualize query set."""
+"""Explicitly addressed documents + contextualize query set."""
 
 from __future__ import annotations
 
+import pytest
+
 from svg_mcp import ops
+from svg_mcp.model.errors import DocumentNotFound
 from svg_mcp.query import describe_node, list_resources
 from svg_mcp.session import DocumentStore
 
 
-def test_active_document_default() -> None:
+def test_documents_are_always_addressed_by_id() -> None:
+    # There is no active document: every lookup names its document.
     store = DocumentStore()
-    assert store.active_id is None
     did, doc = store.create(100, 80)
-    assert store.active_id == did
-    assert store.get() is doc  # get() with no id returns the active document
     did2, doc2 = store.create(50, 50)
-    assert store.active_id == did2  # newly created becomes active
-    store.get(did)  # touching an explicit doc makes it active
-    assert store.active_id == did
-    store.set_active(did2)
-    assert store.active_id == did2
-    store.peek(did)  # peek does NOT change the active pointer
-    assert store.active_id == did2
+    assert store.get(did) is doc and store.get(did2) is doc2
+    assert not hasattr(store, "active_id")
+    with pytest.raises(DocumentNotFound, match="open: doc1, doc2"):
+        store.get("doc9")
 
 
-def test_delete_active_reassigns() -> None:
+def test_delete_needs_an_id() -> None:
     store = DocumentStore()
     d1, _ = store.create(10, 10)
-    store.create(10, 10)  # d2 active
-    deleted = store.delete()  # delete the active one
-    assert deleted is not None
-    assert store.active_id == d1  # falls back to a remaining doc
-    store.delete()
-    assert store.active_id is None
+    d2, _ = store.create(10, 10)
+    assert store.delete(d2) == d2
+    assert store.list_ids() == [d1]
+    with pytest.raises(DocumentNotFound):
+        store.delete(d2)
 
 
 def test_describe_node() -> None:

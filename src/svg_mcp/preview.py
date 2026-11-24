@@ -6,13 +6,15 @@ isn't drawn inline by terminal clients anyway). This module runs a tiny stdlib H
 bound to loopback, that serves an HTML page the user opens once and leaves open: it auto-refreshes
 on every document change via Server-Sent Events.
 
-The HTTP routes deliberately mirror the published resource refs so the two share one identity:
+The HTTP routes deliberately mirror the published resource refs so the two share one identity
+(``token`` is the session's preview token):
 
-    svg://{document_id}/svg     <->  GET /{document_id}/svg
-    svg://{document_id}/render  <->  GET /{document_id}/render
-    svg://documents             <->  GET /documents
+    svg://{token}/{document_id}/svg     <->  GET /{token}/{document_id}/svg
+    svg://{token}/{document_id}/render  <->  GET /{token}/{document_id}/render
+    svg://{token}/documents             <->  GET /{token}/documents
 
-``document_id`` may be the literal ``active`` to always follow the active document.
+Pages: ``/{token}/{document_id}/`` shows one document and stays on it; ``/{token}/`` lists the
+session's documents. There is no "active document" to follow.
 
 The server never touches the live document tree: callers (running inside the MCP request, where
 the document is consistent) hand it an immutable serialized SVG *string* via
@@ -50,19 +52,18 @@ _MIME: dict[str, str] = {
 _DEFAULT_PORT = 8808
 
 
-_EMPTY_INDEX = '{"active": null, "documents": []}'
+_EMPTY_INDEX = '{"documents": []}'
 
 
 class _Bucket:
     """Per-session preview state — the snapshot one chat sees.
 
-    Holds the serialized-SVG sources, which document is active, a monotonic generation counter,
-    and the set of SSE client queues currently watching this session.
+    Holds the serialized-SVG sources of the session's documents, a monotonic generation
+    counter, and the set of SSE client queues currently watching this session.
     """
 
     def __init__(self) -> None:
         self.gen = 0
-        self.active: str | None = None
         self.sources: dict[str, str] = {}
         self.index_json = _EMPTY_INDEX
         self.backdrop = "checker"  # page backdrop: "checker" | "white" | "black" | any CSS color
@@ -72,11 +73,11 @@ class _Bucket:
 class PreviewServer:
     """One shared HTTP+SSE server, partitioned by session token so each chat is isolated.
 
-    svg-mcp documents are per-session (see ``_SESSION_STORES`` in the server module). A single
-    global preview would let one chat's edits clobber another's, since every session's
-    ``_emit_change`` publishes its active document. So state lives in a per-token :class:`_Bucket`
-    and every URL carries the token as its first path segment (``/<token>/render`` …). The HTML
-    page reads its own token from ``location.pathname``, so the page itself stays static.
+    svg-mcp documents are per-session (minted sessions in the server module). A single global
+    preview would let one chat's edits clobber another's, so state lives in a per-token
+    :class:`_Bucket` and every URL carries the token as its first path segment
+    (``/<token>/<document_id>/render`` …). The HTML page reads its token and document from
+    ``location.pathname``, so the page itself stays static.
 
     State is pushed in via :meth:`publish` from MCP-request context; HTTP handlers only read it.
     """
@@ -84,6 +85,10 @@ class PreviewServer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._buckets: dict[str, _Bucket] = {}
+        #: Tokens whose session ended. A call still running when its session ended must not
+        #: publish a fresh bucket under the dead token; tokens are never reused (a mint that
+        #: collides re-mints), so this only grows by one per ended session.
+        self._ended: set[str] = set()
         self._httpd: ThreadingHTTPServer | None = None
         self._host = "127.0.0.1"
         self._port = 0
@@ -139,9 +144,10 @@ class PreviewServer:
             with contextlib.suppress(Exception):
                 httpd.server_close()
 
-    def url_for(self, token: str) -> str:
-        """The page URL a given session should open."""
-        return f"http://{self._host}:{self._port}/{token}/"
+    def url_for(self, token: str, document_id: str | None = None) -> str:
+        """The page URL for one document of a session, or the session's index page."""
+        base = f"http://{self._host}:{self._port}/{token}/"
+        return f"{base}{document_id}/" if document_id else base
 
     # -- snapshot publishing (one bucket per session) -----------------------
 
@@ -152,17 +158,16 @@ class PreviewServer:
             self._buckets[token] = bucket
         return bucket
 
-    def publish(
-        self, token: str, *, active_id: str | None, sources: dict[str, str], index_json: str
-    ) -> None:
+    def publish(self, token: str, *, sources: dict[str, str], index_json: str) -> None:
         """Replace the snapshot for one session and nudge its browsers to refresh.
 
         ``sources`` maps document_id -> serialized SVG; it is merged into the session's bucket (so
         previously-captured documents stay renderable) and pruned to the ids in ``index_json``.
         """
         with self._lock:
+            if token in self._ended:
+                return
             bucket = self._bucket(token)
-            bucket.active = active_id
             bucket.sources.update(sources)
             bucket.index_json = index_json
             try:
@@ -184,20 +189,30 @@ class PreviewServer:
             bucket = self._buckets.get(token)
             if bucket is None:
                 return None
-            if doc_id == "active":
-                doc_id = bucket.active or ""
             return bucket.sources.get(doc_id)
 
-    def state(self, token: str) -> tuple[int, str | None, str, str]:
+    def known(self, token: str) -> bool:
+        """Whether a session has published to this token (and not ended since).
+
+        A bucket only a watcher created (generation 0) does not count: the HTTP layer answers
+        an unknown token exactly like a missing page, so known and unknown tokens can't be
+        told apart by anyone who doesn't already hold one."""
+        with self._lock:
+            bucket = self._buckets.get(token)
+            return bucket is not None and bucket.gen > 0
+
+    def state(self, token: str) -> tuple[int, str, str]:
         with self._lock:
             bucket = self._buckets.get(token)
             if bucket is None:
-                return 0, None, _EMPTY_INDEX, "checker"
-            return bucket.gen, bucket.active, bucket.index_json, bucket.backdrop
+                return 0, _EMPTY_INDEX, "checker"
+            return bucket.gen, bucket.index_json, bucket.backdrop
 
     def set_backdrop(self, token: str, backdrop: str) -> None:
         """Set a session's preview backdrop and nudge its browsers (MCP-side control)."""
         with self._lock:
+            if token in self._ended:
+                return
             bucket = self._bucket(token)
             bucket.backdrop = backdrop
             bucket.gen += 1
@@ -216,8 +231,27 @@ class PreviewServer:
     def unsubscribe(self, token: str, q: queue.Queue[int]) -> None:
         with self._lock:
             bucket = self._buckets.get(token)
-            if bucket is not None:
-                bucket.clients.discard(q)
+            if bucket is None:
+                return
+            bucket.clients.discard(q)
+            # A bucket only a watcher ever created (nothing published, no backdrop set) goes
+            # with its last watcher, so requests for made-up tokens leave no state behind.
+            if not bucket.clients and bucket.gen == 0:
+                del self._buckets[token]
+
+    def forget(self, token: str) -> None:
+        """Drop a session's snapshot (its session ended) and tell its pages to refresh.
+
+        The pages then find the session empty; nothing it published stays servable.
+        """
+        with self._lock:
+            self._ended.add(token)
+            bucket = self._buckets.pop(token, None)
+            clients = list(bucket.clients) if bucket is not None else []
+            gen = bucket.gen + 1 if bucket is not None else 0
+        for q in clients:
+            with contextlib.suppress(queue.Full):
+                q.put_nowait(gen)
 
 
 server = PreviewServer()
@@ -246,6 +280,10 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
 
         def _text(self, body: str, mime: str = "text/plain; charset=utf-8") -> None:
             self._bytes(body.encode("utf-8"), mime)
+
+        def _not_found(self) -> None:
+            """The one 404 every refused preview route returns, byte for byte."""
+            self._status(404, "not found")
 
         def _status(self, code: int, message: str) -> None:
             data = message.encode("utf-8")
@@ -337,45 +375,49 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
                 return self._text(_INDEX_PAGE, "text/html; charset=utf-8")
 
             token, sub = parts[0], parts[1:]
-            if not sub:  # /<token> or /<token>/ — the page (it reads its own token from the URL)
+            # An unknown (or ended) token gets the SAME 404 on every route, the page included,
+            # and so does an unknown document's data under a known token: nothing here tells
+            # an existing token or document apart from a made-up one.
+            if not self.preview.known(token):
+                return self._not_found()
+            # /<token>/ (the session's index) or /<token>/<document_id>/ (one document): the
+            # same static page, which reads its token and document from the URL. A known
+            # token's page for a document that isn't open says so; the token holder can list
+            # the session's documents anyway, so that reveals nothing.
+            if not sub:
                 return self._text(_PAGE, "text/html; charset=utf-8")
             if sub == ["events"]:
                 return self._sse(token)
             if sub == ["version"]:
-                gen, active, _, backdrop = self.preview.state(token)
+                gen, _, backdrop = self.preview.state(token)
                 return self._text(
-                    json.dumps(
-                        {
-                            "gen": gen,
-                            "active": active,
-                            "vector": rsvg_available(),
-                            "backdrop": backdrop,
-                        }
-                    ),
+                    json.dumps({"gen": gen, "vector": rsvg_available(), "backdrop": backdrop}),
                     "application/json",
                 )
             if sub == ["documents"]:
-                index_json = self.preview.state(token)[2]
+                index_json = self.preview.state(token)[1]
                 return self._text(index_json, "application/json")
+            if len(sub) == 1:
+                return self._text(_PAGE, "text/html; charset=utf-8")
 
             # /<token>/{doc}/svg | /render | /export.{fmt}
             if len(sub) == 2:
                 doc_id, leaf = sub
                 source = self.preview.resolve(token, doc_id)
                 if source is None:
-                    return self._status(404, "no such document")
+                    return self._not_found()
                 if leaf == "svg":
                     return self._bytes(source.encode("utf-8"), _MIME["svg"])
                 if leaf == "render":
                     return self._export(source, "png")
                 if leaf.startswith("export."):
                     return self._export(source, leaf.split(".", 1)[1], download=True)
-            return self._status(404, "not found")
+            return self._not_found()
 
         def _export(self, source: str, fmt: str, *, download: bool = False) -> None:
             fmt = fmt.lower()
             if fmt not in SUPPORTED_FORMATS:
-                return self._status(404, f"unsupported format: {fmt}")
+                return self._not_found()
             try:
                 body = export_bytes(source, fmt)
             except Exception as exc:  # render/convert failure -> let the page keep the old frame
@@ -396,6 +438,8 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
                     try:
                         gen = q.get(timeout=15)
                     except queue.Empty:
+                        if not self.preview.known(token):
+                            return  # the session ended: drop the orphaned stream
                         self.wfile.write(b": ping\n\n")
                         self.wfile.flush()
                         continue
@@ -429,7 +473,8 @@ _INDEX_PAGE = (
     "<body style='font:14px system-ui;background:#1a1b1e;color:#e6e6e6;padding:40px'>"
     "<h2>svg-mcp live preview</h2>"
     "<p>This URL needs a session token. Call the <code>start_preview</code> tool in your chat "
-    "and open the URL it returns (<code>/&lt;token&gt;/</code>) — each chat gets its own.</p>"
+    "and open the URL it returns (<code>/&lt;token&gt;/&lt;document&gt;/</code>) — each chat "
+    "gets its own.</p>"
 )
 
 
@@ -484,6 +529,9 @@ _PAGE = """<!doctype html>
            box-shadow: 0 8px 40px rgba(0,0,0,.5); background: #fff; }
   #stage img, #stage svg { display: block; max-width: none; -webkit-user-drag: none;
            user-select: none; }
+  .doc-index { list-style: none; margin: 0; padding: 24px; font: 15px system-ui; }
+  .doc-index li { margin: 8px 0; }
+  .doc-index a { color: #e6e6e6; }
 </style>
 </head>
 <body>
@@ -521,9 +569,13 @@ const stage = document.getElementById('stage');
 const view = document.querySelector('main');
 const dot = document.getElementById('dot');
 const meta = document.getElementById('meta');
-// This page is served at /<token>/ — every API call is scoped to that session token, so two
-// chats sharing the server never see each other's documents.
-const base = '/' + (location.pathname.split('/').filter(Boolean)[0] || '');
+// Served at /<token>/<document_id>/ (one document) or /<token>/ (the session's index). Every
+// API call is scoped to the session token, so two chats sharing the server never see each
+// other's documents; a document page stays on its document.
+const segs = location.pathname.split('/').filter(Boolean);
+const base = '/' + (segs[0] || '');
+const docId = segs[1] || null;
+const docBase = docId ? base + '/' + encodeURIComponent(docId) : null;
 let mode = 'png';      // 'png' | 'svg'
 let scale = 1;
 let vector = false;
@@ -611,14 +663,33 @@ function buildSaveMenu(){
   const formats = [['png','PNG'],['svg','SVG'],['webp','WebP'],['jpeg','JPEG']];
   if (vector) formats.push(['pdf','PDF']);
   document.getElementById('save-menu').innerHTML = formats.map(([f,label]) =>
-    '<a href="' + base + '/active/export.' + f + '" download="drawing.' + f + '">' + label + '</a>'
+    '<a href="' + docBase + '/export.' + f + '" download="' + docId + '.' + f + '">'
+      + label + '</a>'
   ).join('');
 }
 
 let gen = -1;
 let lastServerBackdrop = null;
+let es = null;
+let ended = false;
+function showEnded(){
+  // The session ended (or never existed): its routes now 404. Stop listening and say so.
+  ended = true;
+  if (es) es.close();
+  dot.classList.remove('live');
+  meta.textContent = 'session ended';
+  stage.replaceChildren();
+}
 async function refresh(){
-  const r = await fetch(base + '/version', {cache:'no-store'});
+  if (ended) return;
+  let r;
+  try {
+    r = await fetch(base + '/version', {cache:'no-store'});
+  } catch (_e) {
+    dot.classList.remove('live');  // the preview server itself is down: just go quiet
+    return;
+  }
+  if (r.status === 404) { showEnded(); return; }
   if (!r.ok) return;
   const v = await r.json();
   gen = v.gen;
@@ -628,32 +699,61 @@ async function refresh(){
     lastServerBackdrop = v.backdrop;
     applyBackdrop(v.backdrop);
   }
-  if (!v.active) { meta.textContent = 'no active document'; stage.replaceChildren(); return; }
+  let docs = [];
   try {
-    const idx = await (await fetch(base + '/documents', {cache:'no-store'})).json();
-    const d = (idx.documents || []).find(x => x.active) || {};
-    const size = d.width ? '  ·  ' + Math.round(d.width) + '×' + Math.round(d.height) : '';
-    meta.textContent = (d.id || v.active) + size;
+    docs = (await (await fetch(base + '/documents', {cache:'no-store'})).json()).documents || [];
   } catch (_e) {}
+  if (!docId) { showIndex(docs); return; }
+  const d = docs.find(x => x.id === docId);
+  if (!d) {
+    meta.textContent = docId + ' — not open in this session';
+    stage.replaceChildren();
+    return;
+  }
+  const size = d.width ? '  ·  ' + Math.round(d.width) + '×' + Math.round(d.height) : '';
+  meta.textContent = d.id + size;
   if (mode === 'png') {
     const img = new Image();
     img.draggable = false;
     img.onload = () => { stage.replaceChildren(img); applyScale(); };
-    img.src = base + '/active/render?v=' + gen;
+    img.src = docBase + '/render?v=' + gen;
   } else {
-    const svg = await (await fetch(base + '/active/svg?v=' + gen, {cache:'no-store'})).text();
+    const svg = await (await fetch(docBase + '/svg?v=' + gen, {cache:'no-store'})).text();
     stage.innerHTML = svg;  // innerHTML does not execute scripts embedded in the SVG
     applyScale();
   }
 }
 
+// The session index (/<token>/): one link per open document, opening its own page.
+function showIndex(docs){
+  meta.textContent = docs.length ? 'documents in this session' : 'no documents yet';
+  const list = document.createElement('ul');
+  list.className = 'doc-index';
+  for (const d of docs) {
+    const li = document.createElement('li');
+    const a = document.createElement('a');
+    a.href = base + '/' + encodeURIComponent(d.id) + '/';
+    const dims = d.width ? '  ·  ' + Math.round(d.width) + '×' + Math.round(d.height) : '';
+    a.textContent = d.id + dims;
+    li.appendChild(a);
+    list.appendChild(li);
+  }
+  stage.replaceChildren(list);
+}
+
 function connect(){
-  const es = new EventSource(base + '/events');
+  es = new EventSource(base + '/events');
   es.onopen = () => dot.classList.add('live');
   es.addEventListener('change', refresh);
-  es.onerror = () => { dot.classList.remove('live'); };
+  // A dropped stream may mean the session ended: refresh() checks, and stops if so.
+  es.onerror = () => { dot.classList.remove('live'); refresh(); };
 }
-buildSaveMenu();
+// The index page shows links, not a drawing: hide the drawing controls there.
+if (!docId) {
+  document.querySelectorAll('header .group, #save').forEach(el => { el.style.display = 'none'; });
+} else {
+  buildSaveMenu();
+}
 connect();
 refresh();
 </script>

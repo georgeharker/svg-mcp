@@ -42,6 +42,49 @@ def set_description(doc: Document, target: str, text: str) -> NodeRef:
     return _ref(element)
 
 
+# Where each field lives under <metadata>/rdf:RDF/cc:Work, as Inkscape writes it. Agents
+# (creator, rights) are wrapped in cc:Agent/dc:title.
+_RDF_FIELDS: dict[str, tuple[str, ...]] = {
+    "title": ("dc:title",),
+    "date": ("dc:date",),
+    "creator": ("dc:creator", "cc:Agent", "dc:title"),
+    "rights": ("dc:rights", "cc:Agent", "dc:title"),
+}
+
+
+def _qname(prefixed: str) -> str:
+    prefix, local = prefixed.split(":", 1)
+    return str(inkex.addNS(local, prefix))
+
+
+def _child(parent: BaseElement, prefixed: str) -> BaseElement:
+    """The first child with this tag, created when missing."""
+    tag = _qname(prefixed)
+    found = parent.find(tag)
+    if found is not None:
+        return found
+    created: BaseElement = inkex.etree.SubElement(parent, tag)
+    return created
+
+
+def _work(doc: Document) -> BaseElement:
+    """<metadata>/rdf:RDF/cc:Work, created as needed (the root of Inkscape's RDF block)."""
+    metadata = doc.svg.find(_qname("svg:metadata"))
+    if metadata is None:
+        metadata = inkex.etree.SubElement(doc.svg, _qname("svg:metadata"))
+    rdf = metadata.find(_qname("rdf:RDF"))
+    if rdf is None:
+        # Declare the prefixes here so the block serializes as rdf:/cc:/dc: like Inkscape's,
+        # not as auto-generated ns0: prefixes.
+        rdf = inkex.etree.SubElement(
+            metadata, _qname("rdf:RDF"), nsmap={p: str(inkex.NSS[p]) for p in ("rdf", "cc", "dc")}
+        )
+    work = _child(rdf, "cc:Work")
+    if work.get(_qname("rdf:about")) is None:
+        work.set(_qname("rdf:about"), "")
+    return work
+
+
 def set_document_metadata(
     doc: Document,
     *,
@@ -49,20 +92,44 @@ def set_document_metadata(
     creator: str | None = None,
     rights: str | None = None,
     date: str | None = None,
-) -> dict[str, str | None]:
-    """Set document-level RDF metadata fields (only the ones provided)."""
-    metadata = doc.svg.metadata
-    applied: dict[str, str | None] = {}
-    for field_name, value in (
-        ("doc_title", title),
-        ("creator", creator),
-        ("rights", rights),
-        ("date", date),
-    ):
-        if value is not None and hasattr(metadata, field_name):
-            setattr(metadata, field_name, value)
-            applied[field_name] = value
+) -> dict[str, str]:
+    """Set document-level RDF metadata fields (only the ones provided).
+
+    Written directly as Inkscape lays it out (``<metadata>/rdf:RDF/cc:Work``): inkex 1.4.1's
+    ``Metadata`` exposes these fields as read-only properties, so they can't be set through
+    it. ``title`` is also written as the root ``<title>``, which is what browsers and screen
+    readers read.
+    """
+    values = {"title": title, "creator": creator, "rights": rights, "date": date}
+    applied = {name: value for name, value in values.items() if value is not None}
+    if not applied:
+        return applied
+    work = _work(doc)
+    for name, value in applied.items():
+        node = work
+        for step in _RDF_FIELDS[name]:
+            node = _child(node, step)
+        node.text = value
+    if title is not None:
+        _set_child_text(doc.svg, inkex.Title, title)
     return applied
+
+
+def get_document_metadata(doc: Document) -> dict[str, str]:
+    """The RDF metadata fields that are set, read straight from the XML (inkex's own getters
+    test an lxml element's truthiness, which is False for a text-only element)."""
+    metadata = doc.svg.find(_qname("svg:metadata"))
+    if metadata is None:
+        return {}
+    work = metadata.find(f"{_qname('rdf:RDF')}/{_qname('cc:Work')}")
+    if work is None:
+        return {}
+    found: dict[str, str] = {}
+    for name, steps in _RDF_FIELDS.items():
+        node = work.find("/".join(_qname(step) for step in steps))
+        if node is not None and node.text is not None:
+            found[name] = str(node.text)
+    return found
 
 
 def _content_bbox(doc: Document) -> inkex.transforms.BoundingBox | None:

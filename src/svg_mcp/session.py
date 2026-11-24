@@ -1,8 +1,8 @@
-"""Multi-document session store with an active-document default.
+"""Multi-document session store.
 
-Documents are addressed by an explicit ``document_id``, but the store also tracks an *active*
-document (the most recently created or touched one). Tools may omit ``document_id`` to operate
-on the active document; passing one explicitly always overrides and becomes the new active.
+Every document is addressed by its explicit ``document_id``. There is deliberately no
+"active document" default: a call that could silently land on a document the caller didn't
+mean is worse than one that fails and asks for the id.
 """
 
 from __future__ import annotations
@@ -14,90 +14,56 @@ from .model.errors import DocumentNotFound
 
 
 class DocumentStore:
-    """Holds the live documents for a server session, plus the active-document pointer."""
+    """Holds the live documents for one session."""
 
     def __init__(self) -> None:
         self._docs: dict[str, Document] = {}
         self._counter = count(1)
-        self._active: str | None = None
 
     def create(
         self, width: float, height: float, viewbox: str | None = None
     ) -> tuple[str, Document]:
-        """Create and register a new document, make it active; returns (id, document)."""
+        """Create and register a new document; returns (id, document)."""
         document_id = f"doc{next(self._counter)}"
         document = Document.create(width, height, viewbox)
         self._docs[document_id] = document
-        self._active = document_id
         return document_id, document
 
     def register(self, document: Document) -> str:
-        """Register an externally built document, make it active; returns its new id."""
+        """Register an externally built document; returns its new id."""
         document_id = f"doc{next(self._counter)}"
         self._docs[document_id] = document
-        self._active = document_id
         return document_id
 
-    def replace(self, document_id: str | None, document: Document) -> str:
-        """Swap the Document behind an existing id (keeps the id and preview), make it active.
+    def replace(self, document_id: str, document: Document) -> str:
+        """Swap the Document behind an existing id (keeps the id and its preview page).
 
-        Lets ``import_svg`` load fresh SVG into the *active* document instead of spawning a new
-        one — so the document_id, live-preview URL, and session anchor all persist.
+        Lets ``import_svg`` load fresh SVG into a named document instead of opening a new
+        one, so the document_id, live-preview URL and resource URIs all persist.
         """
-        resolved = self.resolve_id(document_id)
-        if resolved not in self._docs:
-            raise DocumentNotFound(f"no document with id {resolved!r}")
-        self._docs[resolved] = document
-        self._active = resolved
-        return resolved
+        self.get(document_id)
+        self._docs[document_id] = document
+        return document_id
 
-    def resolve_id(self, document_id: str | None) -> str:
-        """Resolve an explicit id, or the active document when ``document_id`` is None."""
-        if document_id is not None:
-            return document_id
-        if self._active is None:
-            raise DocumentNotFound(
-                "no active document — create one with create_document, or pass document_id"
-            )
-        return self._active
-
-    def get(self, document_id: str | None = None) -> Document:
-        """Get a document by id (or the active one if None); the resolved doc becomes active."""
-        resolved = self.resolve_id(document_id)
-        try:
-            document = self._docs[resolved]
-        except KeyError:
-            raise DocumentNotFound(f"no document with id {resolved!r}") from None
-        self._active = resolved
-        return document
-
-    def peek(self, document_id: str) -> Document:
-        """Get a document by id WITHOUT changing the active pointer (for read-only access)."""
+    def get(self, document_id: str) -> Document:
+        """Get a document by id."""
         try:
             return self._docs[document_id]
         except KeyError:
-            raise DocumentNotFound(f"no document with id {document_id!r}") from None
-
-    @property
-    def active_id(self) -> str | None:
-        """The id of the active document, or None if no documents are open."""
-        return self._active
-
-    def set_active(self, document_id: str) -> str:
-        """Make ``document_id`` the active document."""
-        if document_id not in self._docs:
-            raise DocumentNotFound(f"no document with id {document_id!r}")
-        self._active = document_id
-        return document_id
+            raise DocumentNotFound(self._missing(document_id)) from None
 
     def list_ids(self) -> list[str]:
         return list(self._docs)
 
-    def delete(self, document_id: str | None = None) -> str:
-        """Delete a document (active if None); returns the deleted id."""
-        resolved = self.resolve_id(document_id)
-        if self._docs.pop(resolved, None) is None:
-            raise DocumentNotFound(f"no document with id {resolved!r}")
-        if self._active == resolved:
-            self._active = next(reversed(self._docs), None) if self._docs else None
-        return resolved
+    def delete(self, document_id: str) -> str:
+        """Delete a document; returns the deleted id."""
+        if self._docs.pop(document_id, None) is None:
+            raise DocumentNotFound(self._missing(document_id))
+        return document_id
+
+    def _missing(self, document_id: str) -> str:
+        open_ids = ", ".join(self._docs) or "none"
+        return (
+            f"no document with id {document_id!r} in this session (open: {open_ids}) — "
+            "create one with create_document"
+        )

@@ -5,6 +5,56 @@ released together under one version. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-11-23
+
+### Changed
+- **Breaking:** every tool that touches session state needs a `session_id` from
+  `create_session`, on every client and transport. Stdio and handshake-era HTTP clients no
+  longer get documents tied to their connection implicitly; a call without a `session_id` is
+  rejected with guidance. A session created over a handshake-era HTTP connection still
+  belongs to that connection: only it can use the id, and the session ends when it
+  disconnects. Over stdio the process is the isolation (one client per server).
+- **Breaking:** there is no active document. Every tool that acts on a document takes a
+  required `document_id`. `set_active_document` is removed, and `import_svg`'s `into_active`
+  is replaced by `document_id` (replace that document's content).
+- **Breaking:** resources are scoped to the session by a token (a hash of the session id):
+  `svg://<token>/documents`, `svg://<token>/<document_id>/svg` and `/render`. Tools return
+  them (`create_document` and `import_svg` give `resources`; `list_documents` and
+  `current_context` give `index`). A session owned by its connection only reads from it.
+- **Breaking:** the live preview has one page per document, `/<token>/<document_id>/`, and an
+  index at `/<token>/`. `start_preview` takes a `document_id` and returns that page's `url` plus
+  the `index`. A page stays on its document.
+- Ending a session (`end_session`, disconnect, idle reaping) also drops its live-preview
+  snapshot, so its pages stop serving the drawing. `set_preview_backdrop` needs a session.
+  The preview `index` URL carries a login ticket like the document URL, and the index page
+  hides the drawing controls. Preview watchers of unknown tokens leave no state behind.
+- The widget's resource URI is shared by every session, so it is now sent only on the
+  caller's own stream, not the listen bus.
+- `session_id` is a required, non-null argument in every session-state tool's schema, so
+  clients see it as mandatory. The `X-Svg-Mcp-Session` header is removed (nothing used it).
+  Tools that touch no session state (`list_fonts`, `render_svg`, `render_backends`,
+  `export_formats`, `measure_text`) no longer take a `session_id`.
+- The live preview answers an unknown or ended token, an unknown document's data and an
+  unsupported export format with one identical 404, so existing tokens and documents can't
+  be told apart from made-up ones. A page whose session ended shows "session ended".
+- A call still running when its session ends can no longer bring the session back: it is
+  refused instead of recreating the documents, and it can't republish the preview.
+- Refused resource reads (unknown token, ended session, a session owned by another
+  connection, a document that isn't open) all give the same error and never list
+  documents.
+- `start_preview` no longer takes a `host`: the preview binds to the configured
+  `preview_host` (loopback by default), so the model can't choose the exposure.
+- Style keys are documented as the CSS property names (`stroke-width`, `font-size`), the
+  only spelling the published schema accepts. The instructions used to list the snake_case
+  field names, which schema-validating clients such as mcp-combiner reject.
+- `list_documents` returns `{document_ids, index}`; `current_context` returns the session and
+  its open documents, without an outline.
+
+### Fixed
+- `set_document_metadata` never worked: inkex 1.4.1 exposes the metadata fields as
+  read-only properties, so every field failed. svg-mcp now writes Inkscape's RDF block itself,
+  and `title` also sets the root `<title>` that browsers and screen readers use.
+
 ## [0.10.7] - 2026-11-09
 
 ### Added
@@ -118,6 +168,7 @@ released together under one version. The format follows
 ### Fixed
 - Exports no longer try to fsync a directory on Windows.
 
+[0.11.0]: https://github.com/georgeharker/svg-mcp/compare/v0.10.7...v0.11.0
 [0.10.7]: https://github.com/georgeharker/svg-mcp/compare/v0.10.6...v0.10.7
 [0.10.6]: https://github.com/georgeharker/svg-mcp/compare/v0.10.5...v0.10.6
 [0.10.5]: https://github.com/georgeharker/svg-mcp/compare/v0.10.4...v0.10.5

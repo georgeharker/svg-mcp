@@ -209,9 +209,8 @@ class _Preview:
         _, self.port = self.server.ensure_running(port=0)
         self.server.publish(
             TOKEN,
-            active_id="doc1",
             sources={"doc1": SVG},
-            index_json=json.dumps({"active": "doc1", "documents": [{"id": "doc1"}]}),
+            index_json=json.dumps({"documents": [{"id": "doc1"}]}),
         )
 
     def request(
@@ -262,7 +261,7 @@ def site() -> Iterator[_Preview]:
 class TestLogin:
     def test_off_serves_everything(self, site: _Preview) -> None:
         assert site.get(f"/{TOKEN}/", Accept="text/html")[0] == 200
-        assert site.get(f"/{TOKEN}/active/svg")[0] == 200
+        assert site.get(f"/{TOKEN}/doc1/svg")[0] == 200
         assert site.get("/auth/login")[0] == 404  # no login page when off
 
     def test_pages_redirect_and_everything_else_is_401(
@@ -299,7 +298,7 @@ class TestLogin:
 
         cookie = _cookie(set_cookie)
         assert site.get(f"/{TOKEN}/", Accept="text/html", Cookie=cookie)[0] == 200
-        status, _, svg = site.get(f"/{TOKEN}/active/svg", Cookie=cookie)
+        status, _, svg = site.get(f"/{TOKEN}/doc1/svg", Cookie=cookie)
         assert status == 200 and svg == SVG
 
     def test_the_cookie_is_secure_behind_https(
@@ -387,8 +386,14 @@ class TestTickets:
             from svg_mcp.server import mcp
 
             async with Client(mcp, mode="legacy") as client:
-                await client.call_tool("create_document", {"width": 40, "height": 20})
-                result = await client.call_tool("start_preview", {"port": 0})
+                sid = (await client.call_tool("create_session", {})).data["session_id"]
+                created = await client.call_tool(
+                    "create_document", {"width": 40, "height": 20, "session_id": sid}
+                )
+                result = await client.call_tool(
+                    "start_preview",
+                    {"port": 0, "session_id": sid, "document_id": created.data["document_id"]},
+                )
             url: str = result.data["url"]
             return url
 
@@ -397,7 +402,8 @@ class TestTickets:
             parts = urlsplit(url)
             ticket = parse_qs(parts.query)["t"][0]
             assert ticket and parts.port is not None
-            token = parts.path.strip("/")
+            token, document_id = parts.path.strip("/").split("/")
+            assert document_id == "doc1"  # the page is the document's own, /<token>/<doc>/
             claims = signer.verify(ticket, "t")
             assert claims is not None and claims["sub"] == token
 
@@ -409,9 +415,7 @@ class TestTickets:
             assert cookie.startswith(f"{webauth.COOKIE}=")
             page = {"Accept": "text/html", "Cookie": cookie}
             assert _http(port, "GET", parts.path, headers=page)[0] == 200
-            status, _, svg = _http(
-                port, "GET", f"{parts.path}active/svg", headers={"Cookie": cookie}
-            )
+            status, _, svg = _http(port, "GET", f"{parts.path}svg", headers={"Cookie": cookie})
             assert status == 200 and svg.startswith("<svg")
         finally:
             preview.server.shutdown()
@@ -705,3 +709,101 @@ class TestLocalHost:
         _gate_on(signer, exempt_local=True)
         _gate_on(signer, exempt_local=True)
         assert starts == [1]
+
+
+class TestPerDocumentPages:
+    """The preview has no active document: each document has its own page, and the
+    session's index lists them (design 01M85RZ1N75F3VW2NMWKRPVA30)."""
+
+    def test_document_pages_and_the_index(self, site: _Preview) -> None:
+        assert site.get(f"/{TOKEN}/doc1/", **HTML)[0] == 200  # the document's page
+        assert site.get(f"/{TOKEN}/", **HTML)[0] == 200  # the session's index
+        assert site.get(f"/{TOKEN}/doc1/svg")[0] == 200
+        assert site.get(f"/{TOKEN}/doc1/render")[0] in (200, 503)  # 503 without a renderer
+        assert site.get(f"/{TOKEN}/active/svg")[0] == 404  # no "active" alias any more
+        assert site.get(f"/{TOKEN}/doc9/svg")[0] == 404
+
+    def test_the_index_lists_documents_without_an_active_flag(self, site: _Preview) -> None:
+        status, _, body = site.get(f"/{TOKEN}/documents")
+        assert status == 200
+        index = json.loads(body)
+        assert index == {"documents": [{"id": "doc1"}]}
+
+
+class TestPreviewHygiene:
+    def test_watching_an_unknown_token_leaves_no_state(self) -> None:
+        srv = preview.PreviewServer()
+        q = srv.subscribe("nobody")
+        srv.unsubscribe("nobody", q)
+        assert "nobody" not in srv._buckets  # noqa: SLF001 — the leak under test
+
+    def test_a_published_bucket_survives_its_watchers(self) -> None:
+        srv = preview.PreviewServer()
+        srv.publish(
+            "tok", sources={"doc1": SVG}, index_json=json.dumps({"documents": [{"id": "doc1"}]})
+        )
+        q = srv.subscribe("tok")
+        srv.unsubscribe("tok", q)
+        assert srv.resolve("tok", "doc1") == SVG
+
+    def test_forget_drops_the_snapshot_and_wakes_watchers(self) -> None:
+        srv = preview.PreviewServer()
+        srv.publish(
+            "tok", sources={"doc1": SVG}, index_json=json.dumps({"documents": [{"id": "doc1"}]})
+        )
+        q = srv.subscribe("tok")
+        srv.forget("tok")
+        assert srv.resolve("tok", "doc1") is None
+        assert q.get_nowait() == 2  # one past the last generation
+
+    def test_delete_document_prunes_the_snapshot(self) -> None:
+        srv = preview.PreviewServer()
+        two = {"documents": [{"id": "doc1"}, {"id": "doc2"}]}
+        srv.publish("tok", sources={"doc1": SVG, "doc2": SVG}, index_json=json.dumps(two))
+        srv.publish("tok", sources={}, index_json=json.dumps({"documents": [{"id": "doc2"}]}))
+        assert srv.resolve("tok", "doc1") is None and srv.resolve("tok", "doc2") == SVG
+
+
+class TestUniformNotFound:
+    """Unknown tokens and unknown documents are indistinguishable from outside."""
+
+    def test_an_unknown_token_is_404_on_every_route(self, site: _Preview) -> None:
+        bodies = set()
+        for path in (
+            "/nobody0000/",
+            "/nobody0000/doc1/",
+            "/nobody0000/events",
+            "/nobody0000/version",
+            "/nobody0000/documents",
+            "/nobody0000/doc1/svg",
+        ):
+            status, _, body = site.get(path, **HTML)
+            assert status == 404, path
+            bodies.add(body)
+        assert len(bodies) == 1
+
+    def test_an_unknown_document_matches_an_unknown_token(self, site: _Preview) -> None:
+        missing_doc = site.get(f"/{TOKEN}/doc9/svg")
+        missing_token = site.get("/nobody0000/doc1/svg")
+        bad_format = site.get(f"/{TOKEN}/doc1/export.bmp")
+        assert missing_doc[0] == missing_token[0] == bad_format[0] == 404
+        assert missing_doc[2] == missing_token[2] == bad_format[2]
+
+    def test_a_known_tokens_page_still_loads_for_a_closed_document(self, site: _Preview) -> None:
+        assert site.get(f"/{TOKEN}/doc9/", **HTML)[0] == 200
+
+    def test_an_ended_session_404s(self, site: _Preview) -> None:
+        site.server.forget(TOKEN)
+        assert site.get(f"/{TOKEN}/version")[0] == 404
+        assert site.get(f"/{TOKEN}/doc1/", **HTML)[0] == 404
+
+
+class TestEndedTokens:
+    def test_publish_and_backdrop_after_forget_do_not_resurrect(self) -> None:
+        srv = preview.PreviewServer()
+        one = json.dumps({"documents": [{"id": "doc1"}]})
+        srv.publish("tok", sources={"doc1": SVG}, index_json=one)
+        srv.forget("tok")
+        srv.publish("tok", sources={"doc1": SVG}, index_json=one)  # a late in-flight call
+        srv.set_backdrop("tok", "white")
+        assert not srv.known("tok") and srv.resolve("tok", "doc1") is None

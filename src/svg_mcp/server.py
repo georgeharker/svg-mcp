@@ -16,7 +16,7 @@ import json
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Literal, Optional, cast, overload
+from typing import Literal, Protocol, overload
 from weakref import WeakKeyDictionary
 
 from fastmcp import Context, FastMCP
@@ -45,7 +45,7 @@ from fastmcp.server.sessions import (
 from fastmcp.server.sessions import (
     end_session as end_minted_session,
 )
-from fastmcp.tools import FunctionTool, ToolResult
+from fastmcp.tools import ToolResult
 from mcp.server.connection import Connection
 from mcp.server.subscriptions import (  # type: ignore[import-not-found,unused-ignore]  # noqa: I001 — mcp-2-only (svg-mcp's floor); mypy's ignore_missing_imports + this comment cover older editor envs
     InMemorySubscriptionBus,
@@ -55,13 +55,6 @@ from mcp.server.subscriptions import (  # type: ignore[import-not-found,unused-i
 from mcp.types import (
     SubscriptionsListenRequestParams,  # type: ignore[import-not-found,unused-ignore]  # noqa: E501 — same armor
 )
-
-# mcp_types is an mcp-2-only package: mypy's ignore_missing_imports already covers it on old
-# editor envs, and fastmcp-4 envs see no error at all — so mypy flags the comment itself as
-# unused there; both codes listed. pyright reads the line via the same comment.
-from mcp_types.version import (
-    MODERN_PROTOCOL_VERSIONS,  # type: ignore[import-not-found,unused-ignore]  # noqa: E501
-)
 from pydantic import AnyUrl, BaseModel
 
 from . import ops
@@ -69,7 +62,7 @@ from . import preview as _preview
 from . import webgate as _webgate
 from . import widget as _widget
 from .model.document import Document
-from .model.errors import InvalidArgument, NoSession
+from .model.errors import DocumentNotFound, InvalidArgument, NoSession
 from .model.handles import NodeRef
 from .ops.resources import FilterInfo as _FilterInfo
 from .ops.resources import FxParams as _FxParams
@@ -126,9 +119,14 @@ svg-mcp authors SVG vector graphics as a structured, hierarchical document you b
 tool calls and **see** by rendering to an image. Work in a tight loop: make a change, call
 `render_document` to look at it, then adjust.
 
+Example calls in this guide omit `session_id` and `document_id` for brevity: every real
+call passes `session_id`, and every call that acts on a document passes `document_id`.
+
 WORKFLOW
-1. `create_document(width, height)` → returns a `document_id` and makes it the ACTIVE
-   document. You may then omit `document_id` on later calls to target the active one.
+0. `create_session()` once per drawing task → a `session_id`. Pass it on EVERY svg-mcp call
+   (see SESSIONS below).
+1. `create_document(width, height)` → returns a `document_id`. Pass it on EVERY call that
+   acts on that document: nothing defaults to "the current one".
 2. Add content: `add_rect`/`add_circle`/`add_path`/`add_text`/… Each returns the new node's
    `{id, tag, name}` — keep the `id` (or give it a `name`) to refer back to the node.
    Drawing a box-arrow diagram? Use the DIAGRAM facades below, not raw shapes. Plotting
@@ -143,15 +141,15 @@ WORKFLOW
    and where (`export_render` → png/jpeg/webp/pdf/ps/eps/svg), hand back the SVG source, or just
    leave it as the live document. Don't assume; don't silently stop with only an inline preview.
 
-ACTIVE DOCUMENT
-- The store tracks an *active* document (the most recently created or touched one). Omit
-  `document_id` to operate on it; pass `document_id` explicitly to override (that doc then
-  becomes active). Use `set_active_document` to switch deliberately.
-- When juggling several documents, pass `document_id` explicitly to avoid ambiguity.
+DOCUMENTS ARE ALWAYS NAMED
+- There is no active or current document. Every tool that acts on a document takes a required
+  `document_id`; a call without one is rejected rather than guessing. Several documents can be
+  open in one session; each call says which it means.
 
 ORIENTING (contextualize queries)
-- `current_context()` — active id, all open ids, and an outline of the active document. Call it
-  to re-anchor after a long conversation when you may have lost track.
+- `current_context()` / `list_documents()` — the session's open document ids. Call one to
+  re-anchor after a long conversation when you may have lost track, then `outline` the one you
+  mean.
 - `outline` — the document tree (names, kinds, ids); `describe_node(target)` — everything about
   one node (kind, world bbox, computed style, local + composed transform, parent) in one call.
 - `list_resources()` — the gradients/patterns/filters/clips/masks/markers/symbols and named
@@ -182,12 +180,12 @@ COORDINATES
 - User units, origin at top-left, x→right, y→down. The viewBox defaults to `0 0 width height`.
 
 STYLING & PAINT
-- `style` is a structured object: `fill`, `stroke`, `stroke_width`, `opacity`, `fill_opacity`,
-  `stroke_opacity`, `stroke_dasharray`, `stroke_linecap`, `stroke_linejoin`, plus typography
-  (`font_family`, `font_size`, `font_weight`, `font_style`, `text_anchor`, `letter_spacing`, …).
-- Keys accept **either** snake_case (`font_size`) **or** the CSS name (`font-size`); `font_size`
-  also takes a bare number (px). Unknown/misspelled keys are REJECTED with an error (not dropped),
-  so set the whole style in one call and trust it stuck.
+- `style` is a structured object keyed by CSS property names: `fill`, `stroke`, `stroke-width`,
+  `opacity`, `fill-opacity`, `stroke-opacity`, `stroke-dasharray`, `stroke-linecap`,
+  `stroke-linejoin`, plus typography (`font-family`, `font-size`, `font-weight`, `font-style`,
+  `text-anchor`, `letter-spacing`, …). Use the hyphenated CSS names: they are what the schema
+  accepts. `font-size` also takes a bare number (px). Unknown/misspelled keys are REJECTED with
+  an error (not dropped), so set the whole style in one call and trust it stuck.
 - Colors accept hex (`#ff0000`), `rgb()/rgba()`, CSS names (`tomato`), or `none`.
 - A fill/stroke may also reference a defined resource by id `url(#<id>)`, the shorthand `@<name>`,
   or `url(#<name>)` — all resolve to the defined gradient/pattern. Define the resource first.
@@ -357,9 +355,10 @@ TEXT
   do not delete + re-add (that drops the node's id/clip/filters/z-order).
 - Do NOT estimate text width by chars × size — call `measure_text` (below); it's why it exists.
 - Fonts: `list_fonts()` returns the family names installed on this machine — pick one and set it
-  via `style.font_family`. `font_size`, `font_weight` (`bold`/`700`), `font_style` (`italic`),
-  `text_anchor` (start/middle/end), `letter_spacing`, `word_spacing`, `text_decoration`,
-  `dominant_baseline` (vertical align), and `paint_order` are all settable on `style`.
+  via `style["font-family"]`. `font-size`, `font-weight` (`bold`/`700`), `font-style`
+  (`italic`), `text-anchor` (start/middle/end), `letter-spacing`, `word-spacing`,
+  `text-decoration`, `dominant-baseline` (vertical align), and `paint-order` are all settable on
+  `style`.
 - `measure_text(content, style)` returns `{width, height}` in user units from the font's own
   metrics — use it to fit/center text and size boxes BEFORE rendering (no render round-trip).
   inkex does not shape glyphs, so geometric bbox queries return empty for text; `measure_text`
@@ -377,9 +376,11 @@ RENDERING & EXPORT
   whether vector export is available. cairo is intentionally unused (it drops SVG filters).
 
 RESOURCES
-- The server also publishes read-only resources the host may surface as context:
-  `svg://documents` (index of open docs + which is active), `svg://{document_id}/svg` (live SVG
-  source), and `svg://{document_id}/render` (a PNG preview). Reading them never changes state.
+- The server also publishes read-only resources the host may surface as context, scoped to
+  the session by a token: `svg://<token>/documents` (index of open docs),
+  `svg://<token>/<document_id>/svg` (live SVG source) and `svg://<token>/<document_id>/render`
+  (a PNG preview). Tools return these URIs (`create_document`'s `resources`, `list_documents`'
+  `index`); use them as given. Reading them never changes state.
 
 LIVE PREVIEW
 - **Offer the preview URL early — don't wait to be asked.** As soon as you start any drawing
@@ -389,10 +390,11 @@ LIVE PREVIEW
   early instead of waiting for a finished result they may not want.
 - Also do this whenever they ask to *see* the work — "show me", "let me see it", "open a
   preview", "can I watch", "I want to see that".
-- The URL is per-chat (it carries a session token like `/a1b2c3.../`), so always surface the
-  value returned by the tool rather than a guessed address. Share it once; if a preview is
-  already running, just remind them of that URL rather than starting another.
-- The preview tracks the ACTIVE document and refreshes automatically on each edit, so you do NOT
+- `start_preview(document_id)` returns that document's page (`/<token>/<document_id>/`) plus
+  the session's `index` page. Always surface the value returned by the tool rather than a
+  guessed address. The page stays on its document: when you start another document, call
+  `start_preview` with its id and give the user the new URL.
+- The page refreshes automatically on each edit to its document, so you do NOT
   need to call `render_document` for the user's benefit — keep building and let the preview update.
   Reserve `render_document` for when YOU need to inspect the result, and prefer batching the
   primitives you already know you need before you stop to look.
@@ -400,63 +402,54 @@ LIVE PREVIEW
 SESSIONS (MINTED DOCUMENTS)
 - Mint a session per drawing task: call `create_session` FIRST, then pass its `session_id`
   on EVERY svg-mcp call — each tool's schema marks the argument, and passing it yourself is
-  the contract (no client injects it behind your back). Documents persist under it: across
-  connection churn, and another chat can pick the drawing up with the same id. An
-  identity-less call that needs a session is rejected with that same guidance — run
-  create_session and retry with the id it returned.
-- `create_session` when minted on a direct/handshake connection is owned by that connection
-  (it dies with the connection); a mint made on a stateless (2026-07-28) link cannot be
-  bound — the unguessable id is its capability.
+  the contract on every client and transport (no client injects it, and there is no
+  per-connection fallback). Documents persist under it, across connection churn. A call
+  without a session is rejected with that same guidance — run create_session and retry with
+  the id it returned.
+- A session minted over a handshake-era HTTP connection is owned by that connection (it
+  dies with the connection). One minted on a stateless (2026-07-28) link cannot be bound —
+  the unguessable id is its capability. Over stdio the server serves only you.
 - `end_session` invalidates a session and discards its documents. Never call it mid-task.
-
-Multiple documents can be open at once; omit `document_id` for the active one, or pass it
-explicitly to target a specific document.
 """
 
 mcp: FastMCP = FastMCP(name="svg-mcp", instructions=_INSTRUCTIONS)
 
+# Out-of-request (direct/programmatic) use only: every MCP request must name a session.
+# There is deliberately no per-connection store: implicit state let a call land on a
+# document the model didn't mean (design 01M85RZ1N75F3VW2NMWKRPVA30).
 _DEFAULT_STORE = DocumentStore()
-# Per-connection document stores, keyed by the low-level mcp `Connection` — the per-client object
-# that lives for the whole client session on every protocol era (its `_connection` attribute hangs
-# off the low-level `ServerSession` that serves each request). Keying on the `ServerSession`
-# itself is NOT safe on mcp 2: in request contexts it is constructed fresh per inbound request,
-# so a store keyed on it would be empty on every call and die on release — silently.
-#
-# MCP exposes no session-close hook for the dictionary itself, so cleanup is two-layered: the
-# connection's `exit_stack` (an AsyncExitStack unwound when the connection closes) releases the
-# store deterministically, and the WeakKeyDictionary is belt-and-braces GC in case the stack is
-# never unwound. The stable `session_id` string identifies the same connection for
-# logging/observability (see `_session_id`); we deliberately do NOT key on it, to keep the
-# automatic cleanup. Note a 2026-era (stateless) client gets a fresh Connection per request and
-# therefore no persistent session documents; streamable HTTP on the handshake era, stdio and
-# every client behind the mcp-combiner are unaffected.
-_SESSION_STORES: WeakKeyDictionary[Connection, DocumentStore] = WeakKeyDictionary()
 
 # --- 2026-era (stateless) support -------------------------------------------
 # Stateless-era requests have NO durable wire identity — each request is its own Connection,
 # born and discarded with it — so per-session state there is keyed on a *minted* session id
 # instead: the MODEL calls `create_session` once and passes the id back on every call
 # (validated via fastmcp's session framework `get_session`, so an id ends/forgot/expires
-# through the same channel it was created through). A few bespoke proxies MAY carry it
-# ambiently per request via the `X-Svg-Mcp-Session` header; the mcp-combiner deliberately
-# does NOT — it passes tool arguments through unchanged, so the model supplies session_id
-# itself. Validation runs on EVERY resolve — the fastmcp session record is the source of
+# through the same channel it was created through). The id is a REQUIRED argument of every
+# session-state tool (the schema rejects a missing or null one); there is no ambient carrier
+# — the mcp-combiner passes tool arguments through unchanged, so the model supplies it.
+# Validation runs on EVERY resolve — the fastmcp session record is the source of
 # truth, so a store whose session was ended/forgot-expired is popped and cannot resurrect.
-# Like _SESSION_STORES this registry is in-process: it survives all combiner restarts
+# This registry is in-process: it survives all combiner restarts
 # (svg-mcp doesn't restart), dies with svg-mcp itself. A session never `end_session`ed
 # holds its documents until then (the same trade the stateful path makes at disconnect).
-_MINTED_SESSION_HEADER = "x-svg-mcp-session"
 _CURRENT_MINTED_SESSION: ContextVar[str | None] = ContextVar("svg_mcp_minted_session", default=None)
 _MINTED_SESSION_STORES: dict[str, DocumentStore] = {}
+#: Preview/resource token -> minted session id, so a resource URI (which carries no
+#: session_id argument) can name its session. Filled at mint and on every resolve.
+_TOKEN_SESSIONS: dict[str, str] = {}
 # Who may USE each minted session: the binding records the minting request's stable session
-# id when one exists (handshake-era/stdio connections have one — the Mcp-Session-Id);
-# stateless (2026-era) requests have no durable identity, so their mints record None and the
-# minted id itself is the capability (intrinsic to the stateless era). A bound session is
-# ONLY resolvable from the connection that minted it — a leaked id used from another
-# connection is rejected — and dies with that connection (its stores are popped and its
-# fastmcp session record invalidated at connection teardown). An unbound session lives until
-# `end_session` (or the process dies; the HTTP idle bound does not reach fastmcp's state
-# records). Under auth, `get_session` additionally principal-scopes both cases.
+# id when one exists — the `Mcp-Session-Id` header of a handshake-era HTTP connection.
+# Stateless (2026-era) requests have no durable identity, so their mints record None and the
+# minted id itself is the capability (intrinsic to the stateless era). stdio has no HTTP
+# header either, so stdio mints are unbound too: there the PROCESS is the isolation (one
+# stdio server serves exactly one client, and its sessions end when that client disconnects
+# and the process exits). A bound session is ONLY resolvable from the connection that
+# minted it and dies with that connection (stores popped, fastmcp record invalidated at
+# teardown). What that protects is a `session_id` leaked on its own: anyone who also holds
+# the connection's `Mcp-Session-Id` already has the connection, so the `/mcp` bearer token
+# is the real wall. An unbound session lives until `end_session` (or the process dies; the
+# HTTP idle bound does not reach fastmcp's state records). Under auth, `get_session`
+# additionally principal-scopes both cases.
 _MINTED_SESSION_OWNER: dict[str, str | None] = {}
 # The minted session's fastmcp record object, captured AT MINT TIME (principal + state store
 # pinned). Connection teardown runs OUTSIDE any request — `get_session`/helpers that resolve
@@ -464,7 +457,7 @@ _MINTED_SESSION_OWNER: dict[str, str | None] = {}
 # deleting via `record.end()` needs no request context.
 _MINTED_SESSION_RECORD: dict[str, Session] = {}
 # Per-connection minted-session groups, for deterministic release at connection close —
-# same lifecycle hook as `_SESSION_STORES` (Connection.exit_stack + WeakKeyDictionary).
+# Connection.exit_stack, with the WeakKeyDictionary as belt-and-braces GC.
 _MINTED_BY_CONNECTION: WeakKeyDictionary[Connection, list[str]] = WeakKeyDictionary()
 
 
@@ -473,10 +466,11 @@ _MCP_SESSION_ID_HEADER = "mcp-session-id"
 
 def _stable_connection_id() -> str | None:
     """The current request's stable wire identity, for minted-session ownership: the
-    stateful `Mcp-Session-Id` request header when present — handshake-era/stdio clients
+    stateful `Mcp-Session-Id` request header when present — handshake-era HTTP clients
     carry it on every request after initialize, and it names the same server-side connection
     for the connection's whole life. Requests of the stateless (2026) era carry none (the
-    protocol forbids the server assigning it), so mints there record None.
+    protocol forbids the server assigning it), and stdio has no HTTP headers at all, so
+    mints there record None.
 
     NOTE: the low-level Connection's own `session_id` attribute is PER-REQUEST (fastmcp
     derives and backfills a fresh uuid when none exists) and is deliberately NOT used as
@@ -506,6 +500,10 @@ def _revoke_minted(sid: str) -> None:
     and the captured fastmcp record object are dropped (deleting the fastmcp RECORD itself
     is the async caller's job — see `_release_connection_minted`/`end_session`)."""
     _MINTED_SESSION_STORES.pop(sid, None)
+    token = _token_for(sid)
+    if _TOKEN_SESSIONS.get(token) == sid:
+        _TOKEN_SESSIONS.pop(token, None)
+    _preview.server.forget(token)  # its documents stop being servable by the preview
     _MINTED_SESSION_OWNER.pop(sid, None)
     _MINTED_SESSION_RECORD.pop(sid, None)
 
@@ -545,9 +543,9 @@ def _mint_ownership(sid: str, owner: str | None) -> None:
 # runtime VALUE, not just a type expression: fastmcp resolves parameter annotations via
 # `get_type_hints`, which reads the function's `__annotations__` dict, NOT the Parameter
 # objects in a `__signature__` override — so the wrapper assigns this into its
-# `__annotations__` at construction. `SessionId | None` is valid in annotation position, but
-# pyright rejects `|` on Annotated in the runtime-expression position — hence `Optional`.
-_SESSION_ID_ARG = Optional[SessionId]  # noqa: UP045 — runtime value, not an annotation; see comment above
+# `__annotations__` at construction. Plain `SessionId` (a str), never Optional: the schema
+# must reject a missing or null session_id.
+_SESSION_ID_ARG = SessionId
 
 # HTTP-session idle bound: "never" was tempting (stateful sessions hold a chat's drawing while
 # it pauses) but means a crashed or vanished combiner leaves every parked per-chat session —
@@ -580,18 +578,6 @@ def _apply_default_idle_bound() -> None:
         _settings.http_session_idle_timeout = _DEFAULT_IDLE_TIMEOUT_S  # type: ignore[attr-defined,unused-ignore]
 
 
-def _ambient_session_id() -> str | None:
-    """The ambient minted-session id for the current request, when a bespoke client or
-    proxy carries it on every request via the `X-Svg-Mcp-Session` header. The
-    mcp-combiner does NOT do this — the model passes `session_id` itself there. None
-    when no header is present.
-    """
-    try:
-        return get_http_headers().get(_MINTED_SESSION_HEADER)
-    except Exception:
-        return None
-
-
 async def _resolve_minted_session(session_id: str) -> None:
     """Validate a minted id and lazily register its live DocumentStore (call from wrappers).
 
@@ -610,23 +596,21 @@ async def _resolve_minted_session(session_id: str) -> None:
             f"unknown session_id {session_id!r}: "
             "never created (call create_session) or already ended"
         ) from None
-    owner = _MINTED_SESSION_OWNER.get(session_id)
-    if owner is not None and owner != _stable_connection_id():
-        raise InvalidArgument(
-            f"session_id {session_id!r} belongs to a different connection: mint a fresh "
-            "one on this connection with create_session"
-        )
+    _assert_usable_from_here(session_id)
     _MINTED_SESSION_STORES.setdefault(session_id, DocumentStore())
+    _TOKEN_SESSIONS[_token_for(session_id)] = session_id
 
 
-def _session_bound(fn: Callable[..., object]) -> Callable[..., object]:
-    """Make a tool session-aware: an optional validated `session_id`, resolved to state.
+def _session_bound(fn: Callable[..., object]) -> Callable[..., Awaitable[object]]:
+    """Make a tool session-aware: a REQUIRED validated `session_id`, resolved to state.
 
-    Appends a kw-only `session_id: SessionId | None` parameter (schema-visible, default None,
-    auto-described by fastmcp's SessionId marker with the create-then-pass contract),
-    validates it against fastmcp's session framework on every use, and publishes it to
-    `_store()` via a contextvar so the lower layers never need explicit plumbing. Precedence:
-    explicit argument > ambient header. Typed loosely on purpose (Callable[..., object]): a
+    Appends a required kw-only `session_id: SessionId` parameter (schema-visible and in the
+    schema's `required`, a plain string — never null — auto-described by fastmcp's SessionId
+    marker with the create-then-pass contract), validates it against fastmcp's session
+    framework on every use, and publishes it to `_store()` via a contextvar so the lower
+    layers never need explicit plumbing. The schema makes MCP callers pass it; a direct
+    Python call outside any request may omit it and gets the shared default store (that is
+    how tests and scripts drive tools). Typed loosely on purpose (Callable[..., object]): a
     ParamSpec wrapper can't survive pruning a key from **kwargs structurally, and the
     schema/type-hint surfaces are built from the `__signature__` override + `__annotations__`
     assignment below (the `__signature__` surgery is the same as `emits_change`; fastmcp
@@ -637,8 +621,7 @@ def _session_bound(fn: Callable[..., object]) -> Callable[..., object]:
     param = inspect.Parameter(
         "session_id",
         inspect.Parameter.KEYWORD_ONLY,
-        default=None,
-        annotation=SessionId | None,
+        annotation=SessionId,
     )
     new_signature = inner_sig.replace(parameters=[*inner_sig.parameters.values(), param])
 
@@ -647,9 +630,14 @@ def _session_bound(fn: Callable[..., object]) -> Callable[..., object]:
         arg = kwargs.pop("session_id", None)
         # Values of **kwargs are `object` to the checker; only a real str is session-able.
         session_id: str | None = arg if isinstance(arg, str) else None
-        if session_id is None:
-            session_id = _ambient_session_id()
+        if session_id is None and _in_request():
+            # The schema already requires it; this guards any path that skipped validation.
+            raise NoSession(
+                "no session_id: call create_session once, then pass its id as the "
+                "session_id argument on every svg-mcp call"
+            )
         token = _CURRENT_MINTED_SESSION.set(session_id)
+        touched_token = _TOUCHED.set([])
         try:
             if session_id is not None:
                 await _resolve_minted_session(session_id)
@@ -658,6 +646,7 @@ def _session_bound(fn: Callable[..., object]) -> Callable[..., object]:
                 result = await result  # inner async wrapper (`emits_change`) — same tool chain
             return result
         finally:
+            _TOUCHED.reset(touched_token)
             _CURRENT_MINTED_SESSION.reset(token)
 
     wrapper.__signature__ = new_signature  # type: ignore[attr-defined]
@@ -668,60 +657,98 @@ def _session_bound(fn: Callable[..., object]) -> Callable[..., object]:
     return wrapper
 
 
-@overload
-def tool(fn: Callable[..., object], /, *, app: AppConfig | None = None) -> FunctionTool: ...
+class _Register(Protocol):
+    """`tool(app=...)`'s decorator: the same result typing as the direct form."""
+
+    @overload
+    def __call__[R](self, fn: Callable[..., Awaitable[R]], /) -> Callable[..., Awaitable[R]]: ...
+
+    @overload
+    def __call__[R](self, fn: Callable[..., R], /) -> Callable[..., Awaitable[R]]: ...
 
 
 @overload
-def tool(
-    fn: None = None, /, *, app: AppConfig | None = None
-) -> Callable[[Callable[..., object]], FunctionTool]: ...
+def tool[R](
+    fn: Callable[..., Awaitable[R]], /, *, app: AppConfig | None = None
+) -> Callable[..., Awaitable[R]]: ...
+
+
+@overload
+def tool[R](
+    fn: Callable[..., R], /, *, app: AppConfig | None = None
+) -> Callable[..., Awaitable[R]]: ...
+
+
+@overload
+def tool(fn: None = None, /, *, app: AppConfig | None = None) -> _Register: ...
 
 
 def tool(
     fn: Callable[..., object] | None = None,
     *,
     app: AppConfig | None = None,
-) -> Callable[[Callable[..., object]], FunctionTool] | FunctionTool:
+) -> Callable[..., Awaitable[object]] | _Register:
     """Registration alias for `@mcp.tool` / `@mcp.tool(app=...)` — session-aware tools.
 
     Every svg-mcp tool except the session-lifecycle pair is registered through these
-    overloads, which pre-wrap the function with `_session_bound` (the optional validated
+    overloads, which pre-wrap the function with `_session_bound` (the validated
     `session_id` argument + contextvar publishing) before handing it to FastMCP. Plain
     module functions rather than a FastMCP subclass override deliberately: an override's
     return type had to fight pyright's compatibility checks across FastMCP.tool's three
     contract shapes (decorator / direct registration / partial), while overloads make both
-    used forms exact and composable — the call-surface change is a mechanical rename at the
-    181 stateful decorators.
+    used forms exact and composable.
+
+    What a caller gets back is what fastmcp's decorator returns — the function it was given,
+    here the `_session_bound` async wrapper — NOT a `FunctionTool` (fastmcp registers that
+    internally). The overloads type it as an async callable resolving to the tool body's own
+    result: the wrapper awaits an awaitable body (`emits_change`), so an async body's
+    `Awaitable[R]` and a sync body's `R` both come back as `Awaitable[R]`. Direct calls from
+    tests/scripts (outside a request) therefore type-check as `await server.add_rect(...)`.
     """
 
-    def register(function: Callable[..., object]) -> FunctionTool:
+    # `register` carries the same overloads as `_Register`, so the decorator form type-checks
+    # as that protocol with no suppression.
+    @overload
+    def register[R](function: Callable[..., Awaitable[R]], /) -> Callable[..., Awaitable[R]]: ...
+
+    @overload
+    def register[R](function: Callable[..., R], /) -> Callable[..., Awaitable[R]]: ...
+
+    def register(function: Callable[..., object], /) -> Callable[..., Awaitable[object]]:
         # `app` is the only non-default registration kwarg svg-mcp uses; passing it through
-        # explicitly keeps mcp.tool's overload resolvable for both checkers.
-        return cast("FunctionTool", mcp.tool(_session_bound(function), app=app))
+        # explicitly keeps mcp.tool's overload resolvable for both checkers. mcp.tool's
+        # decorator overloads return their argument's own type, so no cast is needed.
+        return mcp.tool(_session_bound(function), app=app)
 
     return register if fn is None else register(fn)
 
 
 @mcp.tool
 async def create_session() -> dict[str, str]:
-    """Mint a session id so documents persist across calls on stateless (2026-era) links.
+    """Mint a session id: call this FIRST, then pass the id on every svg-mcp call.
 
-    Stateful links (handshake-era HTTP, stdio, mcp-combiner legacy) already get per-connection
-    document ownership automatically — you don't need this. On a stateless (2026-07-28) link,
-    pass the returned `session_id` on EVERY subsequent svg-mcp call — the schema marks the
-    argument on each tool, and that is the contract on every transport (no client injects it
-    behind your back). Documents follow the session until `end_session`.
+    Required on every client and transport (stdio, handshake-era HTTP, stateless 2026-era
+    links, behind mcp-combiner): there is no per-connection fallback, so a tool call without
+    a `session_id` is rejected. The schema marks the argument on each tool, and no client
+    injects it behind your back. Documents follow the session until `end_session`.
 
-    Ownership: a mint made on a stateful connection is bound to it (only that connection can
-    use or end the id, and it is discarded when the connection closes). A mint made on a
-    stateless connection cannot be bound (per-request connections, no stable identity), so
-    the minted id — unguessable uuid — is the capability.
+    Ownership: a mint made on a handshake-era HTTP connection is bound to it (only that
+    connection can use or end the id, and it is discarded when the connection closes). A mint
+    made on a stateless (2026-era) link cannot be bound (per-request connections, no stable
+    identity), so the unguessable id is the capability. Over stdio the process is the
+    isolation: the server serves one client, and its sessions end when that client leaves.
 
     Registered with plain `@mcp.tool`, not the session-aware `@tool` alias: minting needs no
     session of its own.
     """
     session_id = await mint_session()
+    while _token_for(session_id) in _TOKEN_SESSIONS:
+        # A 48-bit token collision with a live session: astronomically unlikely, but two
+        # sessions must never share a preview or resource scope, so mint again.
+        with contextlib.suppress(Exception):
+            await end_minted_session(session_id)
+        session_id = await mint_session()
+    _TOKEN_SESSIONS[_token_for(session_id)] = session_id  # resource reads work at once
     with contextlib.suppress(Exception):
         # Capture the fastmcp record while the minting request is still live (principal +
         # state store pinned inside), so connection TEARDOWN — which runs outside any
@@ -740,9 +767,7 @@ async def end_session(session_id: SessionId) -> str:
     `session_id` argument IS the session being ended. Sessions bound to a minting
     connection can only be ended from that connection.
     """
-    owner = _MINTED_SESSION_OWNER.get(session_id)
-    if owner is not None and owner != _stable_connection_id():
-        raise InvalidArgument(f"session_id {session_id!r} belongs to a different connection")
+    _assert_usable_from_here(session_id)
     _revoke_minted(session_id)
     try:
         await end_minted_session(session_id)
@@ -768,6 +793,18 @@ mcp._mcp_server.add_request_handler(
 )
 
 
+def _in_request() -> bool:
+    """Whether a request is being served, via fastmcp's public context API only.
+
+    Gates the shared default store: deliberately NOT derived from `_connection()`, whose
+    private-attribute probe would turn a fastmcp rename into silent cross-session sharing."""
+    try:
+        get_context()
+    except RuntimeError:
+        return False
+    return True
+
+
 def _connection() -> Connection | None:
     """The low-level mcp `Connection` for the current request, or None outside a request."""
     try:
@@ -778,52 +815,29 @@ def _connection() -> Connection | None:
     return connection
 
 
-def _bind_release(connection: Connection, store: DocumentStore) -> None:
-    """Release `store` from `_SESSION_STORES` when `connection` closes."""
-
-    async def _release() -> None:  # pragma: no cover - exercised only at connection teardown
-        _SESSION_STORES.pop(connection, None)
-
-    connection.exit_stack.push_async_callback(_release)
-
-
 def _store() -> DocumentStore:
     """Resolve the DocumentStore of the current call's session (per-session isolation).
 
-    Precedence:
-    1. a minted session id — explicit `session_id` argument or `X-Svg-Mcp-Session` header,
-       resolved/validated by the tool wrapper into the contextvar (any era; the registry is
-       what makes 2026-era stateful-per-session semantics possible);
-    2. otherwise, for stateful/handshake-era requests, the low-level mcp Connection
-       (`WeakKeyDictionary`, released deterministically at connection close);
-    3. outside a request (direct/programmatic use), the shared default.
-
-    A 2026-era request with NO session identity raises `NoSession` with recovery guidance,
-    rather than silently writing state that the stateless protocol discards with the request.
+    Inside a request the session is ALWAYS named: a minted id from `create_session`, passed
+    as the required `session_id` argument and validated by the tool wrapper into the
+    contextvar. The schema rejects a request without one on every protocol era (and
+    `NoSession` guards any path that skipped it) — there is no per-connection fallback.
+    Outside a request (direct/programmatic use) the shared default store is used.
     """
     minted = _CURRENT_MINTED_SESSION.get()
     if minted is not None:
         store = _MINTED_SESSION_STORES.get(minted)
         if store is None:
-            # Defensive: a still-valid id whose live object was churned away re-creates it;
-            # a genuinely ended id was already popped (+raised) at validation time.
-            store = _MINTED_SESSION_STORES[minted] = DocumentStore()
+            # Validated at the start of this call, gone now: the session ended while the call
+            # was running. Refuse rather than recreate a store nobody owns and report success.
+            raise InvalidArgument("the session ended while this call was running")
         return store
-    connection = _connection()
-    if connection is None:
+    if not _in_request():
         return _DEFAULT_STORE
-    if connection.protocol_version in MODERN_PROTOCOL_VERSIONS:
-        raise NoSession(
-            "no session on this stateless (2026-era) connection: call create_session and pass "
-            "its id as the session_id argument so documents persist between calls"
-        )
-    store = _SESSION_STORES.get(connection)
-    if store is None:
-        store = DocumentStore()
-        # Belt-and-braces: if exit_stack teardown never runs, GC on the Connection collects it.
-        _SESSION_STORES[connection] = store
-        _bind_release(connection, store)
-    return store
+    raise NoSession(
+        "no session_id: call create_session once, then pass its id as the session_id "
+        "argument on every svg-mcp call"
+    )
 
 
 def _session_id() -> str | None:
@@ -834,24 +848,42 @@ def _session_id() -> str | None:
         return None
 
 
-def _session_token() -> str:
-    """A short, stable, URL-safe token identifying the current session's preview.
+def _token_for(session_id: str) -> str:
+    """The preview/resource token for a minted session id (non-secret, URL-safe)."""
+    return hashlib.sha256(session_id.encode()).hexdigest()[:12]
 
-    Each chat connects as its own MCP session and gets its own per-session DocumentStore; the live
-    preview is partitioned by this token so one chat's edits never appear in another's preview.
-    On a minted session (explicit argument or ambient header) the minted id is the partition
-    key; otherwise the stateful connection's stable session id is. Outside a request
-    (direct/programmatic use) all callers share the ``default`` bucket.
+
+def _session_token() -> str:
+    """The current session's token: partitions the live preview and scopes resource URIs.
+
+    A hash of the minted session id, so a URL or URI that ends up in a log lets someone read
+    the drawing but never act as the session. Outside a request (direct/programmatic use)
+    every caller shares the ``default`` bucket.
     """
     minted = _CURRENT_MINTED_SESSION.get()
     if minted is not None:
-        return hashlib.sha256(minted.encode()).hexdigest()[:12]
-    sid = _session_id()
-    if sid is None:
-        return "default"
-    # sha1 is enough for a non-secret partition key, but a stronger digest costs nothing:
-    # shorter hex prefixes are kept by truncation.
-    return hashlib.sha256(sid.encode()).hexdigest()[:12]
+        return _token_for(minted)
+    return "default"
+
+
+def _resource_uris(document_id: str) -> dict[str, str]:
+    """The session-scoped resource URIs for one document."""
+    token = _session_token()
+    return {
+        "svg": f"svg://{token}/{document_id}/svg",
+        "render": f"svg://{token}/{document_id}/render",
+    }
+
+
+#: Documents a tool call touched, so its change notification and preview publish name them
+#: (there is no active document to fall back on). Reset per call by `_session_bound`.
+_TOUCHED: ContextVar[list[str] | None] = ContextVar("svg_mcp_touched", default=None)
+
+
+def _touch(document_id: str) -> None:
+    touched = _TOUCHED.get()
+    if touched is not None and document_id not in touched:
+        touched.append(document_id)
 
 
 Point = tuple[float, float]
@@ -920,33 +952,38 @@ class PathSpec(BaseModel):
     name: str | None = None
 
 
-def _doc(document_id: str | None) -> Document:
+def _doc(document_id: str) -> Document:
+    _touch(document_id)
     return _store().get(document_id)
 
 
 def _documents_index() -> dict[str, str | list[_DocumentInfo] | None]:
-    """Index of open documents: id, size, counts, and which one is active."""
-    active = _store().active_id
+    """Index of the session's open documents: id, size and counts."""
+    store = _store()
     docs: list[_DocumentInfo] = []
-    for did in _store().list_ids():
-        info = _describe_document(_store().peek(did))
-        docs.append({"id": did, "active": did == active, **info})
-    return {"active": active, "documents": docs}
+    for did in store.list_ids():
+        info = _describe_document(store.get(did))
+        docs.append({"id": did, **info})
+    return {"documents": docs}
 
 
-def _publish_preview() -> None:
-    """Hand the live-preview server a fresh snapshot of the active document.
+def _publish_preview(document_ids: list[str] | None = None) -> None:
+    """Hand the live-preview server fresh snapshots of the session's documents.
 
-    Runs inside MCP-request context (where the document tree is consistent): it serializes the
-    active document to an immutable SVG string the preview's HTTP handlers render from, so browser
-    requests never touch the live tree. Cheap no-op cost is only paid while a preview is running.
+    Runs inside MCP-request context (where the document tree is consistent): it serializes
+    each named document (default: every open one) to an immutable SVG string the preview's
+    HTTP handlers render from, so browser requests never touch the live tree. Documents not
+    named keep their last snapshot.
     """
-    active = _store().active_id
-    sources = {active: _export_svg(_store().peek(active))} if active is not None else {}
+    minted = _CURRENT_MINTED_SESSION.get()
+    if minted is not None and _TOKEN_SESSIONS.get(_token_for(minted)) != minted:
+        return  # the session ended under this call: don't publish its preview again
+    store = _store()
+    open_ids = store.list_ids()
+    wanted = open_ids if document_ids is None else [d for d in document_ids if d in open_ids]
     _preview.server.publish(
         _session_token(),
-        active_id=active,
-        sources=sources,
+        sources={did: _export_svg(store.get(did)) for did in wanted},
         index_json=json.dumps(_documents_index()),
     )
 
@@ -965,26 +1002,30 @@ def _placed(doc: Document, ref: NodeRef) -> dict[str, str | None | list[str]]:
 
 
 async def _emit_change(ctx: Context) -> None:
-    """Notify subscribers that the active document's resources changed.
+    """Notify subscribers that the documents this call touched changed.
 
-    Two channels: `send_resource_updated` rides the CALLER's response stream (works on any
-    era, but only reaches that caller), and the subscriptions/listen bus reaches every open
-    listen stream (the 2026-era channel, and how OTHER clients hear this change). Published
-    verbatim; per-stream filters select.
+    URIs are session-scoped by the preview token, so a listener only hears about documents it
+    subscribed to. Two channels: `send_resource_updated` rides the CALLER's response stream
+    (works on any era, but only reaches that caller), and the subscriptions/listen bus reaches
+    every open listen stream (the 2026-era channel, and how OTHER clients hear this change);
+    each stream's own filter selects. Published verbatim.
     """
     session = ctx.session
-    uri_strings = ["svg://documents"]
-    active = _store().active_id
-    if active is not None:
-        uri_strings = [f"svg://{active}/svg", f"svg://{active}/render", *uri_strings]
+    token = _session_token()
+    touched = list(_TOUCHED.get() or [])
+    uri_strings = [f"svg://{token}/documents"]
+    for did in touched:
+        uri_strings = [*_resource_uris(did).values(), *uri_strings]
+    for uri in uri_strings:
+        await _LISTEN_BUS.publish(ResourceUpdated(uri=uri))
+    # The widget URI is the same for every session, so it rides only the CALLER's stream:
+    # on the shared bus one session's edits would wake every other session's widget listener.
     uri_strings.append(_widget.WIDGET_URI)  # MCP-Apps clients repaint the widget with the doc
     for uri in uri_strings:
         await session.send_resource_updated(AnyUrl(uri))
-    for uri in uri_strings:
-        await _LISTEN_BUS.publish(ResourceUpdated(uri=uri))
     if _preview.server.running:
         with contextlib.suppress(Exception):
-            _publish_preview()
+            _publish_preview(touched)
 
 
 def emits_change[**P, R](fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
@@ -1025,7 +1066,7 @@ def emits_change[**P, R](fn: Callable[P, R]) -> Callable[P, Awaitable[R]]:
 @emits_change
 def create_document(
     width: float, height: float, viewbox: str | None = None
-) -> dict[str, str | float | bool]:
+) -> dict[str, str | float | dict[str, str]]:
     """Create a new, empty SVG document and register it in the session.
 
     Args:
@@ -1034,110 +1075,109 @@ def create_document(
         viewbox: Optional explicit viewBox ("minX minY width height") to override the default.
 
     Returns:
-        {document_id, width, height, active}. The new document becomes the active document, so
-        you may omit document_id on subsequent calls to target it.
+        {document_id, width, height, resources}. Pass `document_id` on every call that acts on
+        this document; nothing defaults to it. `resources` holds its svg:// URIs (svg, render).
     """
     document_id, _ = _store().create(width, height, viewbox)
-    return {"document_id": document_id, "width": width, "height": height, "active": True}
+    _touch(document_id)
+    return {
+        "document_id": document_id,
+        "width": width,
+        "height": height,
+        "resources": _resource_uris(document_id),
+    }
 
 
 @tool
 @emits_change
 def import_svg(
-    *, svg: str | None = None, path: str | None = None, into_active: bool = False
-) -> dict[str, str | bool | list[str]]:
+    *, svg: str | None = None, path: str | None = None, document_id: str | None = None
+) -> dict[str, str | bool | list[str] | dict[str, str]]:
     """Load an existing SVG into the session, so you can render/inspect/edit it.
 
     Provide the source EITHER inline via `svg` OR from a file via `path` (preferred for large
     documents — avoids inlining the whole string).
 
-    By default this opens a NEW document. Set `into_active=True` to load the SVG INTO the active
-    document instead — same `document_id`, same live-preview URL, same session — replacing its
-    content. Use that to author a whole document as SVG text (a big wholesale change in one call)
-    without losing the doc identity, then keep doing incremental named-node edits on it afterward.
-    With no active document yet, it falls back to opening a new one.
+    By default this opens a NEW document. Pass `document_id` to load the SVG INTO that open
+    document instead — same `document_id`, same live-preview page, same resource URIs —
+    replacing its content. Use that to author a whole document as SVG text (a big wholesale
+    change in one call) without losing its identity, then keep making incremental named-node
+    edits on it afterward.
 
     Args:
         svg: Complete SVG source as a string.
         path: Filesystem path to an `.svg` file to read instead.
-        into_active: Replace the active document's content (keep its id) vs. opening a new one.
+        document_id: An open document to replace the content of; omit to open a new one.
 
     Returns:
-        {document_id, active, replaced}. `replaced` is true when an existing doc was overwritten.
-        `notes`, when present, is advice from the import itself — e.g. themes the document was
-        stamped with that could not be re-materialized (their painted rules survive, but new
-        nodes won't hook them until the theme is loaded again).
+        {document_id, replaced, resources}. `replaced` is true when an existing document was
+        overwritten. `notes`, when present, is advice from the import itself — e.g. themes the
+        document was stamped with that could not be re-materialized (their painted rules
+        survive, but new nodes won't hook them until the theme is loaded again).
     """
     document = ops.load_svg_document(svg=svg, path=path)
     store = _store()
-    result: dict[str, str | bool | list[str]]
     notes = list(document.import_notes)
-    if into_active and store.active_id is not None:
-        document_id = store.replace(None, document)
-        result = {"document_id": document_id, "active": True, "replaced": True}
+    if document_id is not None:
+        target = store.replace(document_id, document)
+        replaced = True
     else:
-        result = {"document_id": store.register(document), "active": True, "replaced": False}
+        target = store.register(document)
+        replaced = False
+    _touch(target)
+    result: dict[str, str | bool | list[str] | dict[str, str]] = {
+        "document_id": target,
+        "replaced": replaced,
+        "resources": _resource_uris(target),
+    }
     if notes:
         result["notes"] = notes
     return result
 
 
 @tool
-def list_documents() -> list[str]:
+def list_documents() -> dict[str, list[str] | str]:
     """List the ids of all open documents in the session.
 
     Returns:
-        A list of document_id strings.
+        {document_ids, index}: the open document ids, and the svg:// URI of the session's
+        document index resource.
     """
-    return _store().list_ids()
+    return {
+        "document_ids": _store().list_ids(),
+        "index": f"svg://{_session_token()}/documents",
+    }
 
 
 @tool
-@emits_change
-def set_active_document(document_id: str) -> dict[str, str]:
-    """Make a document the active one, so later calls may omit document_id to target it.
-
-    Args:
-        document_id: The document to activate.
-
-    Returns:
-        {active: <document_id>}.
-    """
-    return {"active": _store().set_active(document_id)}
-
-
-@tool
-def current_context() -> dict[str, str | list[str] | OutlineNode | None]:
+def current_context() -> dict[str, str | list[str] | None]:
     """Report the working context so you can re-anchor (e.g. after a long conversation).
 
     Returns:
-        {session_id, active_document, open_documents, active_outline}: the stable id of this
-        connection (each chat is isolated to its own documents), the active document id (or None),
-        all open document ids, and a depth-limited outline of the active document (or None).
+        {session_id, open_documents, index}: the session this call used, the ids of its open
+        documents, and the svg:// URI of its document index. Outline a document with `outline`.
     """
-    active = _store().active_id
-    outline_summary = _outline(_store().get(active), depth=2) if active is not None else None
     return {
-        "session_id": _session_id(),
-        "active_document": active,
+        "session_id": _CURRENT_MINTED_SESSION.get(),
         "open_documents": _store().list_ids(),
-        "active_outline": outline_summary,
+        "index": f"svg://{_session_token()}/documents",
     }
 
 
 @tool
 @emits_change
-def delete_document(*, document_id: str | None = None) -> str:
+def delete_document(*, document_id: str) -> str:
     """Delete an open document and free its resources.
 
     Returns:
         The deleted document_id.
     """
+    _touch(document_id)
     return _store().delete(document_id)
 
 
 @tool
-def export_svg(*, document_id: str | None = None) -> str:
+def export_svg(*, document_id: str) -> str:
     """Serialize a document to SVG source text.
 
     Returns:
@@ -1149,7 +1189,7 @@ def export_svg(*, document_id: str | None = None) -> str:
 @tool
 def outline(
     *,
-    document_id: str | None = None,
+    document_id: str,
     root: str | None = None,
     depth: int | None = None,
     include_bbox: bool = False,
@@ -1171,7 +1211,7 @@ def outline(
 
 
 @tool
-def get_bbox(*, document_id: str | None = None, target: str) -> dict[str, float] | None:
+def get_bbox(*, document_id: str, target: str) -> dict[str, float] | None:
     """Return a node's world-absolute bounding box (ancestor transforms applied).
 
     Note: text has no geometric bbox (glyphs are not shaped until render) — judge text size by
@@ -1193,7 +1233,7 @@ def get_bbox(*, document_id: str | None = None, target: str) -> dict[str, float]
 @emits_change
 def add_rect(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x: float,
     y: float,
     width: float,
@@ -1254,7 +1294,7 @@ def add_rect(
 @emits_change
 def add_circle(
     *,
-    document_id: str | None = None,
+    document_id: str,
     cx: float,
     cy: float,
     r: float,
@@ -1306,7 +1346,7 @@ def add_circle(
 @emits_change
 def add_ellipse(
     *,
-    document_id: str | None = None,
+    document_id: str,
     cx: float,
     cy: float,
     rx: float,
@@ -1361,7 +1401,7 @@ def add_ellipse(
 @emits_change
 def add_line(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x1: float,
     y1: float,
     x2: float,
@@ -1376,7 +1416,7 @@ def add_line(
 ) -> dict[str, str | None | list[str]]:
     """Add a straight line segment from (x1,y1) to (x2,y2).
 
-    Give it a visible stroke via style (e.g. stroke and stroke_width); lines have no fill.
+    Give it a visible stroke via style (e.g. stroke and stroke-width); lines have no fill.
 
     Args:
         x1: Start x in user units.
@@ -1418,7 +1458,7 @@ def add_line(
 @emits_change
 def add_polyline(
     *,
-    document_id: str | None = None,
+    document_id: str,
     points: list[Point],
     parent: str | None = None,
     name: str | None = None,
@@ -1464,7 +1504,7 @@ def add_polyline(
 @emits_change
 def add_polygon(
     *,
-    document_id: str | None = None,
+    document_id: str,
     points: list[Point],
     parent: str | None = None,
     name: str | None = None,
@@ -1510,7 +1550,7 @@ def add_polygon(
 @emits_change
 def add_path(
     *,
-    document_id: str | None = None,
+    document_id: str,
     d: str,
     parent: str | None = None,
     name: str | None = None,
@@ -1556,7 +1596,7 @@ def add_path(
 @emits_change
 def add_variable_width_path(
     *,
-    document_id: str | None = None,
+    document_id: str,
     points: list[Point],
     widths: list[float] | float,
     closed: bool = False,
@@ -1626,7 +1666,7 @@ def add_variable_width_path(
 @emits_change
 def add_squircle(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x: float,
     y: float,
     width: float,
@@ -1693,7 +1733,7 @@ def add_squircle(
 @emits_change
 def add_rounded_polygon(
     *,
-    document_id: str | None = None,
+    document_id: str,
     cx: float,
     cy: float,
     radius: float,
@@ -1762,7 +1802,7 @@ def add_rounded_polygon(
 @emits_change
 def add_superellipse(
     *,
-    document_id: str | None = None,
+    document_id: str,
     cx: float,
     cy: float,
     rx: float,
@@ -1826,7 +1866,7 @@ def add_superellipse(
 @emits_change
 def add_pill(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x: float,
     y: float,
     width: float,
@@ -1886,7 +1926,7 @@ def add_pill(
 @emits_change
 def add_variable_width_paths(
     *,
-    document_id: str | None = None,
+    document_id: str,
     strokes: list[VariableWidthStroke],
     parent: str | None = None,
     role: str | None = None,
@@ -1943,7 +1983,7 @@ def add_variable_width_paths(
 @emits_change
 def add_rects(
     *,
-    document_id: str | None = None,
+    document_id: str,
     rects: list[RectSpec],
     parent: str | None = None,
     role: str | None = None,
@@ -1991,7 +2031,7 @@ def add_rects(
 @emits_change
 def add_circles(
     *,
-    document_id: str | None = None,
+    document_id: str,
     circles: list[CircleSpec],
     parent: str | None = None,
     role: str | None = None,
@@ -2036,7 +2076,7 @@ def add_circles(
 @emits_change
 def add_lines(
     *,
-    document_id: str | None = None,
+    document_id: str,
     lines: list[LineSpec],
     parent: str | None = None,
     role: str | None = None,
@@ -2082,7 +2122,7 @@ def add_lines(
 @emits_change
 def add_paths(
     *,
-    document_id: str | None = None,
+    document_id: str,
     paths: list[PathSpec],
     parent: str | None = None,
     role: str | None = None,
@@ -2125,7 +2165,7 @@ def add_paths(
 @emits_change
 def add_text(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x: float,
     y: float,
     content: str,
@@ -2181,7 +2221,7 @@ def add_text(
 @emits_change
 def edit_text(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     content: str | None = None,
     x: float | None = None,
@@ -2218,7 +2258,7 @@ def edit_text(
 @emits_change
 def add_text_block(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x: float,
     y: float,
     content: str,
@@ -2234,7 +2274,7 @@ def add_text_block(
     """Add a MULTI-LINE text block — split `content` on `\\n` into evenly-spaced lines.
 
     No manual per-line `y` math: each line is a `<tspan>` at `x` with `dy = line_height` em
-    (`line_height` is a multiple of font size; 1.2 ≈ normal). Set `text_anchor` in `style` to
+    (`line_height` is a multiple of font size; 1.2 ≈ normal). Set `text-anchor` in `style` to
     align all lines. Re-flow later with `edit_text_block` (adding/removing a line re-spaces the
     rest automatically).
 
@@ -2271,7 +2311,7 @@ def add_text_block(
 @emits_change
 def edit_text_block(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     content: str | None = None,
     line_height: float | None = None,
@@ -2307,7 +2347,7 @@ def edit_text_block(
 @emits_change
 def create_group(
     *,
-    document_id: str | None = None,
+    document_id: str,
     name: str | None = None,
     parent: str | None = None,
     children: list[str] | None = None,
@@ -2338,7 +2378,7 @@ def create_group(
 @tool
 @emits_change
 def create_layer(
-    *, document_id: str | None = None, name: str, parent: str | None = None
+    *, document_id: str, name: str, parent: str | None = None
 ) -> dict[str, str | None]:
     """Create a layer — a named group that acts as a composition plane.
 
@@ -2359,7 +2399,7 @@ def create_layer(
 
 @tool
 @emits_change
-def set_name(*, document_id: str | None = None, target: str, name: str) -> dict[str, str | None]:
+def set_name(*, document_id: str, target: str, name: str) -> dict[str, str | None]:
     """Set a node's friendly name (its inkscape:label) so you can target it by name later.
 
     Args:
@@ -2374,7 +2414,7 @@ def set_name(*, document_id: str | None = None, target: str, name: str) -> dict[
 
 @tool
 @emits_change
-def delete_node(*, document_id: str | None = None, target: str) -> str:
+def delete_node(*, document_id: str, target: str) -> str:
     """Delete a node (and its descendants) from the document.
 
     Args:
@@ -2388,7 +2428,7 @@ def delete_node(*, document_id: str | None = None, target: str) -> str:
 
 @tool
 @emits_change
-def delete_nodes(*, document_id: str | None = None, targets: list[str]) -> list[str]:
+def delete_nodes(*, document_id: str, targets: list[str]) -> list[str]:
     """Delete several nodes in one call (and their descendants); returns the deleted ids.
 
     All targets are resolved before anything is deleted, so a bad/ambiguous target aborts the whole
@@ -2404,7 +2444,7 @@ def delete_nodes(*, document_id: str | None = None, targets: list[str]) -> list[
 @emits_change
 def restyle(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str | None = None,
     style: ShapeStyle | None = None,
     replace: bool = False,
@@ -2452,7 +2492,7 @@ def restyle(
 @emits_change
 def edit_rect(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     x: float | None = None,
     y: float | None = None,
@@ -2478,7 +2518,7 @@ def edit_rect(
 @emits_change
 def edit_circle(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     cx: float | None = None,
     cy: float | None = None,
@@ -2501,7 +2541,7 @@ def edit_circle(
 @emits_change
 def edit_ellipse(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     cx: float | None = None,
     cy: float | None = None,
@@ -2525,7 +2565,7 @@ def edit_ellipse(
 @emits_change
 def edit_line(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     x1: float | None = None,
     y1: float | None = None,
@@ -2553,7 +2593,7 @@ def _points_attr(points: list[Point] | None) -> str | None:
 @emits_change
 def edit_polyline(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     points: list[Point] | None = None,
     style: ShapeStyle | None = None,
@@ -2574,7 +2614,7 @@ def edit_polyline(
 @emits_change
 def edit_polygon(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     points: list[Point] | None = None,
     style: ShapeStyle | None = None,
@@ -2595,7 +2635,7 @@ def edit_polygon(
 @emits_change
 def edit_path(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     d: str | None = None,
     style: ShapeStyle | None = None,
@@ -2625,7 +2665,7 @@ def edit_path(
 @emits_change
 def edit_star(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     cx: float | None = None,
     cy: float | None = None,
@@ -2662,7 +2702,7 @@ def edit_star(
 @emits_change
 def edit_arc(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     cx: float | None = None,
     cy: float | None = None,
@@ -2694,7 +2734,7 @@ def edit_arc(
 @emits_change
 def edit_variable_width_path(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     points: list[Point] | None = None,
     widths: list[float] | float | None = None,
@@ -2730,7 +2770,7 @@ def edit_variable_width_path(
 @emits_change
 def edit_squircle(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     x: float | None = None,
     y: float | None = None,
@@ -2765,7 +2805,7 @@ def edit_squircle(
 @emits_change
 def edit_rounded_polygon(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     cx: float | None = None,
     cy: float | None = None,
@@ -2802,7 +2842,7 @@ def edit_rounded_polygon(
 @emits_change
 def edit_superellipse(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     cx: float | None = None,
     cy: float | None = None,
@@ -2837,7 +2877,7 @@ def edit_superellipse(
 @emits_change
 def edit_pill(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     x: float | None = None,
     y: float | None = None,
@@ -2870,7 +2910,7 @@ def edit_pill(
 @emits_change
 def offset_path(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     distance: float,
     join: Literal["round", "miter", "bevel"] = "round",
@@ -2917,7 +2957,7 @@ def offset_path(
 @emits_change
 def reparent(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     new_parent: str | None = None,
     index: int | None = None,
@@ -2955,7 +2995,7 @@ def reparent(
 
 @tool
 @emits_change
-def ungroup(*, document_id: str | None = None, target: str) -> list[str]:
+def ungroup(*, document_id: str, target: str) -> list[str]:
     """Dissolve a group/layer, moving its children up into its parent.
 
     The group's transform is baked into each child so they keep their world position. The group
@@ -2974,7 +3014,7 @@ def ungroup(*, document_id: str | None = None, target: str) -> list[str]:
 @emits_change
 def duplicate(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     into: str | None = None,
     style: ShapeStyle | None = None,
@@ -2998,7 +3038,7 @@ def duplicate(
 
 @tool
 @emits_change
-def to_front(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def to_front(*, document_id: str, target: str) -> dict[str, str | None]:
     """Move a node to the top of its parent's stacking order (drawn last, appears on top).
 
     Args:
@@ -3012,7 +3052,7 @@ def to_front(*, document_id: str | None = None, target: str) -> dict[str, str | 
 
 @tool
 @emits_change
-def to_back(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def to_back(*, document_id: str, target: str) -> dict[str, str | None]:
     """Move a node to the bottom of its parent's stacking order (drawn first, behind siblings).
 
     Args:
@@ -3026,7 +3066,7 @@ def to_back(*, document_id: str | None = None, target: str) -> dict[str, str | N
 
 @tool
 @emits_change
-def raise_node(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def raise_node(*, document_id: str, target: str) -> dict[str, str | None]:
     """Raise a node one step up its parent's stacking order (one sibling closer to the front).
 
     Args:
@@ -3040,7 +3080,7 @@ def raise_node(*, document_id: str | None = None, target: str) -> dict[str, str 
 
 @tool
 @emits_change
-def lower_node(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def lower_node(*, document_id: str, target: str) -> dict[str, str | None]:
     """Lower a node one step down its parent's stacking order (one sibling closer to the back).
 
     Args:
@@ -3054,9 +3094,7 @@ def lower_node(*, document_id: str | None = None, target: str) -> dict[str, str 
 
 @tool
 @emits_change
-def translate_node(
-    *, document_id: str | None = None, target: str, dx: float, dy: float
-) -> dict[str, str | None]:
+def translate_node(*, document_id: str, target: str, dx: float, dy: float) -> dict[str, str | None]:
     """Translate a node by (dx, dy), composing onto its existing transform.
 
     Args:
@@ -3073,7 +3111,7 @@ def translate_node(
 @tool
 @emits_change
 def rotate_node(
-    *, document_id: str | None = None, target: str, degrees: float, center: Point | None = None
+    *, document_id: str, target: str, degrees: float, center: Point | None = None
 ) -> dict[str, str | None]:
     """Rotate a node, composing onto its existing transform.
 
@@ -3092,7 +3130,7 @@ def rotate_node(
 @emits_change
 def scale_node(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     sx: float,
     sy: float | None = None,
@@ -3115,7 +3153,7 @@ def scale_node(
 @tool
 @emits_change
 def skew_node(
-    *, document_id: str | None = None, target: str, axis: Literal["x", "y"], degrees: float
+    *, document_id: str, target: str, axis: Literal["x", "y"], degrees: float
 ) -> dict[str, str | None]:
     """Skew (shear) a node, composing onto its existing transform.
 
@@ -3132,9 +3170,7 @@ def skew_node(
 
 @tool
 @emits_change
-def apply_transform(
-    *, document_id: str | None = None, target: str, transform: str
-) -> dict[str, str | None]:
+def apply_transform(*, document_id: str, target: str, transform: str) -> dict[str, str | None]:
     """Compose a raw SVG transform string onto a node (escape hatch for full control).
 
     Args:
@@ -3150,9 +3186,7 @@ def apply_transform(
 
 @tool
 @emits_change
-def set_transform(
-    *, document_id: str | None = None, target: str, transform: str
-) -> dict[str, str | None]:
+def set_transform(*, document_id: str, target: str, transform: str) -> dict[str, str | None]:
     """REPLACE a node's local transform (vs apply_transform, which COMPOSES onto the existing one).
 
     Use this to set a transform outright — e.g. re-place a group after reading `get_transform` —
@@ -3172,7 +3206,7 @@ def set_transform(
 
 
 @tool
-def list_layers(*, document_id: str | None = None) -> list[dict[str, str | bool | None]]:
+def list_layers(*, document_id: str) -> list[dict[str, str | bool | None]]:
     """List the document's layers and their state.
 
     Returns:
@@ -3185,7 +3219,7 @@ def list_layers(*, document_id: str | None = None) -> list[dict[str, str | bool 
 @emits_change
 def set_layer_state(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     visible: bool | None = None,
     locked: bool | None = None,
@@ -3209,9 +3243,7 @@ def set_layer_state(
 
 @tool
 @emits_change
-def rename_layer(
-    *, document_id: str | None = None, target: str, name: str
-) -> dict[str, str | None]:
+def rename_layer(*, document_id: str, target: str, name: str) -> dict[str, str | None]:
     """Rename a layer (sets its label).
 
     Args:
@@ -3226,9 +3258,7 @@ def rename_layer(
 
 @tool
 @emits_change
-def move_to_layer(
-    *, document_id: str | None = None, target: str, layer: str
-) -> dict[str, str | None]:
+def move_to_layer(*, document_id: str, target: str, layer: str) -> dict[str, str | None]:
     """Move a node into a layer (or any group).
 
     Args:
@@ -3248,7 +3278,7 @@ def move_to_layer(
 @emits_change
 def add_text_run(
     *,
-    document_id: str | None = None,
+    document_id: str,
     parent: str,
     text: str,
     x: float | None = None,
@@ -3306,7 +3336,7 @@ def add_text_run(
 @emits_change
 def add_text_on_path(
     *,
-    document_id: str | None = None,
+    document_id: str,
     path: str,
     content: str,
     x: float | None = None,
@@ -3366,7 +3396,7 @@ def add_text_on_path(
 @emits_change
 def add_image(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x: float,
     y: float,
     width: float,
@@ -3434,7 +3464,7 @@ def add_image(
 
 @tool
 @emits_change
-def define_style(*, document_id: str | None = None, name: str, style: ShapeStyle) -> str:
+def define_style(*, document_id: str, name: str, style: ShapeStyle) -> str:
     """Define a reusable named style, emitted as a CSS class. Apply it with apply_styles.
 
     Args:
@@ -3451,7 +3481,7 @@ def define_style(*, document_id: str | None = None, name: str, style: ShapeStyle
 @emits_change
 def edit_style(
     *,
-    document_id: str | None = None,
+    document_id: str,
     name: str,
     style: ShapeStyle,
     replace: bool = False,
@@ -3475,7 +3505,7 @@ def edit_style(
 
 @tool
 @emits_change
-def delete_style(*, document_id: str | None = None, name: str) -> str:
+def delete_style(*, document_id: str, name: str) -> str:
     """Delete a named style. Nodes still referencing the class keep their `class` attribute but lose
     its rules. Errors if the style isn't defined.
 
@@ -3491,7 +3521,7 @@ def delete_style(*, document_id: str | None = None, name: str) -> str:
 @tool
 @emits_change
 def apply_styles(
-    *, document_id: str | None = None, target: str, names: list[str], replace: bool = False
+    *, document_id: str, target: str, names: list[str], replace: bool = False
 ) -> dict[str, str | None]:
     """Apply named styles (from define_style, or a theme's hooks) to a node's class list.
 
@@ -3517,9 +3547,7 @@ def apply_styles(
 
 @tool
 @emits_change
-def remove_styles(
-    *, document_id: str | None = None, target: str, names: list[str]
-) -> dict[str, str | None]:
+def remove_styles(*, document_id: str, target: str, names: list[str]) -> dict[str, str | None]:
     """Unlink named styles from a node's class list, keeping the remaining refs in order.
 
     Idempotent — names the node doesn't carry are ignored; emptying the list drops the `class`
@@ -3543,7 +3571,7 @@ def remove_styles(
 @emits_change
 def load_theme(
     *,
-    document_id: str | None = None,
+    document_id: str,
     name: str,
     roles: list[str] | None = None,
     variant: str | None = None,
@@ -3587,7 +3615,7 @@ def load_theme(
 
 @tool
 @emits_change
-def unload_theme(*, document_id: str | None = None, name: str) -> ops.ThemeRemoval:
+def unload_theme(*, document_id: str, name: str) -> ops.ThemeRemoval:
     """Remove a theme's rules, routes, and metadata from the document.
 
     Class attributes on nodes are NOT stripped — any of the theme's classes still carried are
@@ -3605,7 +3633,7 @@ def unload_theme(*, document_id: str | None = None, name: str) -> ops.ThemeRemov
 
 @tool
 @emits_change
-def sync_theme(*, document_id: str | None = None, name: str) -> ops.ThemeResidency:
+def sync_theme(*, document_id: str, name: str) -> ops.ThemeResidency:
     """Re-read a resident theme from disk, keeping its variant and routes — pick up a CSS edit.
 
     Args:
@@ -3621,7 +3649,7 @@ def sync_theme(*, document_id: str | None = None, name: str) -> ops.ThemeResiden
 @emits_change
 def replace_theme(
     *,
-    document_id: str | None = None,
+    document_id: str,
     name: str,
     roles: list[str] | None = None,
     variant: str | None = None,
@@ -3656,9 +3684,7 @@ def replace_theme(
 
 @tool
 @emits_change
-def set_theme_variant(
-    *, document_id: str | None = None, variant: str | None = None
-) -> ops.VariantSwitch:
+def set_theme_variant(*, document_id: str, variant: str | None = None) -> ops.VariantSwitch:
     """Switch EVERY resident theme to a variant — the one-call way to say "go dark".
 
     A variant is a token overlay, so this re-materializes each resident theme against the
@@ -3683,7 +3709,7 @@ def set_theme_variant(
 @emits_change
 def apply_theme(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     theme: str,
     mode: Literal["paste", "replace"] = "paste",
@@ -3724,9 +3750,7 @@ def apply_theme(
 
 @tool
 @emits_change
-def clear_theme(
-    *, document_id: str | None = None, target: str, theme: str | None = None
-) -> ops.ThemeScopeChange:
+def clear_theme(*, document_id: str, target: str, theme: str | None = None) -> ops.ThemeScopeChange:
     """Strip theme classes from a subtree — one theme's, or every resident theme's.
 
     The counterpart to `apply_theme`: it unlinks nodes from theme rules but leaves the rules in
@@ -3744,7 +3768,7 @@ def clear_theme(
 
 
 @tool
-def list_styles(*, document_id: str | None = None) -> list[ops.StyleInfo]:
+def list_styles(*, document_id: str) -> list[ops.StyleInfo]:
     """Every style this document can attach: each resident theme's classes, then doc-local ones.
 
     Returns:
@@ -3761,7 +3785,7 @@ def list_styles(*, document_id: str | None = None) -> list[ops.StyleInfo]:
 @emits_change
 def add_diagram_node(
     *,
-    document_id: str | None = None,
+    document_id: str,
     kind: str,
     label: str = "",
     x: float | None = None,
@@ -3829,7 +3853,7 @@ def add_diagram_node(
 @emits_change
 def add_diagram_edge(
     *,
-    document_id: str | None = None,
+    document_id: str,
     source: str,
     target: str,
     kind: str = "data",
@@ -3902,7 +3926,7 @@ def add_diagram_edge(
 @emits_change
 def edit_diagram_node(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     label: str | None = None,
     kind: str | None = None,
@@ -3939,7 +3963,7 @@ def edit_diagram_node(
 @emits_change
 def edit_diagram_edge(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     kind: str | None = None,
     route: Literal["orthogonal", "straight", "spline"] | None = None,
@@ -3986,7 +4010,7 @@ def edit_diagram_edge(
 @emits_change
 def add_diagram_container(
     *,
-    document_id: str | None = None,
+    document_id: str,
     members: list[str],
     kind: str = "cluster",
     label: str = "",
@@ -4060,7 +4084,7 @@ def add_diagram_container(
 @emits_change
 def edit_diagram_container(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     label: str | None = None,
     kind: str | None = None,
@@ -4101,7 +4125,7 @@ def edit_diagram_container(
 @emits_change
 def layout_diagram(
     *,
-    document_id: str | None = None,
+    document_id: str,
     algorithm: Literal["layered", "tree", "grid"] = "layered",
     direction: Literal["LR", "TB"] = "LR",
     scope: str | None = None,
@@ -4168,7 +4192,7 @@ def layout_diagram(
 @emits_change
 def add_diagram_graph(
     *,
-    document_id: str | None = None,
+    document_id: str,
     nodes: list[ops.GraphNode],
     edges: list[ops.GraphEdge],
     default_node_kind: str = "service",
@@ -4308,7 +4332,7 @@ def add_diagram_graph(
 @emits_change
 def reflow(
     *,
-    document_id: str | None = None,
+    document_id: str,
     edges: bool = True,
     containers: bool = True,
     scope: list[str] | None = None,
@@ -4349,7 +4373,7 @@ def reflow(
 @emits_change
 def add_chart(
     *,
-    document_id: str | None = None,
+    document_id: str,
     kind: Literal["bar", "line", "donut", "scatter", "histogram", "sparkline", "radar"],
     data: ops.ChartData,
     x: float | None = None,
@@ -4471,7 +4495,7 @@ def add_chart(
 @emits_change
 def edit_chart(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     data: ops.ChartData | None = None,
     title: str | None = None,
@@ -4525,7 +4549,7 @@ def edit_chart(
 @emits_change
 def add_legend(
     *,
-    document_id: str | None = None,
+    document_id: str,
     entries: list[ops.LegendItem] | None = None,
     title: str = "",
     columns: int = 1,
@@ -4594,7 +4618,7 @@ def add_legend(
 @emits_change
 def edit_legend(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     entries: list[ops.LegendItem] | None = None,
     title: str | None = None,
@@ -4634,7 +4658,7 @@ def edit_legend(
 @emits_change
 def add_callout(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     text: str,
     kind: Literal["note", "info", "warning", "success", "danger"] = "note",
@@ -4722,7 +4746,7 @@ def add_callout(
 @emits_change
 def edit_callout(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     text: str | None = None,
     kind: Literal["note", "info", "warning", "success", "danger"] | None = None,
@@ -4751,7 +4775,7 @@ def edit_callout(
 @emits_change
 def add_callout_card(
     *,
-    document_id: str | None = None,
+    document_id: str,
     title: str,
     body: str = "",
     kind: Literal["note", "info", "warning", "success", "danger"] = "info",
@@ -4821,7 +4845,7 @@ def add_callout_card(
 @emits_change
 def edit_callout_card(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     title: str | None = None,
     body: str | None = None,
@@ -4849,7 +4873,7 @@ def edit_callout_card(
 @emits_change
 def add_table(
     *,
-    document_id: str | None = None,
+    document_id: str,
     rows: list[list[str]],
     header: list[str] | None = None,
     title: str = "",
@@ -4927,7 +4951,7 @@ def add_table(
 @emits_change
 def edit_table(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     rows: list[list[str]] | None = None,
     header: list[str] | None = None,
@@ -4971,7 +4995,7 @@ def edit_table(
 @emits_change
 def define_linear_gradient(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x1: float,
     y1: float,
     x2: float,
@@ -5017,7 +5041,7 @@ def define_linear_gradient(
 @emits_change
 def define_radial_gradient(
     *,
-    document_id: str | None = None,
+    document_id: str,
     cx: float,
     cy: float,
     r: float,
@@ -5066,7 +5090,7 @@ def define_radial_gradient(
 @emits_change
 def define_clip(
     *,
-    document_id: str | None = None,
+    document_id: str,
     content: list[str],
     name: str | None = None,
     units: str | None = None,
@@ -5091,7 +5115,7 @@ def define_clip(
 @emits_change
 def define_mask(
     *,
-    document_id: str | None = None,
+    document_id: str,
     content: list[str],
     name: str | None = None,
     units: str | None = None,
@@ -5114,7 +5138,7 @@ def define_mask(
 
 @tool
 @emits_change
-def apply_clip(*, document_id: str | None = None, target: str, clip: str) -> dict[str, str | None]:
+def apply_clip(*, document_id: str, target: str, clip: str) -> dict[str, str | None]:
     """Clip a node to a clipPath (created via define_clip).
 
     Args:
@@ -5129,7 +5153,7 @@ def apply_clip(*, document_id: str | None = None, target: str, clip: str) -> dic
 
 @tool
 @emits_change
-def apply_mask(*, document_id: str | None = None, target: str, mask: str) -> dict[str, str | None]:
+def apply_mask(*, document_id: str, target: str, mask: str) -> dict[str, str | None]:
     """Apply a mask to a node (created via define_mask).
 
     Args:
@@ -5146,7 +5170,7 @@ def apply_mask(*, document_id: str | None = None, target: str, mask: str) -> dic
 @emits_change
 def boolean(
     *,
-    document_id: str | None = None,
+    document_id: str,
     op: Literal["union", "difference", "intersection", "exclusion"],
     targets: list[str],
     name: str | None = None,
@@ -5196,7 +5220,7 @@ def boolean(
 
 @tool
 @emits_change
-def clear_clip(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def clear_clip(*, document_id: str, target: str) -> dict[str, str | None]:
     """Remove a node's clip-path (undo apply_clip).
 
     Args:
@@ -5210,7 +5234,7 @@ def clear_clip(*, document_id: str | None = None, target: str) -> dict[str, str 
 
 @tool
 @emits_change
-def clear_mask(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def clear_mask(*, document_id: str, target: str) -> dict[str, str | None]:
     """Remove a node's mask (undo apply_mask).
 
     Args:
@@ -5224,9 +5248,7 @@ def clear_mask(*, document_id: str | None = None, target: str) -> dict[str, str 
 
 @tool
 @emits_change
-def apply_blur(
-    *, document_id: str | None = None, target: str, std_deviation: float
-) -> dict[str, str | None]:
+def apply_blur(*, document_id: str, target: str, std_deviation: float) -> dict[str, str | None]:
     """Apply a Gaussian blur to a node (attaches a filter).
 
     Args:
@@ -5243,7 +5265,7 @@ def apply_blur(
 @emits_change
 def apply_drop_shadow(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     dx: float = 2,
     dy: float = 2,
@@ -5277,7 +5299,7 @@ def apply_drop_shadow(
 @tool
 @emits_change
 def apply_color_matrix(
-    *, document_id: str | None = None, target: str, type: str = "matrix", values: str | None = None
+    *, document_id: str, target: str, type: str = "matrix", values: str | None = None
 ) -> dict[str, str | None]:
     """Apply a color-matrix filter (grayscale, saturation, hue-rotate, etc.).
 
@@ -5296,7 +5318,7 @@ def apply_color_matrix(
 @tool
 @emits_change
 def apply_color_overlay(
-    *, document_id: str | None = None, target: str, color: str, opacity: float = 1.0
+    *, document_id: str, target: str, color: str, opacity: float = 1.0
 ) -> dict[str, str | None]:
     """Tint a node by flooding a color and compositing it inside the node's alpha.
 
@@ -5315,7 +5337,7 @@ def apply_color_overlay(
 
 @tool
 @emits_change
-def apply_blend(*, document_id: str | None = None, target: str, mode: str) -> dict[str, str | None]:
+def apply_blend(*, document_id: str, target: str, mode: str) -> dict[str, str | None]:
     """Apply a blend mode to a node via a filter.
 
     Args:
@@ -5333,7 +5355,7 @@ def apply_blend(*, document_id: str | None = None, target: str, mode: str) -> di
 
 
 @tool
-def describe_document(*, document_id: str | None = None) -> _DocumentInfo:
+def describe_document(*, document_id: str) -> _DocumentInfo:
     """Summarize a document at a glance, including which themes it currently holds.
 
     Returns:
@@ -5345,7 +5367,7 @@ def describe_document(*, document_id: str | None = None) -> _DocumentInfo:
 
 
 @tool
-def get_computed_style(*, document_id: str | None = None, target: str) -> dict[str, str]:
+def get_computed_style(*, document_id: str, target: str) -> dict[str, str]:
     """Return a node's resolved presentation style (inline props + inheritance applied).
 
     Document `<style>` class rules (theme hooks, named styles) are NOT folded in — use
@@ -5362,7 +5384,7 @@ def get_computed_style(*, document_id: str | None = None, target: str) -> dict[s
 
 @tool
 def get_transform(
-    *, document_id: str | None = None, target: str
+    *, document_id: str, target: str
 ) -> dict[str, str | list[float] | list[_TransformEntry]]:
     """Return a node's local transform, its composed CTM, and the full per-ancestor stack.
 
@@ -5378,9 +5400,7 @@ def get_transform(
 
 
 @tool
-def get_geometry(
-    *, document_id: str | None = None, target: str, relative_to: str = "world"
-) -> _Geometry | None:
+def get_geometry(*, document_id: str, target: str, relative_to: str = "world") -> _Geometry | None:
     """A node's position and size in a chosen coordinate frame, plus its raw local attributes.
 
     Where the same x/y means different things, this answers "where is X, measured against what?"
@@ -5402,7 +5422,7 @@ def get_geometry(
 
 @tool
 def get_params(
-    *, document_id: str | None = None, target: str
+    *, document_id: str, target: str
 ) -> dict[str, str | bool | _ShapeParams | dict[str, str]]:
     """Read a shape's current settings under the SAME names the add_*/edit_* tools use.
 
@@ -5421,7 +5441,7 @@ def get_params(
 
 
 @tool
-def convert_units(*, document_id: str | None = None, value: str, to_unit: str) -> float:
+def convert_units(*, document_id: str, value: str, to_unit: str) -> float:
     """Convert a length between units using the document's scale.
 
     Args:
@@ -5436,7 +5456,7 @@ def convert_units(*, document_id: str | None = None, value: str, to_unit: str) -
 
 @tool
 def describe_node(
-    *, document_id: str | None = None, target: str
+    *, document_id: str, target: str
 ) -> dict[str, str | int | None | list[float] | list[str] | dict[str, str]]:
     """Get everything about one node in a single call.
 
@@ -5454,7 +5474,7 @@ def describe_node(
 
 
 @tool
-def list_resources(*, document_id: str | None = None) -> dict[str, list[dict[str, str | None]]]:
+def list_resources(*, document_id: str) -> dict[str, list[dict[str, str | None]]]:
     """List the reusable resources defined in the document, so you know what you can reference.
 
     Returns:
@@ -5465,7 +5485,7 @@ def list_resources(*, document_id: str | None = None) -> dict[str, list[dict[str
     return _list_resources(_doc(document_id))
 
 
-@tool
+@mcp.tool  # touches no session state: no session_id
 def list_fonts() -> list[str]:
     """List the font families installed on this system, usable as a text style's font-family.
 
@@ -5478,7 +5498,7 @@ def list_fonts() -> list[str]:
 
 @tool
 @emits_change
-def text_to_path(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def text_to_path(*, document_id: str, target: str) -> dict[str, str | None]:
     """Convert a text node into an outlined <path> (font-independent, usable in clips/booleans).
 
     Bakes the glyph geometry in place, preserving the node's id/name/transform/paint. Pure
@@ -5500,7 +5520,7 @@ def text_to_path(*, document_id: str | None = None, target: str) -> dict[str, st
 @emits_change
 def add_arc(
     *,
-    document_id: str | None = None,
+    document_id: str,
     cx: float,
     cy: float,
     rx: float,
@@ -5558,7 +5578,7 @@ def add_arc(
 @emits_change
 def add_star(
     *,
-    document_id: str | None = None,
+    document_id: str,
     cx: float,
     cy: float,
     outer_radius: float,
@@ -5620,9 +5640,7 @@ def add_star(
 
 @tool
 @emits_change
-def path_transform(
-    *, document_id: str | None = None, target: str, transform: str
-) -> dict[str, str | None]:
+def path_transform(*, document_id: str, target: str, transform: str) -> dict[str, str | None]:
     """Bake an SVG transform into a path's data, rewriting its coordinates in place.
 
     Unlike transform_node (which sets a transform attribute), this modifies the "d" geometry
@@ -5640,7 +5658,7 @@ def path_transform(
 
 @tool
 @emits_change
-def path_to_absolute(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def path_to_absolute(*, document_id: str, target: str) -> dict[str, str | None]:
     """Normalize a path's data to absolute commands (uppercase). Path nodes only.
 
     Args:
@@ -5654,7 +5672,7 @@ def path_to_absolute(*, document_id: str | None = None, target: str) -> dict[str
 
 @tool
 @emits_change
-def path_to_relative(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def path_to_relative(*, document_id: str, target: str) -> dict[str, str | None]:
     """Normalize a path's data to relative commands (lowercase). Path nodes only.
 
     Args:
@@ -5667,7 +5685,7 @@ def path_to_relative(*, document_id: str | None = None, target: str) -> dict[str
 
 
 @tool
-def path_bbox(*, document_id: str | None = None, target: str) -> dict[str, float] | None:
+def path_bbox(*, document_id: str, target: str) -> dict[str, float] | None:
     """Return the bounding box of a path's raw data, ignoring any node transform. Path nodes only.
 
     For the on-canvas box including transforms, use get_bbox instead.
@@ -5686,9 +5704,7 @@ def path_bbox(*, document_id: str | None = None, target: str) -> dict[str, float
 
 @tool
 @emits_change
-def define_symbol(
-    *, document_id: str | None = None, content: list[str], name: str | None = None
-) -> str:
+def define_symbol(*, document_id: str, content: list[str], name: str | None = None) -> str:
     """Create a reusable <symbol> from existing nodes, then instantiate it with add_use.
 
     The listed content nodes are MOVED into the symbol (which is not drawn directly). Create
@@ -5708,7 +5724,7 @@ def define_symbol(
 @emits_change
 def add_use(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     x: float = 0,
     y: float = 0,
@@ -5736,7 +5752,7 @@ def add_use(
 
 @tool
 @emits_change
-def unlink_use(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def unlink_use(*, document_id: str, target: str) -> dict[str, str | None]:
     """Expand a <use> instance into a real, independent copy of its referenced content.
 
     Args:
@@ -5755,7 +5771,7 @@ def unlink_use(*, document_id: str | None = None, target: str) -> dict[str, str 
 @emits_change
 def define_pattern(
     *,
-    document_id: str | None = None,
+    document_id: str,
     content: list[str],
     width: float,
     height: float,
@@ -5799,7 +5815,7 @@ def define_pattern(
 @emits_change
 def define_marker(
     *,
-    document_id: str | None = None,
+    document_id: str,
     content: list[str],
     ref_x: float = 0,
     ref_y: float = 0,
@@ -5848,7 +5864,7 @@ def define_marker(
 @emits_change
 def define_arrow_marker(
     *,
-    document_id: str | None = None,
+    document_id: str,
     preset: Literal["triangle", "barbed", "stealth", "diamond", "open", "dot"] = "triangle",
     size: float = 8.0,
     color: str = "#000000",
@@ -5892,7 +5908,7 @@ def define_arrow_marker(
 @tool
 @emits_change
 def apply_marker(
-    *, document_id: str | None = None, target: str, marker: str, position: str = "end"
+    *, document_id: str, target: str, marker: str, position: str = "end"
 ) -> dict[str, str | None]:
     """Attach a marker (from define_marker) to a path/line/polyline.
 
@@ -5913,7 +5929,7 @@ def apply_marker(
 @tool
 @emits_change
 def define_filter(
-    *, document_id: str | None = None, primitives: list[FilterPrimitive], name: str | None = None
+    *, document_id: str, primitives: list[FilterPrimitive], name: str | None = None
 ) -> str:
     """Define a custom filter from a raw fe* primitive graph (full control), then apply_filter it.
 
@@ -5937,9 +5953,7 @@ def define_filter(
 
 @tool
 @emits_change
-def apply_filter(
-    *, document_id: str | None = None, target: str, filter: str
-) -> dict[str, str | None]:
+def apply_filter(*, document_id: str, target: str, filter: str) -> dict[str, str | None]:
     """Attach an existing filter (from define_filter) to a node.
 
     Args:
@@ -5955,7 +5969,7 @@ def apply_filter(
 @tool
 @emits_change
 def apply_morphology(
-    *, document_id: str | None = None, target: str, operator: str = "dilate", radius: float = 1
+    *, document_id: str, target: str, operator: str = "dilate", radius: float = 1
 ) -> dict[str, str | None]:
     """Thicken or thin a node's shapes with a morphology filter.
 
@@ -5983,7 +5997,7 @@ def apply_morphology(
 @emits_change
 def apply_inner_shadow(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     dx: float = 0,
     dy: float = 2,
@@ -6009,7 +6023,7 @@ def apply_inner_shadow(
 @emits_change
 def apply_outer_glow(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     size: float = 4,
     color: str = "#ffffff",
@@ -6026,7 +6040,7 @@ def apply_outer_glow(
 @emits_change
 def apply_inner_glow(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     size: float = 4,
     color: str = "#ffffff",
@@ -6043,7 +6057,7 @@ def apply_inner_glow(
 @emits_change
 def apply_outline(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     width: float = 2,
     color: str = "#000000",
@@ -6060,7 +6074,7 @@ def apply_outline(
 @emits_change
 def apply_bevel(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     size: float = 4,
     softness: float = 2,
@@ -6084,7 +6098,7 @@ def apply_bevel(
 @emits_change
 def apply_gloss(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     angle: float = 90,
     offset: float = 14,
@@ -6117,7 +6131,7 @@ def apply_gloss(
 @emits_change
 def apply_front_light(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     angle: float = 90,
     offset: float = 14,
@@ -6149,7 +6163,7 @@ def apply_front_light(
 @emits_change
 def apply_grain(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     scale: float = 0.9,
     amount: float = 0.25,
@@ -6168,7 +6182,7 @@ def apply_grain(
 
 
 @tool
-def get_filter(*, document_id: str | None = None, target: str) -> _FilterInfo | None:
+def get_filter(*, document_id: str, target: str) -> _FilterInfo | None:
     """Describe a node's EFFECT STACK — {id, effects:[{index, kind, params}, …]} — to read-edit.
 
     Effects compose (shadow + gloss + inner-shadow on one node); `params` use the apply_*/edit
@@ -6183,7 +6197,7 @@ def get_filter(*, document_id: str | None = None, target: str) -> _FilterInfo | 
 @tool
 @emits_change
 def edit_filter(
-    *, document_id: str | None = None, target: str, params: _FxParams, index: int = 0
+    *, document_id: str, target: str, params: _FxParams, index: int = 0
 ) -> dict[str, str | None]:
     """Change ONE effect's params (by stack `index`), re-deriving the filter in place (same id).
 
@@ -6201,9 +6215,7 @@ def edit_filter(
 
 @tool
 @emits_change
-def remove_effect(
-    *, document_id: str | None = None, target: str, index: int
-) -> dict[str, str | None]:
+def remove_effect(*, document_id: str, target: str, index: int) -> dict[str, str | None]:
     """Remove one effect from a node's stack by `index` (see get_filter); drops the filter if last.
 
     Args:
@@ -6215,7 +6227,7 @@ def remove_effect(
 
 @tool
 @emits_change
-def clear_effects(*, document_id: str | None = None, target: str) -> dict[str, str | None]:
+def clear_effects(*, document_id: str, target: str) -> dict[str, str | None]:
     """Remove ALL effects from a node (detaches the whole filter).
 
     Args:
@@ -6228,7 +6240,7 @@ def clear_effects(*, document_id: str | None = None, target: str) -> dict[str, s
 @emits_change
 def apply_component_transfer(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     func_type: str = "table",
     table_values: str | None = None,
@@ -6263,7 +6275,7 @@ def apply_component_transfer(
 @emits_change
 def apply_turbulence(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     base_frequency: float,
     num_octaves: int = 1,
@@ -6297,7 +6309,7 @@ def apply_turbulence(
 
 @tool
 @emits_change
-def set_title(*, document_id: str | None = None, target: str, text: str) -> dict[str, str | None]:
+def set_title(*, document_id: str, target: str, text: str) -> dict[str, str | None]:
     """Set a node's <title> (accessibility label / hover tooltip).
 
     Args:
@@ -6312,9 +6324,7 @@ def set_title(*, document_id: str | None = None, target: str, text: str) -> dict
 
 @tool
 @emits_change
-def set_description(
-    *, document_id: str | None = None, target: str, text: str
-) -> dict[str, str | None]:
+def set_description(*, document_id: str, target: str, text: str) -> dict[str, str | None]:
     """Set a node's <desc> (accessibility long description).
 
     Args:
@@ -6331,13 +6341,16 @@ def set_description(
 @emits_change
 def set_document_metadata(
     *,
-    document_id: str | None = None,
+    document_id: str,
     title: str | None = None,
     creator: str | None = None,
     rights: str | None = None,
     date: str | None = None,
-) -> dict[str, str | None]:
+) -> dict[str, str]:
     """Set document-level metadata. Only the provided fields are written.
+
+    Written as Inkscape's RDF block (``<metadata>``); ``title`` also sets the root ``<title>``
+    that browsers and screen readers use.
 
     Args:
         title: Document title.
@@ -6346,7 +6359,7 @@ def set_document_metadata(
         date: Date string.
 
     Returns:
-        A map of the fields that were applied.
+        A map of the fields that were applied (title, creator, rights, date).
     """
     return ops.set_document_metadata(
         _doc(document_id), title=title, creator=creator, rights=rights, date=date
@@ -6357,7 +6370,7 @@ def set_document_metadata(
 @emits_change
 def resize_document(
     *,
-    document_id: str | None = None,
+    document_id: str,
     width: float | None = None,
     height: float | None = None,
     mode: Literal["plain", "scale", "fit"] = "plain",
@@ -6393,7 +6406,7 @@ def resize_document(
 @tool
 def find(
     *,
-    document_id: str | None = None,
+    document_id: str,
     types: list[str] | None = None,
     name: str | None = None,
     name_contains: str | None = None,
@@ -6423,7 +6436,7 @@ def find(
 
 
 @tool
-def get_subtree(*, document_id: str | None = None, target: str) -> dict[str, str | OutlineNode]:
+def get_subtree(*, document_id: str, target: str) -> dict[str, str | OutlineNode]:
     """Extract a node's subtree for inspection — both rendered SVG and structured form.
 
     Args:
@@ -6436,7 +6449,7 @@ def get_subtree(*, document_id: str | None = None, target: str) -> dict[str, str
 
 
 @tool
-def extract_image(*, document_id: str | None = None, target: str) -> dict[str, str] | None:
+def extract_image(*, document_id: str, target: str) -> dict[str, str] | None:
     """Extract the embedded bytes of an <image> node that uses a data URI.
 
     Args:
@@ -6455,7 +6468,7 @@ def extract_image(*, document_id: str | None = None, target: str) -> dict[str, s
 @emits_change
 def add_flowed_text(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x: float,
     y: float,
     width: float,
@@ -6513,7 +6526,7 @@ def add_flowed_text(
 @emits_change
 def wrap_in_link(
     *,
-    document_id: str | None = None,
+    document_id: str,
     href: str,
     children: list[str],
     parent: str | None = None,
@@ -6539,7 +6552,7 @@ def wrap_in_link(
 @emits_change
 def define_mesh_gradient(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x: float,
     y: float,
     rows: int = 1,
@@ -6565,7 +6578,7 @@ def define_mesh_gradient(
 @emits_change
 def apply_displacement_map(
     *,
-    document_id: str | None = None,
+    document_id: str,
     target: str,
     scale: float = 10,
     base_frequency: float = 0.05,
@@ -6595,7 +6608,7 @@ def apply_displacement_map(
 @emits_change
 def add_guide(
     *,
-    document_id: str | None = None,
+    document_id: str,
     position: Point,
     angle: float = 90.0,
     name: str | None = None,
@@ -6614,7 +6627,7 @@ def add_guide(
 
 
 @tool
-def list_guides(*, document_id: str | None = None) -> list[dict[str, str | None]]:
+def list_guides(*, document_id: str) -> list[dict[str, str | None]]:
     """List the document's guides.
 
     Returns:
@@ -6627,7 +6640,7 @@ def list_guides(*, document_id: str | None = None) -> list[dict[str, str | None]
 @emits_change
 def add_page(
     *,
-    document_id: str | None = None,
+    document_id: str,
     x: float,
     y: float,
     width: float,
@@ -6650,7 +6663,7 @@ def add_page(
 
 
 @tool
-def list_pages(*, document_id: str | None = None) -> list[dict[str, str | None]]:
+def list_pages(*, document_id: str) -> list[dict[str, str | None]]:
     """List the document's pages.
 
     Returns:
@@ -6665,7 +6678,7 @@ def list_pages(*, document_id: str | None = None) -> list[dict[str, str | None]]
 @tool
 def render_document(
     *,
-    document_id: str | None = None,
+    document_id: str,
     scale: float = 1.0,
     background: str | None = None,
     backend: str | None = None,
@@ -6699,7 +6712,7 @@ def render_document(
     return [summary, feedback.image]
 
 
-@tool
+@mcp.tool  # touches no session state: no session_id
 def render_svg(
     svg: str,
     scale: float = 1.0,
@@ -6731,7 +6744,7 @@ def render_svg(
     return [feedback.summary, feedback.image]
 
 
-@tool
+@mcp.tool  # touches no session state: no session_id
 def render_backends() -> dict[str, bool]:
     """Report which render backends are installed and usable in this environment.
 
@@ -6744,7 +6757,7 @@ def render_backends() -> dict[str, bool]:
 @tool
 def export_render(
     *,
-    document_id: str | None = None,
+    document_id: str,
     format: str = "png",
     scale: float = 1.0,
     path: str | None = None,
@@ -6776,7 +6789,7 @@ def export_render(
     return {"path": str(resolved), "format": format.lower(), "bytes": len(data)}
 
 
-@tool
+@mcp.tool  # touches no session state: no session_id
 def export_formats() -> dict[str, list[str] | bool]:
     """List the file formats ``export_render`` can write, and whether vector export is available.
 
@@ -6787,7 +6800,7 @@ def export_formats() -> dict[str, list[str] | bool]:
     return {"formats": list(SUPPORTED_FORMATS), "vector_available": rsvg_available()}
 
 
-@tool
+@mcp.tool  # touches no session state: no session_id
 def measure_text(content: str, style: ShapeStyle | None = None) -> dict[str, float]:
     """Measure a single text run without rendering — its advance width and line height.
 
@@ -6796,7 +6809,7 @@ def measure_text(content: str, style: ShapeStyle | None = None) -> dict[str, flo
 
     Args:
         content: The text to measure.
-        style: Font properties (font_family, font_size, font_weight, font_style); defaults to
+        style: Font properties (font-family, font-size, font-weight, font-style); defaults to
             sans-serif at 16px when omitted.
 
     Returns:
@@ -6817,13 +6830,13 @@ def measure_text(content: str, style: ShapeStyle | None = None) -> dict[str, flo
 
 
 @tool
-def start_preview(
-    *, host: str = "127.0.0.1", port: int | None = None
-) -> dict[str, str | int | bool]:
+def start_preview(*, document_id: str, port: int | None = None) -> dict[str, str | int | bool]:
     """Open a live preview window the USER can watch as you build the drawing.
 
-    Starts a small local web server (loopback only) and returns its ``url``. The page shows the
-    ACTIVE document and refreshes automatically on every change, so the user sees progress without
+    Starts a small local web server on the configured preview host (loopback unless the user
+    configured otherwise; never chosen here) and returns the ``url`` of a page showing
+    ``document_id``. The page stays on that document and refreshes automatically on every change
+    to it (``index`` lists the session's documents), so the user sees progress without
     you spending tokens or calls on ``render_document`` for their benefit. Reserve
     ``render_document`` for when YOU need to inspect the result.
 
@@ -6831,18 +6844,24 @@ def start_preview(
     than waiting for the user to ask. Seeing the work in progress lets them redirect you before
     you finish something they didn't want.
 
-    Idempotent: if a preview is already running it just returns the existing URL. After calling
-    this, give the returned ``url`` to the user (e.g. "Live preview: <url> — refreshes on each
-    change"). Give it exactly as returned: with web login on it carries a short-lived ticket
-    (``?t=``) that signs the user's browser in.
+    Idempotent: if a preview is already running it just returns the document's URL. A new
+    document gets its own page: call this again with its id and give the user that URL.
+    After calling this, give the returned ``url`` to the user (e.g. "Live preview: <url> —
+    refreshes on each change"). Give it exactly as returned: with web login on it carries a
+    short-lived ticket (``?t=``) that signs the user's browser in.
     """
-    _base, bound = _preview.server.ensure_running(host=host, port=port)
+    _doc(document_id)  # a typo'd id fails here, not as a blank page
+    from .config import get_settings  # noqa: PLC0415 — settings are read lazily, as in main()
+
+    _base, bound = _preview.server.ensure_running(host=get_settings().preview_host, port=port)
     token = _session_token()
-    # per-session URL: /<token>/, plus a login ticket for that token when web_auth is on
-    url = _webgate.with_ticket(_preview.server.url_for(token), token)
+    # per-document URL /<token>/<document_id>/, plus a login ticket for the token when
+    # web_auth is on; the index is the session's page.
+    url = _webgate.with_ticket(_preview.server.url_for(token, document_id), token)
+    index = _webgate.with_ticket(_preview.server.url_for(token), token)
     with contextlib.suppress(Exception):
         _publish_preview()  # prime so the page isn't blank on first open
-    return {"url": url, "port": bound, "running": True}
+    return {"url": url, "index": index, "port": bound, "running": True}
 
 
 @tool
@@ -6859,6 +6878,7 @@ def set_preview_backdrop(*, backdrop: str) -> dict[str, str]:
     Returns:
         {backdrop} that was set.
     """
+    _store()  # session state: a call without a session_id is rejected like any other
     _preview.server.set_backdrop(_session_token(), backdrop)
     return {"backdrop": backdrop}
 
@@ -6875,7 +6895,7 @@ def _trim_num(value: _DocumentValue) -> str:
 @tool(app=AppConfig(resource_uri=_widget.WIDGET_URI))
 def show_widget(
     *,
-    document_id: str | None = None,
+    document_id: str,
     scale: float = 1.0,
     background: str | None = None,
 ) -> ToolResult:
@@ -6889,14 +6909,10 @@ def show_widget(
     this widget is intentionally the lightweight in-chat option.
 
     Args:
-        document_id: Which document to show; defaults to the active one. When given, that document
-            is made active.
+        document_id: Which document to show.
         scale: Zoom factor for the rendered image.
         background: Optional CSS background color for the render; omit for transparent.
     """
-    if document_id is not None:
-        _store().set_active(document_id)
-    target = document_id or _store().active_id
     doc = _doc(document_id)
     svg = _export_svg(doc)
     result = get_renderer().render(RenderRequest(svg=svg, scale=scale, background=background))
@@ -6904,29 +6920,70 @@ def show_widget(
     info = _describe_document(doc)
     width, height = info.get("width"), info.get("height")
     size = f"{_trim_num(width)}×{_trim_num(height)}" if width and height else ""
-    caption = f"{target} · {size}" if size else (target or "document")
+    caption = f"{document_id} · {size}" if size else document_id
     return ToolResult(content=[caption, feedback.image])
 
 
 # --- resources (readable ambient context) ----------------------------------
 
 
-@mcp.resource("svg://documents", mime_type="application/json")
-def documents_resource() -> dict[str, str | list[_DocumentInfo] | None]:
-    """Index of open documents: id, size, counts, and which one is active."""
-    return _documents_index()
+async def _store_for_token(token: str) -> DocumentStore:
+    """The DocumentStore a resource URI's token names, with the same checks as tool calls.
+
+    Resource reads carry no `session_id` argument, so the URI's token (a hash of the minted
+    session id) names the session. The session must still be live, and a session owned by
+    its minting connection only reads from that connection.
+    """
+    if token == "default" and not _in_request():
+        return _DEFAULT_STORE  # direct/programmatic use outside a request
+    session_id = _TOKEN_SESSIONS.get(token)
+    if session_id is None:
+        raise _NoSuchResource()
+    try:
+        await _resolve_minted_session(session_id)
+    except InvalidArgument:
+        # Ended, or owned by another connection: answered exactly like an unknown token, so
+        # a resource read reveals nothing about which tokens exist or who holds them.
+        raise _NoSuchResource() from None
+    return _MINTED_SESSION_STORES[session_id]
 
 
-@mcp.resource("svg://{document_id}/svg", mime_type="image/svg+xml")
-def document_svg_resource(document_id: str) -> str:
+class _NoSuchResource(InvalidArgument):
+    """The ONE error every refused resource read raises: unknown token, ended or foreign
+    session, or a document that isn't open — indistinguishable, and never listing ids."""
+
+    def __init__(self) -> None:
+        super().__init__("no such resource")
+
+
+async def _resource_document(token: str, document_id: str) -> Document:
+    store = await _store_for_token(token)
+    try:
+        return store.get(document_id)
+    except DocumentNotFound:
+        raise _NoSuchResource() from None
+
+
+@mcp.resource("svg://{token}/documents", mime_type="application/json")
+async def documents_resource(token: str) -> dict[str, str | list[_DocumentInfo] | None]:
+    """Index of a session's open documents: id, size and counts."""
+    store = await _store_for_token(token)
+    docs: list[_DocumentInfo] = []
+    for did in store.list_ids():
+        docs.append({"id": did, **_describe_document(store.get(did))})
+    return {"documents": docs}
+
+
+@mcp.resource("svg://{token}/{document_id}/svg", mime_type="image/svg+xml")
+async def document_svg_resource(token: str, document_id: str) -> str:
     """The live SVG source of a document."""
-    return _export_svg(_store().peek(document_id))
+    return _export_svg(await _resource_document(token, document_id))
 
 
-@mcp.resource("svg://{document_id}/render", mime_type="image/png")
-def document_render_resource(document_id: str) -> bytes:
+@mcp.resource("svg://{token}/{document_id}/render", mime_type="image/png")
+async def document_render_resource(token: str, document_id: str) -> bytes:
     """A rendered PNG preview of a document."""
-    svg = _export_svg(_store().peek(document_id))
+    svg = _export_svg(await _resource_document(token, document_id))
     return get_renderer().render(RenderRequest(svg=svg)).png
 
 

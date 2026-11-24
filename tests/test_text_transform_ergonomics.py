@@ -115,9 +115,9 @@ def test_preview_set_backdrop_updates_state() -> None:
     from svg_mcp import preview
 
     srv = preview.PreviewServer()
-    assert srv.state("tok")[3] == "checker"  # default
+    assert srv.state("tok")[2] == "checker"  # default
     srv.set_backdrop("tok", "#1e293b")
-    gen, _active, _idx, backdrop = srv.state("tok")
+    gen, _idx, backdrop = srv.state("tok")
     assert backdrop == "#1e293b" and gen == 1  # set + generation bumped (pushes via SSE)
 
 

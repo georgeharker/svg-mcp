@@ -36,9 +36,8 @@ def test_requires_exactly_one_source() -> None:
         ops.load_svg_document(svg=SAMPLE, path="/x.svg")
 
 
-def test_register_makes_document_active() -> None:
+def test_register_returns_a_new_id() -> None:
     store = DocumentStore()
     doc = ops.load_svg_document(svg=SAMPLE)
     doc_id = store.register(doc)
-    assert store.active_id == doc_id
-    assert store.peek(doc_id) is doc
+    assert store.get(doc_id) is doc

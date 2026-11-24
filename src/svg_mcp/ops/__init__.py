@@ -103,7 +103,13 @@ from .diagram_layout import DiagramLayout, layout_diagram
 from .geometry import edit_path, edit_shape
 from .graph import GraphEdge, GraphGroup, GraphImport, GraphNode, add_diagram_graph
 from .layers import list_layers, move_to_layer, rename_layer, set_layer_state
-from .meta import resize_document, set_description, set_document_metadata, set_title
+from .meta import (
+    get_document_metadata,
+    resize_document,
+    set_description,
+    set_document_metadata,
+    set_title,
+)
 from .modify import (
     apply_transform,
     delete_node,
@@ -348,6 +354,7 @@ __all__ = [
     "set_title",
     "set_description",
     "set_document_metadata",
+    "get_document_metadata",
     "resize_document",
     # resources
     "FePrimitive",
