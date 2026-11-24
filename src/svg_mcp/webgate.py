@@ -147,6 +147,17 @@ def enabled() -> bool:
 # ── the gate ───────────────────────────────────────────────────────
 
 
+#: The public path prefix (``preview_public_url``'s path, e.g. "/svg"; "" for none). Request
+#: paths reach this module already stripped of it; every Location and cookie Path it emits
+#: is given it back, so redirects land under the proxy's mount.
+_prefix = ""
+
+
+def set_prefix(prefix: str) -> None:
+    global _prefix
+    _prefix = prefix
+
+
 def auth_path(path: str) -> bool:
     """The login routes, never gated."""
     return path in (webauth.LOGIN_PATH, webauth.LOGOUT_PATH)
@@ -248,7 +259,10 @@ def reserve_login(request: GateRequest) -> Reply | None:
         return None
     if not LIMITER.begin(request.client or "?"):
         return authpages.login_page(
-            "/", error="Too many attempts — wait a minute and try again.", status=429
+            action=_prefix + webauth.LOGIN_PATH,
+            next_path="/",
+            error="Too many attempts — wait a minute and try again.",
+            status=429,
         )
     return None
 
@@ -276,14 +290,17 @@ def login(
     query_next = next((v for k, v in request.query_items() if k == "next"), None)
     target = _safe_next(query_next)
     if request.method != "POST" or form is None:
-        return authpages.login_page(target)
+        return authpages.login_page(action=_prefix + webauth.LOGIN_PATH, next_path=target)
     client = request.client or "?"
     # Concurrency + budget reservation before the body is hashed when the caller has
     # not already reserved (in-flight + failures share the per-address cap, the
     # overall budget applies) — direct/testing callers reserve here.
     if not admitted_already and not LIMITER.begin(client):
         return authpages.login_page(
-            target, error="Too many attempts — wait a minute and try again.", status=429
+            action=_prefix + webauth.LOGIN_PATH,
+            next_path=target,
+            error="Too many attempts — wait a minute and try again.",
+            status=429,
         )
     # svg-mcp-specific: scrypt runs capped at 2 concurrent (mirror of
     # asyncio.to_thread(2)); each is ~16 MB / ~30 ms — bound the parallel work.
@@ -295,12 +312,17 @@ def login(
     LIMITER.end(client, failed=failed)
     if failed:
         logger.warning("web_auth: failed login from %s", client)
-        return authpages.login_page(target, error="That password isn't right.", status=401)
+        return authpages.login_page(
+            action=_prefix + webauth.LOGIN_PATH,
+            next_path=target,
+            error="That password isn't right.",
+            status=401,
+        )
     return _redirect(_safe_next(form.get("next") or target), _session_cookie(request))
 
 
 def logout(_request: GateRequest) -> Reply:
-    cleared = f"{webauth.COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax"
+    cleared = f"{webauth.COOKIE}=; Max-Age=0; Path={_prefix or '/'}; HttpOnly; SameSite=Lax"
     return _redirect(webauth.LOGIN_PATH, cleared)
 
 
@@ -339,12 +361,14 @@ def _session_cookie(request: GateRequest, subject: str | None = None) -> str:
     cookie = (
         f"{webauth.COOKIE}={state.signer.session(days, subject=subject)}; "
         f"Max-Age={round(days * 86400)}; "
-        "Path=/; HttpOnly; SameSite=Lax"
+        f"Path={_prefix or '/'}; HttpOnly; SameSite=Lax"
     )
     return cookie + ("; Secure" if _secure(request) else "")
 
 
 def _redirect(location: str, cookie: str = "") -> Reply:
+    if location.startswith("/"):
+        location = _prefix + location  # internal paths are prefix-free; the browser's aren't
     headers = [("Location", location), ("Cache-Control", "no-store")]
     if cookie:
         headers.append(("Set-Cookie", cookie))

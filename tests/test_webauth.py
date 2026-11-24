@@ -807,3 +807,48 @@ class TestEndedTokens:
         srv.publish("tok", sources={"doc1": SVG}, index_json=one)  # a late in-flight call
         srv.set_backdrop("tok", "white")
         assert not srv.known("tok") and srv.resolve("tok", "doc1") is None
+
+
+class TestPublicUrl:
+    """preview_public_url: links name the proxy's origin and mount, requests may arrive
+    with or without the prefix, and every login redirect and cookie stays under it."""
+
+    @pytest.fixture()
+    def mounted(self, site: _Preview) -> Iterator[_Preview]:
+        site.server.set_public_url("https://box.example.ts.net/svg/")
+        yield site
+        site.server.set_public_url(None)
+
+    def test_links_use_the_public_origin_and_prefix(self, mounted: _Preview) -> None:
+        assert mounted.server.url_for(TOKEN, "doc1") == (
+            f"https://box.example.ts.net/svg/{TOKEN}/doc1/"
+        )
+        assert webauth.is_local_host("box.example.ts.net")
+
+    def test_routes_work_with_and_without_the_prefix(self, mounted: _Preview) -> None:
+        assert mounted.get(f"/{TOKEN}/doc1/svg")[0] == 200  # a stripping proxy
+        assert mounted.get(f"/svg/{TOKEN}/doc1/svg")[0] == 200  # a non-stripping one
+        status, _, page = mounted.get(f"/svg/{TOKEN}/doc1/", **HTML)
+        assert status == 200 and 'const prefix = "/svg";' in page
+
+    def test_login_redirects_and_cookie_stay_under_the_prefix(
+        self, mounted: _Preview, signer: webauth.Signer
+    ) -> None:
+        _gate_on(signer, exempt_local=False)
+        status, headers, _ = mounted.get(f"/svg/{TOKEN}/doc1/", **HTML)
+        assert status == 303
+        assert headers["location"].startswith("/svg/auth/login?next=")
+        assert "%2Fsvg" not in headers["location"]  # next is prefix-free, re-prefixed later
+        status, _, form = mounted.get("/svg/auth/login")
+        assert status == 200 and 'action="/svg/auth/login"' in form
+        status, headers, _ = mounted.login(PASSWORD, f"/{TOKEN}/doc1/")
+        assert status == 303 and headers["location"] == f"/svg/{TOKEN}/doc1/"
+        assert "Path=/svg;" in headers["set-cookie"]
+
+    def test_the_prefix_is_injected_safely(self, site: _Preview) -> None:
+        site.server.set_public_url('https://h.example/a"b/')
+        try:
+            page = site.get(f"/{TOKEN}/doc1/", **HTML)[2]
+            assert 'const prefix = "/a\\"b";' in page
+        finally:
+            site.server.set_public_url(None)

@@ -176,3 +176,12 @@ def test_a_file_enabled_login_without_a_password_names_the_file(tmp_path: Any) -
     with pytest.raises(ValueError, match="every svg-mcp launch reads") as err:
         _settings()
     assert str(path) in str(err.value)
+
+
+def test_preview_public_url_is_validated(tmp_path: Any) -> None:
+    _write_config(tmp_path, 'preview_public_url = "https://host.example/svg/"\n')
+    assert _settings().preview_public_url == "https://host.example/svg/"
+    for bad in ("ftp://host/", "/svg/", "https://host/svg/?x=1"):
+        _write_config(tmp_path, f'preview_public_url = "{bad}"\n')
+        with pytest.raises(ValueError, match="preview_public_url"):
+            _settings()

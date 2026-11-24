@@ -5,6 +5,14 @@ released together under one version. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.1] - 2026-11-24
+
+### Added
+- `preview_public_url`: where browsers reach the live preview behind a reverse proxy
+  (e.g. `https://host.example/svg/`). `start_preview` hands out links under it; a path
+  prefix is honoured on every route, page request, login redirect, login form and cookie
+  path, whether or not the proxy strips it; and its host counts as this machine's name.
+
 ## [0.11.0] - 2026-11-23
 
 ### Changed
@@ -168,6 +176,7 @@ released together under one version. The format follows
 ### Fixed
 - Exports no longer try to fsync a directory on Windows.
 
+[0.11.1]: https://github.com/georgeharker/svg-mcp/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/georgeharker/svg-mcp/compare/v0.10.7...v0.11.0
 [0.10.7]: https://github.com/georgeharker/svg-mcp/compare/v0.10.6...v0.10.7
 [0.10.6]: https://github.com/georgeharker/svg-mcp/compare/v0.10.5...v0.10.6

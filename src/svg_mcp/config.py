@@ -163,6 +163,27 @@ class Settings(BaseSettings):
     preview_port: int | None = None
     """Bind port for the live preview; None picks the default (8808, or a free port)."""
 
+    preview_public_url: str | None = None
+    """Where browsers reach the live preview when it isn't its bind address, e.g. behind a
+    reverse proxy: ``https://host.example/svg/``. URLs handed out use it, a path prefix is
+    honoured on every route and redirect, and its host counts as this machine's name."""
+
+    @field_validator("preview_public_url")
+    @classmethod
+    def _valid_public_url(cls, value: str | None) -> str | None:
+        if value is None or value == "":
+            return None
+        from urllib.parse import urlsplit  # noqa: PLC0415 — validator-local
+
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(
+                f"preview_public_url must be an http(s) URL with a host (got {value!r})"
+            )
+        if parts.query or parts.fragment:
+            raise ValueError("preview_public_url must not carry a query or fragment")
+        return value
+
     @field_validator("preview", mode="before")
     @classmethod
     def _empty_preview_is_off(cls, value: object) -> object:

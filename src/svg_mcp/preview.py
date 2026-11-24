@@ -32,7 +32,7 @@ import json
 import queue
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from . import webauth, webgate
 from .authpages import Reply
@@ -92,12 +92,37 @@ class PreviewServer:
         self._httpd: ThreadingHTTPServer | None = None
         self._host = "127.0.0.1"
         self._port = 0
+        #: ``preview_public_url`` split into its origin and path prefix ("" for none): links
+        #: are built from it, and requests that still carry the prefix have it stripped.
+        self._public_origin: str | None = None
+        self.prefix = ""
 
     # -- lifecycle ----------------------------------------------------------
 
     @property
     def running(self) -> bool:
         return self._httpd is not None
+
+    def set_public_url(self, public_url: str | None) -> None:
+        """Use *public_url* (``preview_public_url``) for links and as an accepted host name;
+        None reverts to the bind address. Its path becomes the prefix every route and login
+        redirect carries."""
+        if public_url is None:
+            self._public_origin, self.prefix = None, ""
+            webgate.set_prefix("")
+            return
+        parts = urlsplit(public_url)
+        self._public_origin = f"{parts.scheme}://{parts.netloc}"
+        self.prefix = "/" + parts.path.strip("/") if parts.path.strip("/") else ""
+        webgate.set_prefix(self.prefix)
+        if parts.hostname:
+            webauth.set_local_names({self._host, parts.hostname})
+
+    def strip_prefix(self, path: str) -> str:
+        """*path* without the public prefix, when a proxy forwarded it unstripped."""
+        if self.prefix and (path == self.prefix or path.startswith(self.prefix + "/")):
+            return path[len(self.prefix) :] or "/"
+        return path
 
     def ensure_running(self, host: str = "127.0.0.1", port: int | None = None) -> tuple[str, int]:
         """Start the shared server if needed and return ``(base_url, port)``. Idempotent.
@@ -123,11 +148,16 @@ class PreviewServer:
                 self._port = httpd.server_address[1]
                 # The URLs handed out name this host: when it's a name (not an address),
                 # the login's "this machine" Host check must accept it.
-                webauth.set_local_names({host})
+                names = {host}
+                if self._public_origin is not None:
+                    public_host = urlsplit(self._public_origin).hostname
+                    if public_host:
+                        names.add(public_host)
+                webauth.set_local_names(names)
                 threading.Thread(
                     target=httpd.serve_forever, name="svg-mcp-preview", daemon=True
                 ).start()
-            return f"http://{self._host}:{self._port}/", self._port
+            return self._base(), self._port
 
     def shutdown(self) -> None:
         """Stop the accept loop and close the listening socket. Idempotent.
@@ -146,8 +176,13 @@ class PreviewServer:
 
     def url_for(self, token: str, document_id: str | None = None) -> str:
         """The page URL for one document of a session, or the session's index page."""
-        base = f"http://{self._host}:{self._port}/{token}/"
+        base = f"{self._base()}{token}/"
         return f"{base}{document_id}/" if document_id else base
+
+    def _base(self) -> str:
+        if self._public_origin is not None:
+            return f"{self._public_origin}{self.prefix}/"
+        return f"http://{self._host}:{self._port}/"
 
     # -- snapshot publishing (one bucket per session) -----------------------
 
@@ -281,6 +316,11 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
         def _text(self, body: str, mime: str = "text/plain; charset=utf-8") -> None:
             self._bytes(body.encode("utf-8"), mime)
 
+        def _page(self) -> str:
+            # The page reads its token and document from the URL, so it must know the
+            # public prefix to skip (a proxy's /svg/ mount); injected as JSON, never raw.
+            return _PAGE.replace("__SVG_MCP_PREFIX__", json.dumps(self.preview.prefix))
+
         def _not_found(self) -> None:
             """The one 404 every refused preview route returns, byte for byte."""
             self._status(404, "not found")
@@ -312,7 +352,7 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
                 headers.setdefault(name.lower(), []).append(value)
             return webgate.GateRequest(
                 method=self.command,
-                path=url.path,
+                path=self.preview.strip_prefix(url.path),
                 query=url.query,
                 headers=headers,
                 peer=self.client_address[0] if self.client_address else None,
@@ -385,7 +425,7 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
             # token's page for a document that isn't open says so; the token holder can list
             # the session's documents anyway, so that reveals nothing.
             if not sub:
-                return self._text(_PAGE, "text/html; charset=utf-8")
+                return self._text(self._page(), "text/html; charset=utf-8")
             if sub == ["events"]:
                 return self._sse(token)
             if sub == ["version"]:
@@ -398,7 +438,7 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
                 index_json = self.preview.state(token)[1]
                 return self._text(index_json, "application/json")
             if len(sub) == 1:
-                return self._text(_PAGE, "text/html; charset=utf-8")
+                return self._text(self._page(), "text/html; charset=utf-8")
 
             # /<token>/{doc}/svg | /render | /export.{fmt}
             if len(sub) == 2:
@@ -572,8 +612,11 @@ const meta = document.getElementById('meta');
 // Served at /<token>/<document_id>/ (one document) or /<token>/ (the session's index). Every
 // API call is scoped to the session token, so two chats sharing the server never see each
 // other's documents; a document page stays on its document.
-const segs = location.pathname.split('/').filter(Boolean);
-const base = '/' + (segs[0] || '');
+const prefix = __SVG_MCP_PREFIX__;  // a reverse proxy's mount ("" when none)
+const path = prefix && location.pathname.startsWith(prefix + '/')
+  ? location.pathname.slice(prefix.length) : location.pathname;
+const segs = path.split('/').filter(Boolean);
+const base = prefix + '/' + (segs[0] || '');
 const docId = segs[1] || null;
 const docBase = docId ? base + '/' + encodeURIComponent(docId) : null;
 let mode = 'png';      // 'png' | 'svg'

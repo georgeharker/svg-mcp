@@ -6853,7 +6853,9 @@ def start_preview(*, document_id: str, port: int | None = None) -> dict[str, str
     _doc(document_id)  # a typo'd id fails here, not as a blank page
     from .config import get_settings  # noqa: PLC0415 — settings are read lazily, as in main()
 
-    _base, bound = _preview.server.ensure_running(host=get_settings().preview_host, port=port)
+    settings = get_settings()
+    _preview.server.set_public_url(settings.preview_public_url)
+    _base, bound = _preview.server.ensure_running(host=settings.preview_host, port=port)
     token = _session_token()
     # per-document URL /<token>/<document_id>/, plus a login ticket for the token when
     # web_auth is on; the index is the session's page.
@@ -7074,6 +7076,7 @@ def main() -> None:
 
     # Opt-in live preview (loopback web page that auto-refreshes as the drawing is built).
     # Enabled by the ``preview`` setting; the model can also start it via `start_preview`.
+    _preview.server.set_public_url(settings.preview_public_url)
     if settings.preview:
         url, _ = _preview.server.ensure_running(
             host=settings.preview_host, port=settings.preview_port

@@ -551,6 +551,7 @@ export SVG_MCP_WEB_AUTH='{"mode": "password", "session_days": 7}'
 | `shutdown_grace` | `0` | Seconds to let in-flight http connections drain on shutdown |
 | `preview` | `false` | Auto-start the [live preview](#live-preview) web server on boot |
 | `preview_host` / `preview_port` | `127.0.0.1` / `8808` | Bind address for the live preview |
+| `preview_public_url` | unset | Where browsers reach the preview behind a reverse proxy, e.g. `https://host.example/svg/`. Links use it, a path prefix is honoured on every route and login redirect, and its host counts as this machine's name |
 | `web_auth` | off | Browser login for the live preview (see [Web login](#web-login)) |
 | `web_password_hash` | unset | The login's password hash (`svg-mcp hash-password`); overrides `web_auth.password_hash` |
 | `web_password` | unset | The login password, RAW — hashed with a fresh salt at startup, in memory only (the explicit hash wins when both are set) |
@@ -686,6 +687,18 @@ at startup.
 (MagicDNS) name, or the preview's bind host. That stops DNS rebinding: a web page that points
 its own domain at `127.0.0.1` connects from loopback, but its requests still say
 `Host: attacker.example`, so they get the login.
+
+Behind a reverse proxy, set `preview_public_url` to the address browsers use, so the links
+`start_preview` hands out point there. A path prefix works; for nginx:
+
+```nginx
+location /svg/ {
+    proxy_pass http://127.0.0.1:8808/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_buffering off;   # keeps the page's live-update stream flowing
+}
+```
 
 A proxy on this machine is believed only from `127.0.0.1` / `::1`, and only when it names the
 real browser in `X-Forwarded-For`.

@@ -109,7 +109,9 @@ def _page(title: str, body: str, status: int = 200) -> Reply:
     return Reply(status, headers, document.encode("utf-8"))
 
 
-def login_page(next_path: str, error: str | None = None, status: int = 200) -> Reply:
+def login_page(
+    next_path: str, error: str | None = None, status: int = 200, *, action: str = "/auth/login"
+) -> Reply:
     """web_auth's login (svg_mcp.webgate): one password field."""
     problem = (
         f'<div class="status warn"><span class="dot"></span>{html.escape(error)}</div>'
@@ -120,7 +122,7 @@ def login_page(next_path: str, error: str | None = None, status: int = 200) -> R
         f"{problem}<h1>Sign in</h1>"
         "<p>Enter svg-mcp's web password to watch live previews from this browser. "
         "You'll stay signed in here for a while.</p>"
-        '<form method="post" action="/auth/login">'
+        f'<form method="post" action="{html.escape(action, quote=True)}">'
         f'<input type="hidden" name="next" value="{html.escape(next_path, quote=True)}">'
         '<input class="field" type="password" name="password" autocomplete="current-password" '
         'placeholder="Password" required autofocus aria-label="Password">'
