@@ -5,6 +5,16 @@ released together under one version. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.11.2] - 2026-11-24
+
+### Fixed
+- `GET /health` exists: it answers `{"status": "ok"}` without authentication. The README and
+  the bearer middleware already treated it as an open route, but nothing served it (404).
+
+### Added
+- README: running svg-mcp in a container, including why inkex needs a compiler on Linux
+  (PyGObject; lxml < 6 has no Python 3.14 wheels) and a two-stage Python 3.13 build.
+
 ## [0.11.1] - 2026-11-24
 
 ### Added
@@ -176,6 +186,7 @@ released together under one version. The format follows
 ### Fixed
 - Exports no longer try to fsync a directory on Windows.
 
+[0.11.2]: https://github.com/georgeharker/svg-mcp/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/georgeharker/svg-mcp/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/georgeharker/svg-mcp/compare/v0.10.7...v0.11.0
 [0.10.7]: https://github.com/georgeharker/svg-mcp/compare/v0.10.6...v0.10.7

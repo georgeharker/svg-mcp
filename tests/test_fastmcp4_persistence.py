@@ -938,3 +938,26 @@ def test_style_schema_names_only_css_properties() -> None:
     assert "stroke-width" in schema["properties"] and "stroke_width" not in schema["properties"]
     for snake in ("stroke_width", "font_size", "font_family", "text_anchor", "fill_opacity"):
         assert snake not in _INSTRUCTIONS, snake
+
+
+def test_health_is_open_and_reports_ok(server: _Server) -> None:
+    import urllib.request
+
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.port}/health", timeout=5) as r:
+        assert r.status == 200 and json.loads(r.read()) == {"status": "ok"}
+
+
+def test_health_stays_open_behind_the_bearer() -> None:
+    from starlette.middleware import Middleware
+    from starlette.testclient import TestClient
+
+    from svg_mcp.inbound_auth import BearerAuthMiddleware
+
+    app = _mcp_server.http_app(
+        middleware=[
+            Middleware(BearerAuthMiddleware, token="s3cret", is_protected=lambda p: p != "/health")
+        ]
+    )
+    with TestClient(app) as client:
+        assert client.get("/health").json() == {"status": "ok"}
+        assert client.post("/mcp", json={}).status_code == 401

@@ -56,6 +56,8 @@ from mcp.types import (
     SubscriptionsListenRequestParams,  # type: ignore[import-not-found,unused-ignore]  # noqa: E501 — same armor
 )
 from pydantic import AnyUrl, BaseModel
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from . import ops
 from . import preview as _preview
@@ -6998,6 +7000,13 @@ def show_widget_view() -> str:
     paints it. No external origins, so no extra CSP is needed.
     """
     return _widget.build_widget_html()
+
+
+@mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+async def health(_request: Request) -> JSONResponse:
+    """Liveness for container healthchecks and proxies. Unauthenticated: the inbound bearer
+    middleware exempts ``/health``, and this reveals nothing but that the server is up."""
+    return JSONResponse({"status": "ok"})
 
 
 def main() -> None:

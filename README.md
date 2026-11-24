@@ -607,6 +607,43 @@ A long-running HTTP server is handy for a shared/persistent endpoint a bridge ca
 (the server runs as a single process; each session from `create_session` gets its own isolated
 documents).
 
+### Running in a container
+
+Serve streamable HTTP and point clients (or mcp-combiner) at its URL:
+`svg-mcp --transport streamable-http --host 0.0.0.0 --port 7732`. `GET /health` answers
+`{"status": "ok"}` without authentication, for healthchecks.
+
+svg-mcp itself needs no compiler, but **inkex** (its SVG document model) does on Linux:
+it requires PyGObject, which has no Linux wheels, and caps lxml below 6, which has no
+Python 3.14 wheels. svg-mcp never imports PyGObject, but pip installs it anyway. Build on
+Python 3.13 (lxml 5 has wheels there) in two stages:
+
+```dockerfile
+FROM python:3.13-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc pkg-config libgirepository-2.0-dev libcairo2-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN python -m venv /opt/svg-mcp && /opt/svg-mcp/bin/pip install --no-cache-dir svg-mcp
+
+FROM python:3.13-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgirepository-2.0-0 libcairo2 fonts-dejavu-core librsvg2-bin \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /opt/svg-mcp /opt/svg-mcp
+ENV PATH=/opt/svg-mcp/bin:$PATH XDG_STATE_HOME=/state
+VOLUME /state
+EXPOSE 7732 8808
+HEALTHCHECK CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7732/health')"
+CMD ["svg-mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "7732"]
+```
+
+- **Fonts:** install at least one font package (`fonts-dejavu-core`), or text renders blank
+  and `measure_text` finds no family. `librsvg2-bin` is only for PDF/PS/EPS export.
+- **State:** sessions and documents are in memory and end with the process. Only the web
+  login's signing key (`$XDG_STATE_HOME/svg-mcp/web-auth.key`) is worth a volume.
+- **Preview behind a proxy:** bind it with `preview_host = "0.0.0.0"`, set
+  `preview_public_url`, and use `exempt_local = false` (see [Web login](#web-login)).
+
 ## Live preview
 
 Rendering each step back into the chat costs tokens and, in a terminal, the model sees the image
