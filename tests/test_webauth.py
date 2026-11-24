@@ -796,3 +796,14 @@ class TestUniformNotFound:
         site.server.forget(TOKEN)
         assert site.get(f"/{TOKEN}/version")[0] == 404
         assert site.get(f"/{TOKEN}/doc1/", **HTML)[0] == 404
+
+
+class TestEndedTokens:
+    def test_publish_and_backdrop_after_forget_do_not_resurrect(self) -> None:
+        srv = preview.PreviewServer()
+        one = json.dumps({"documents": [{"id": "doc1"}]})
+        srv.publish("tok", sources={"doc1": SVG}, index_json=one)
+        srv.forget("tok")
+        srv.publish("tok", sources={"doc1": SVG}, index_json=one)  # a late in-flight call
+        srv.set_backdrop("tok", "white")
+        assert not srv.known("tok") and srv.resolve("tok", "doc1") is None

@@ -62,7 +62,7 @@ from . import preview as _preview
 from . import webgate as _webgate
 from . import widget as _widget
 from .model.document import Document
-from .model.errors import InvalidArgument, NoSession
+from .model.errors import DocumentNotFound, InvalidArgument, NoSession
 from .model.handles import NodeRef
 from .ops.resources import FilterInfo as _FilterInfo
 from .ops.resources import FxParams as _FxParams
@@ -629,7 +629,7 @@ def _session_bound(fn: Callable[..., object]) -> Callable[..., Awaitable[object]
         arg = kwargs.pop("session_id", None)
         # Values of **kwargs are `object` to the checker; only a real str is session-able.
         session_id: str | None = arg if isinstance(arg, str) else None
-        if session_id is None and _connection() is not None:
+        if session_id is None and _in_request():
             # The schema already requires it; this guards any path that skipped validation.
             raise NoSession(
                 "no session_id: call create_session once, then pass its id as the "
@@ -792,6 +792,18 @@ mcp._mcp_server.add_request_handler(
 )
 
 
+def _in_request() -> bool:
+    """Whether a request is being served, via fastmcp's public context API only.
+
+    Gates the shared default store: deliberately NOT derived from `_connection()`, whose
+    private-attribute probe would turn a fastmcp rename into silent cross-session sharing."""
+    try:
+        get_context()
+    except RuntimeError:
+        return False
+    return True
+
+
 def _connection() -> Connection | None:
     """The low-level mcp `Connection` for the current request, or None outside a request."""
     try:
@@ -815,11 +827,11 @@ def _store() -> DocumentStore:
     if minted is not None:
         store = _MINTED_SESSION_STORES.get(minted)
         if store is None:
-            # Defensive: a still-valid id whose live object was churned away re-creates it;
-            # a genuinely ended id was already popped (+raised) at validation time.
-            store = _MINTED_SESSION_STORES[minted] = DocumentStore()
+            # Validated at the start of this call, gone now: the session ended while the call
+            # was running. Refuse rather than recreate a store nobody owns and report success.
+            raise InvalidArgument("the session ended while this call was running")
         return store
-    if _connection() is None:
+    if not _in_request():
         return _DEFAULT_STORE
     raise NoSession(
         "no session_id: call create_session once, then pass its id as the session_id "
@@ -962,6 +974,9 @@ def _publish_preview(document_ids: list[str] | None = None) -> None:
     HTTP handlers render from, so browser requests never touch the live tree. Documents not
     named keep their last snapshot.
     """
+    minted = _CURRENT_MINTED_SESSION.get()
+    if minted is not None and _TOKEN_SESSIONS.get(_token_for(minted)) != minted:
+        return  # the session ended under this call: don't publish its preview again
     store = _store()
     open_ids = store.list_ids()
     wanted = open_ids if document_ids is None else [d for d in document_ids if d in open_ids]
@@ -6811,12 +6826,11 @@ def measure_text(content: str, style: ShapeStyle | None = None) -> dict[str, flo
 
 
 @tool
-def start_preview(
-    *, document_id: str, host: str = "127.0.0.1", port: int | None = None
-) -> dict[str, str | int | bool]:
+def start_preview(*, document_id: str, port: int | None = None) -> dict[str, str | int | bool]:
     """Open a live preview window the USER can watch as you build the drawing.
 
-    Starts a small local web server (loopback only) and returns the ``url`` of a page showing
+    Starts a small local web server on the configured preview host (loopback unless the user
+    configured otherwise; never chosen here) and returns the ``url`` of a page showing
     ``document_id``. The page stays on that document and refreshes automatically on every change
     to it (``index`` lists the session's documents), so the user sees progress without
     you spending tokens or calls on ``render_document`` for their benefit. Reserve
@@ -6833,7 +6847,9 @@ def start_preview(
     short-lived ticket (``?t=``) that signs the user's browser in.
     """
     _doc(document_id)  # a typo'd id fails here, not as a blank page
-    _base, bound = _preview.server.ensure_running(host=host, port=port)
+    from .config import get_settings  # noqa: PLC0415 — settings are read lazily, as in main()
+
+    _base, bound = _preview.server.ensure_running(host=get_settings().preview_host, port=port)
     token = _session_token()
     # per-document URL /<token>/<document_id>/, plus a login ticket for the token when
     # web_auth is on; the index is the session's page.
@@ -6914,13 +6930,34 @@ async def _store_for_token(token: str) -> DocumentStore:
     session id) names the session. The session must still be live, and a session owned by
     its minting connection only reads from that connection.
     """
-    if token == "default" and _connection() is None:
+    if token == "default" and not _in_request():
         return _DEFAULT_STORE  # direct/programmatic use outside a request
     session_id = _TOKEN_SESSIONS.get(token)
     if session_id is None:
-        raise InvalidArgument(f"no session for resource token {token!r}")
-    await _resolve_minted_session(session_id)
+        raise _NoSuchResource()
+    try:
+        await _resolve_minted_session(session_id)
+    except InvalidArgument:
+        # Ended, or owned by another connection: answered exactly like an unknown token, so
+        # a resource read reveals nothing about which tokens exist or who holds them.
+        raise _NoSuchResource() from None
     return _MINTED_SESSION_STORES[session_id]
+
+
+class _NoSuchResource(InvalidArgument):
+    """The ONE error every refused resource read raises: unknown token, ended or foreign
+    session, or a document that isn't open — indistinguishable, and never listing ids."""
+
+    def __init__(self) -> None:
+        super().__init__("no such resource")
+
+
+async def _resource_document(token: str, document_id: str) -> Document:
+    store = await _store_for_token(token)
+    try:
+        return store.get(document_id)
+    except DocumentNotFound:
+        raise _NoSuchResource() from None
 
 
 @mcp.resource("svg://{token}/documents", mime_type="application/json")
@@ -6936,13 +6973,13 @@ async def documents_resource(token: str) -> dict[str, str | list[_DocumentInfo] 
 @mcp.resource("svg://{token}/{document_id}/svg", mime_type="image/svg+xml")
 async def document_svg_resource(token: str, document_id: str) -> str:
     """The live SVG source of a document."""
-    return _export_svg((await _store_for_token(token)).get(document_id))
+    return _export_svg(await _resource_document(token, document_id))
 
 
 @mcp.resource("svg://{token}/{document_id}/render", mime_type="image/png")
 async def document_render_resource(token: str, document_id: str) -> bytes:
     """A rendered PNG preview of a document."""
-    svg = _export_svg((await _store_for_token(token)).get(document_id))
+    svg = _export_svg(await _resource_document(token, document_id))
     return get_renderer().render(RenderRequest(svg=svg)).png
 
 

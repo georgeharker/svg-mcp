@@ -590,7 +590,7 @@ def test_resources_are_scoped_by_the_session_token(server: _Server) -> None:
         async with await _legacy_client_auto(server.url) as bob:
             index = _documents_index(_resource_text((await bob.read_resource(index_uri))[0]))
             assert [d["id"] for d in index["documents"]] == ["doc1"]
-            with pytest.raises(Exception, match="no session"):
+            with pytest.raises(Exception, match="no such resource"):
                 await bob.read_resource("svg://000000000000/documents")
 
     asyncio.run(scenario())
@@ -608,7 +608,7 @@ def test_an_owned_sessions_resources_only_read_from_its_connection(server: _Serv
             index_uri = _index_uri(created.data)
             await alice.read_resource(index_uri)
             async with await _legacy_client(server.url) as bob:
-                with pytest.raises(Exception, match="different connection"):
+                with pytest.raises(Exception, match="no such resource"):
                     await bob.read_resource(index_uri)
 
     asyncio.run(scenario())
@@ -869,5 +869,59 @@ def test_notifications_name_only_the_touched_document(server: _Server) -> None:
             assert first.data["resources"]["svg"] in seen
             assert not set(second.data["resources"].values()) & set(seen)
             assert "ui://svg-mcp/widget" not in seen
+
+    asyncio.run(scenario())
+
+
+def test_a_call_whose_session_ended_mid_flight_is_refused() -> None:
+    """The in-flight half of the end_session race: the store is gone, so _store() refuses
+    instead of recreating it, and the preview publisher stands down."""
+    from svg_mcp import preview as _preview
+    from svg_mcp import server as srv
+
+    sid = "ended-mid-flight"
+    token = srv._token_for(sid)
+    reset = srv._CURRENT_MINTED_SESSION.set(sid)
+    try:
+        with pytest.raises(Exception, match="ended while this call was running"):
+            srv._store()
+        srv._publish_preview()  # no registry entry for the token: must not publish
+        assert not _preview.server.known(token)
+    finally:
+        srv._CURRENT_MINTED_SESSION.reset(reset)
+
+
+def test_refused_resource_reads_are_indistinguishable(server: _Server) -> None:
+    """Unknown token, foreign (owned) session and unknown document give one identical
+    error, and it never lists the session's documents."""
+
+    async def scenario() -> None:
+        async with await _legacy_client(server.url) as alice:
+            sid = (await alice.call_tool("create_session", {})).data["session_id"]
+            created = await alice.call_tool(
+                "create_document", {"width": 1, "height": 1, "session_id": sid}
+            )
+            index_uri = _index_uri(created.data)
+            token = index_uri.removeprefix("svg://").split("/", 1)[0]
+            messages = []
+            for uri in (f"svg://{token}/doc9/svg", "svg://000000000000/doc1/svg"):
+                with pytest.raises(Exception) as err:
+                    await alice.read_resource(uri)
+                messages.append(str(err.value).rsplit(": ", 1)[-1])  # drop the echoed URI
+            async with await _legacy_client(server.url) as bob:
+                with pytest.raises(Exception) as err:
+                    await bob.read_resource(created.data["resources"]["svg"])
+                messages.append(str(err.value).rsplit(": ", 1)[-1])
+        assert len(set(messages)) == 1, messages
+        assert messages[0] == "no such resource"
+
+    asyncio.run(scenario())
+
+
+def test_start_preview_takes_no_host(server: _Server) -> None:
+    async def scenario() -> None:
+        async with await _legacy_client(server.url) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+        assert "host" not in tools["start_preview"].input_schema["properties"]
 
     asyncio.run(scenario())

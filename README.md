@@ -170,7 +170,7 @@ The full inkex catalog is mapped through to **181 MCP tools** (see
 [`INKEX_PRIMITIVES.md`](./INKEX_PRIMITIVES.md)), plus the theme system and the declarative
 facade families (diagrams, charts, annotations), with ruff/mypy clean and the test suite green.
 
-- **Document model** (inkex-backed, multi-document with an active-document default): shapes,
+- **Document model** (inkex-backed, multi-document, every document named by its id): shapes,
   paths (+ arc/star factories and path-data ops), text + tspan runs + text-on-path + flowed
   text, images (base64/file embed), groups (+ ungroup, z-order, duplicate, world-preserving
   reparent), **layers** (+ visible/locked/opacity), symbols/use, hyperlinks.
@@ -603,12 +603,13 @@ svg-mcp --transport streamable-http --port 7731  # or streamable HTTP at 127.0.0
 ```
 
 A long-running HTTP server is handy for a shared/persistent endpoint a bridge can connect to
-(the server runs as a single process; each client connection gets its own isolated documents).
+(the server runs as a single process; each session from `create_session` gets its own isolated
+documents).
 
 ## Live preview
 
 Rendering each step back into the chat costs tokens and, in a terminal, the model sees the image
-but you don't. The live preview solves both: a tiny loopback web page that mirrors the active
+but you don't. The live preview solves both: a tiny loopback web page that mirrors a
 document and **auto-refreshes on every edit** over Server-Sent Events — so you watch the drawing
 build in a browser while the model keeps working, with no render bytes spent on the conversation.
 

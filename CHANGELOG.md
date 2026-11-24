@@ -37,6 +37,13 @@ released together under one version. The format follows
 - The live preview answers an unknown or ended token, an unknown document's data and an
   unsupported export format with one identical 404, so existing tokens and documents can't
   be told apart from made-up ones. A page whose session ended shows "session ended".
+- A call still running when its session ends can no longer bring the session back: it is
+  refused instead of recreating the documents, and it can't republish the preview.
+- Refused resource reads (unknown token, ended session, a session owned by another
+  connection, a document that isn't open) all give the same error and never list
+  documents.
+- `start_preview` no longer takes a `host`: the preview binds to the configured
+  `preview_host` (loopback by default), so the model can't choose the exposure.
 - `list_documents` returns `{document_ids, index}`; `current_context` returns the session and
   its open documents, without an outline.
 

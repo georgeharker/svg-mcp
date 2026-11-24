@@ -85,6 +85,10 @@ class PreviewServer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._buckets: dict[str, _Bucket] = {}
+        #: Tokens whose session ended. A call still running when its session ended must not
+        #: publish a fresh bucket under the dead token; tokens are never reused (a mint that
+        #: collides re-mints), so this only grows by one per ended session.
+        self._ended: set[str] = set()
         self._httpd: ThreadingHTTPServer | None = None
         self._host = "127.0.0.1"
         self._port = 0
@@ -161,6 +165,8 @@ class PreviewServer:
         previously-captured documents stay renderable) and pruned to the ids in ``index_json``.
         """
         with self._lock:
+            if token in self._ended:
+                return
             bucket = self._bucket(token)
             bucket.sources.update(sources)
             bucket.index_json = index_json
@@ -205,6 +211,8 @@ class PreviewServer:
     def set_backdrop(self, token: str, backdrop: str) -> None:
         """Set a session's preview backdrop and nudge its browsers (MCP-side control)."""
         with self._lock:
+            if token in self._ended:
+                return
             bucket = self._bucket(token)
             bucket.backdrop = backdrop
             bucket.gen += 1
@@ -237,6 +245,7 @@ class PreviewServer:
         The pages then find the session empty; nothing it published stays servable.
         """
         with self._lock:
+            self._ended.add(token)
             bucket = self._buckets.pop(token, None)
             clients = list(bucket.clients) if bucket is not None else []
             gen = bucket.gen + 1 if bucket is not None else 0
@@ -429,6 +438,8 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
                     try:
                         gen = q.get(timeout=15)
                     except queue.Empty:
+                        if not self.preview.known(token):
+                            return  # the session ended: drop the orphaned stream
                         self.wfile.write(b": ping\n\n")
                         self.wfile.flush()
                         continue
@@ -671,7 +682,13 @@ function showEnded(){
 }
 async function refresh(){
   if (ended) return;
-  const r = await fetch(base + '/version', {cache:'no-store'});
+  let r;
+  try {
+    r = await fetch(base + '/version', {cache:'no-store'});
+  } catch (_e) {
+    dot.classList.remove('live');  // the preview server itself is down: just go quiet
+    return;
+  }
   if (r.status === 404) { showEnded(); return; }
   if (!r.ok) return;
   const v = await r.json();
