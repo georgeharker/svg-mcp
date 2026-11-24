@@ -11,8 +11,9 @@ released together under one version. The format follows
 - **Breaking:** every tool that touches session state needs a `session_id` from
   `create_session`, on every client and transport. Stdio and handshake-era HTTP clients no
   longer get documents tied to their connection implicitly; a call without a `session_id` is
-  rejected with guidance. A session created over a stateful connection still belongs to that
-  connection: only it can use the id, and the session ends when it disconnects.
+  rejected with guidance. A session created over a handshake-era HTTP connection still
+  belongs to that connection: only it can use the id, and the session ends when it
+  disconnects. Over stdio the process is the isolation (one client per server).
 - **Breaking:** there is no active document. Every tool that acts on a document takes a
   required `document_id`. `set_active_document` is removed, and `import_svg`'s `into_active`
   is replaced by `document_id` (replace that document's content).
@@ -23,6 +24,12 @@ released together under one version. The format follows
 - **Breaking:** the live preview has one page per document, `/<token>/<document_id>/`, and an
   index at `/<token>/`. `start_preview` takes a `document_id` and returns that page's `url` plus
   the `index`. A page stays on its document.
+- Ending a session (`end_session`, disconnect, idle reaping) also drops its live-preview
+  snapshot, so its pages stop serving the drawing. `set_preview_backdrop` needs a session.
+  The preview `index` URL carries a login ticket like the document URL, and the index page
+  hides the drawing controls. Preview watchers of unknown tokens leave no state behind.
+- The widget's resource URI is shared by every session, so it is now sent only on the
+  caller's own stream, not the listen bus.
 - `list_documents` returns `{document_ids, index}`; `current_context` returns the session and
   its open documents, without an outline.
 

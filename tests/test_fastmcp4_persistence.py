@@ -677,8 +677,8 @@ def test_listen_handler_is_registered_on_the_kernel(server: _Server) -> None:
 
 def test_edits_publish_resource_updated_events_to_the_listen_bus(server: _Server) -> None:
     """A mutating tool call fans its change events out through the subscription bus
-    (the touched document's token-scoped svg/render URIs, the session's documents index,
-    and the widget), for open listen streams of EVERY client — per-stream filters select."""
+    (the touched document's token-scoped svg/render URIs and the session's documents index),
+    for open listen streams of EVERY client — per-stream filters select."""
     from mcp.server.subscriptions import ResourceUpdated as _RU
 
     from svg_mcp.server import _LISTEN_BUS
@@ -716,8 +716,8 @@ def test_edits_publish_resource_updated_events_to_the_listen_bus(server: _Server
                 resources["svg"],
                 resources["render"],
                 _index_uri(created.data),
-                "ui://svg-mcp/widget",
             } <= uris
+            assert "ui://svg-mcp/widget" not in uris  # shared by all sessions: caller stream only
 
     asyncio.run(scenario())
 
@@ -766,5 +766,104 @@ def test_a_2026_listen_stream_receives_updates_from_another_connection(
                 assert not drawn.is_error
                 event = await asyncio.wait_for(anext(stream), timeout=10.0)
                 assert event == ResourceUpdated(uri=svg_uri)
+
+    asyncio.run(scenario())
+
+
+# --- review fixes (2026-11-24) ----------------------------------------------
+
+
+def test_ending_a_session_drops_its_preview_snapshot(server: _Server) -> None:
+    """end_session must stop the preview serving the session's documents."""
+    from svg_mcp import preview as _preview
+    from svg_mcp.server import _token_for
+
+    async def scenario() -> None:
+        async with await _legacy_client(server.url) as client:
+            sid = (await client.call_tool("create_session", {})).data["session_id"]
+            created = await client.call_tool(
+                "create_document", {"width": 10, "height": 10, "session_id": sid}
+            )
+            did = created.data["document_id"]
+            await client.call_tool(
+                "start_preview", {"port": 0, "session_id": sid, "document_id": did}
+            )
+            token = _token_for(sid)
+            assert _preview.server.resolve(token, did) is not None
+            await client.call_tool("end_session", {"session_id": sid})
+            assert _preview.server.resolve(token, did) is None
+            assert token not in _TOKEN_SESSIONS
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        _preview.server.shutdown()
+
+
+def test_set_preview_backdrop_needs_a_session(server: _Server) -> None:
+    async def scenario() -> None:
+        async with await _legacy_client(server.url) as client:
+            with pytest.raises(ToolError, match="create_session"):
+                await client.call_tool("set_preview_backdrop", {"backdrop": "white"})
+
+    asyncio.run(scenario())
+
+
+def test_resources_read_straight_after_create_session(server: _Server) -> None:
+    """The token map is filled at mint, so a resource read needs no prior tool call."""
+    from svg_mcp.server import _token_for
+
+    async def scenario() -> None:
+        async with await _legacy_client_auto(server.url) as client:
+            sid = (await client.call_tool("create_session", {})).data["session_id"]
+            assert _TOKEN_SESSIONS[_token_for(sid)] == sid
+            index = _documents_index(
+                _resource_text(
+                    (await client.read_resource(f"svg://{_token_for(sid)}/documents"))[0]
+                )
+            )
+            assert index["documents"] == []
+
+    asyncio.run(scenario())
+
+
+def test_notifications_name_only_the_touched_document(server: _Server) -> None:
+    """An edit to one document never names another open document, and the shared widget
+    URI stays off the listen bus."""
+    from mcp.server.subscriptions import ResourceUpdated as _RU
+
+    from svg_mcp.server import _LISTEN_BUS
+
+    seen: list[str] = []
+
+    async def scenario() -> None:
+        async with await _legacy_client(server.url) as client:
+            sid = (await client.call_tool("create_session", {})).data["session_id"]
+            first = await client.call_tool(
+                "create_document", {"width": 10, "height": 10, "session_id": sid}
+            )
+            second = await client.call_tool(
+                "create_document", {"width": 10, "height": 10, "session_id": sid}
+            )
+            unsubscribe = _LISTEN_BUS.subscribe(
+                lambda e: seen.append(e.uri) if isinstance(e, _RU) else None
+            )
+            try:
+                await client.call_tool(
+                    "add_rect",
+                    {
+                        "x": 0,
+                        "y": 0,
+                        "width": 1,
+                        "height": 1,
+                        "session_id": sid,
+                        "document_id": first.data["document_id"],
+                    },
+                )
+            finally:
+                unsubscribe()
+            assert first.data["resources"]["svg"] in seen
+            assert not set(second.data["resources"].values()) & set(seen)
+            assert "ui://svg-mcp/widget" not in seen
 
     asyncio.run(scenario())

@@ -402,9 +402,9 @@ SESSIONS (MINTED DOCUMENTS)
   per-connection fallback). Documents persist under it, across connection churn. A call
   without a session is rejected with that same guidance — run create_session and retry with
   the id it returned.
-- `create_session` when minted on a direct/handshake connection is owned by that connection
-  (it dies with the connection); a mint made on a stateless (2026-07-28) link cannot be
-  bound — the unguessable id is its capability.
+- A session minted over a handshake-era HTTP connection is owned by that connection (it
+  dies with the connection). One minted on a stateless (2026-07-28) link cannot be bound —
+  the unguessable id is its capability. Over stdio the server serves only you.
 - `end_session` invalidates a session and discards its documents. Never call it mid-task.
 """
 
@@ -432,17 +432,21 @@ _MINTED_SESSION_HEADER = "x-svg-mcp-session"
 _CURRENT_MINTED_SESSION: ContextVar[str | None] = ContextVar("svg_mcp_minted_session", default=None)
 _MINTED_SESSION_STORES: dict[str, DocumentStore] = {}
 #: Preview/resource token -> minted session id, so a resource URI (which carries no
-#: session_id argument) can name its session. Filled when a session is resolved.
+#: session_id argument) can name its session. Filled at mint and on every resolve.
 _TOKEN_SESSIONS: dict[str, str] = {}
 # Who may USE each minted session: the binding records the minting request's stable session
-# id when one exists (handshake-era/stdio connections have one — the Mcp-Session-Id);
-# stateless (2026-era) requests have no durable identity, so their mints record None and the
-# minted id itself is the capability (intrinsic to the stateless era). A bound session is
-# ONLY resolvable from the connection that minted it — a leaked id used from another
-# connection is rejected — and dies with that connection (its stores are popped and its
-# fastmcp session record invalidated at connection teardown). An unbound session lives until
-# `end_session` (or the process dies; the HTTP idle bound does not reach fastmcp's state
-# records). Under auth, `get_session` additionally principal-scopes both cases.
+# id when one exists — the `Mcp-Session-Id` header of a handshake-era HTTP connection.
+# Stateless (2026-era) requests have no durable identity, so their mints record None and the
+# minted id itself is the capability (intrinsic to the stateless era). stdio has no HTTP
+# header either, so stdio mints are unbound too: there the PROCESS is the isolation (one
+# stdio server serves exactly one client, and its sessions end when that client disconnects
+# and the process exits). A bound session is ONLY resolvable from the connection that
+# minted it and dies with that connection (stores popped, fastmcp record invalidated at
+# teardown). What that protects is a `session_id` leaked on its own: anyone who also holds
+# the connection's `Mcp-Session-Id` already has the connection, so the `/mcp` bearer token
+# is the real wall. An unbound session lives until `end_session` (or the process dies; the
+# HTTP idle bound does not reach fastmcp's state records). Under auth, `get_session`
+# additionally principal-scopes both cases.
 _MINTED_SESSION_OWNER: dict[str, str | None] = {}
 # The minted session's fastmcp record object, captured AT MINT TIME (principal + state store
 # pinned). Connection teardown runs OUTSIDE any request — `get_session`/helpers that resolve
@@ -459,10 +463,11 @@ _MCP_SESSION_ID_HEADER = "mcp-session-id"
 
 def _stable_connection_id() -> str | None:
     """The current request's stable wire identity, for minted-session ownership: the
-    stateful `Mcp-Session-Id` request header when present — handshake-era/stdio clients
+    stateful `Mcp-Session-Id` request header when present — handshake-era HTTP clients
     carry it on every request after initialize, and it names the same server-side connection
     for the connection's whole life. Requests of the stateless (2026) era carry none (the
-    protocol forbids the server assigning it), so mints there record None.
+    protocol forbids the server assigning it), and stdio has no HTTP headers at all, so
+    mints there record None.
 
     NOTE: the low-level Connection's own `session_id` attribute is PER-REQUEST (fastmcp
     derives and backfills a fresh uuid when none exists) and is deliberately NOT used as
@@ -492,7 +497,10 @@ def _revoke_minted(sid: str) -> None:
     and the captured fastmcp record object are dropped (deleting the fastmcp RECORD itself
     is the async caller's job — see `_release_connection_minted`/`end_session`)."""
     _MINTED_SESSION_STORES.pop(sid, None)
-    _TOKEN_SESSIONS.pop(_token_for(sid), None)
+    token = _token_for(sid)
+    if _TOKEN_SESSIONS.get(token) == sid:
+        _TOKEN_SESSIONS.pop(token, None)
+    _preview.server.forget(token)  # its documents stop being servable by the preview
     _MINTED_SESSION_OWNER.pop(sid, None)
     _MINTED_SESSION_RECORD.pop(sid, None)
 
@@ -597,12 +605,7 @@ async def _resolve_minted_session(session_id: str) -> None:
             f"unknown session_id {session_id!r}: "
             "never created (call create_session) or already ended"
         ) from None
-    owner = _MINTED_SESSION_OWNER.get(session_id)
-    if owner is not None and owner != _stable_connection_id():
-        raise InvalidArgument(
-            f"session_id {session_id!r} belongs to a different connection: mint a fresh "
-            "one on this connection with create_session"
-        )
+    _assert_usable_from_here(session_id)
     _MINTED_SESSION_STORES.setdefault(session_id, DocumentStore())
     _TOKEN_SESSIONS[_token_for(session_id)] = session_id
 
@@ -733,15 +736,23 @@ async def create_session() -> dict[str, str]:
     a `session_id` is rejected. The schema marks the argument on each tool, and no client
     injects it behind your back. Documents follow the session until `end_session`.
 
-    Ownership: a mint made on a stateful connection is bound to it (only that connection can
-    use or end the id, and it is discarded when the connection closes). A mint made on a
-    stateless connection cannot be bound (per-request connections, no stable identity), so
-    the minted id — unguessable uuid — is the capability.
+    Ownership: a mint made on a handshake-era HTTP connection is bound to it (only that
+    connection can use or end the id, and it is discarded when the connection closes). A mint
+    made on a stateless (2026-era) link cannot be bound (per-request connections, no stable
+    identity), so the unguessable id is the capability. Over stdio the process is the
+    isolation: the server serves one client, and its sessions end when that client leaves.
 
     Registered with plain `@mcp.tool`, not the session-aware `@tool` alias: minting needs no
     session of its own.
     """
     session_id = await mint_session()
+    while _token_for(session_id) in _TOKEN_SESSIONS:
+        # A 48-bit token collision with a live session: astronomically unlikely, but two
+        # sessions must never share a preview or resource scope, so mint again.
+        with contextlib.suppress(Exception):
+            await end_minted_session(session_id)
+        session_id = await mint_session()
+    _TOKEN_SESSIONS[_token_for(session_id)] = session_id  # resource reads work at once
     with contextlib.suppress(Exception):
         # Capture the fastmcp record while the minting request is still live (principal +
         # state store pinned inside), so connection TEARDOWN — which runs outside any
@@ -760,9 +771,7 @@ async def end_session(session_id: SessionId) -> str:
     `session_id` argument IS the session being ended. Sessions bound to a minting
     connection can only be ended from that connection.
     """
-    owner = _MINTED_SESSION_OWNER.get(session_id)
-    if owner is not None and owner != _stable_connection_id():
-        raise InvalidArgument(f"session_id {session_id!r} belongs to a different connection")
+    _assert_usable_from_here(session_id)
     _revoke_minted(session_id)
     try:
         await end_minted_session(session_id)
@@ -996,11 +1005,13 @@ async def _emit_change(ctx: Context) -> None:
     uri_strings = [f"svg://{token}/documents"]
     for did in touched:
         uri_strings = [*_resource_uris(did).values(), *uri_strings]
+    for uri in uri_strings:
+        await _LISTEN_BUS.publish(ResourceUpdated(uri=uri))
+    # The widget URI is the same for every session, so it rides only the CALLER's stream:
+    # on the shared bus one session's edits would wake every other session's widget listener.
     uri_strings.append(_widget.WIDGET_URI)  # MCP-Apps clients repaint the widget with the doc
     for uri in uri_strings:
         await session.send_resource_updated(AnyUrl(uri))
-    for uri in uri_strings:
-        await _LISTEN_BUS.publish(ResourceUpdated(uri=uri))
     if _preview.server.running:
         with contextlib.suppress(Exception):
             _publish_preview(touched)
@@ -6832,7 +6843,7 @@ def start_preview(
     # per-document URL /<token>/<document_id>/, plus a login ticket for the token when
     # web_auth is on; the index is the session's page.
     url = _webgate.with_ticket(_preview.server.url_for(token, document_id), token)
-    index = _preview.server.url_for(token)
+    index = _webgate.with_ticket(_preview.server.url_for(token), token)
     with contextlib.suppress(Exception):
         _publish_preview()  # prime so the page isn't blank on first open
     return {"url": url, "index": index, "port": bound, "running": True}
@@ -6852,6 +6863,7 @@ def set_preview_backdrop(*, backdrop: str) -> dict[str, str]:
     Returns:
         {backdrop} that was set.
     """
+    _store()  # session state: a call without a session_id is rejected like any other
     _preview.server.set_backdrop(_session_token(), backdrop)
     return {"backdrop": backdrop}
 

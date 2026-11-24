@@ -213,8 +213,26 @@ class PreviewServer:
     def unsubscribe(self, token: str, q: queue.Queue[int]) -> None:
         with self._lock:
             bucket = self._buckets.get(token)
-            if bucket is not None:
-                bucket.clients.discard(q)
+            if bucket is None:
+                return
+            bucket.clients.discard(q)
+            # A bucket only a watcher ever created (nothing published, no backdrop set) goes
+            # with its last watcher, so requests for made-up tokens leave no state behind.
+            if not bucket.clients and bucket.gen == 0:
+                del self._buckets[token]
+
+    def forget(self, token: str) -> None:
+        """Drop a session's snapshot (its session ended) and tell its pages to refresh.
+
+        The pages then find the session empty; nothing it published stays servable.
+        """
+        with self._lock:
+            bucket = self._buckets.pop(token, None)
+            clients = list(bucket.clients) if bucket is not None else []
+            gen = bucket.gen + 1 if bucket is not None else 0
+        for q in clients:
+            with contextlib.suppress(queue.Full):
+                q.put_nowait(gen)
 
 
 server = PreviewServer()
@@ -679,7 +697,12 @@ function connect(){
   es.addEventListener('change', refresh);
   es.onerror = () => { dot.classList.remove('live'); };
 }
-buildSaveMenu();
+// The index page shows links, not a drawing: hide the drawing controls there.
+if (!docId) {
+  document.querySelectorAll('header .group, #save').forEach(el => { el.style.display = 'none'; });
+} else {
+  buildSaveMenu();
+}
 connect();
 refresh();
 </script>

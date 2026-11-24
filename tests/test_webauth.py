@@ -728,3 +728,37 @@ class TestPerDocumentPages:
         assert status == 200
         index = json.loads(body)
         assert index == {"documents": [{"id": "doc1"}]}
+
+
+class TestPreviewHygiene:
+    def test_watching_an_unknown_token_leaves_no_state(self) -> None:
+        srv = preview.PreviewServer()
+        q = srv.subscribe("nobody")
+        srv.unsubscribe("nobody", q)
+        assert "nobody" not in srv._buckets  # noqa: SLF001 — the leak under test
+
+    def test_a_published_bucket_survives_its_watchers(self) -> None:
+        srv = preview.PreviewServer()
+        srv.publish(
+            "tok", sources={"doc1": SVG}, index_json=json.dumps({"documents": [{"id": "doc1"}]})
+        )
+        q = srv.subscribe("tok")
+        srv.unsubscribe("tok", q)
+        assert srv.resolve("tok", "doc1") == SVG
+
+    def test_forget_drops_the_snapshot_and_wakes_watchers(self) -> None:
+        srv = preview.PreviewServer()
+        srv.publish(
+            "tok", sources={"doc1": SVG}, index_json=json.dumps({"documents": [{"id": "doc1"}]})
+        )
+        q = srv.subscribe("tok")
+        srv.forget("tok")
+        assert srv.resolve("tok", "doc1") is None
+        assert q.get_nowait() == 2  # one past the last generation
+
+    def test_delete_document_prunes_the_snapshot(self) -> None:
+        srv = preview.PreviewServer()
+        two = {"documents": [{"id": "doc1"}, {"id": "doc2"}]}
+        srv.publish("tok", sources={"doc1": SVG, "doc2": SVG}, index_json=json.dumps(two))
+        srv.publish("tok", sources={}, index_json=json.dumps({"documents": [{"id": "doc2"}]}))
+        assert srv.resolve("tok", "doc1") is None and srv.resolve("tok", "doc2") == SVG
