@@ -762,3 +762,37 @@ class TestPreviewHygiene:
         srv.publish("tok", sources={"doc1": SVG, "doc2": SVG}, index_json=json.dumps(two))
         srv.publish("tok", sources={}, index_json=json.dumps({"documents": [{"id": "doc2"}]}))
         assert srv.resolve("tok", "doc1") is None and srv.resolve("tok", "doc2") == SVG
+
+
+class TestUniformNotFound:
+    """Unknown tokens and unknown documents are indistinguishable from outside."""
+
+    def test_an_unknown_token_is_404_on_every_route(self, site: _Preview) -> None:
+        bodies = set()
+        for path in (
+            "/nobody0000/",
+            "/nobody0000/doc1/",
+            "/nobody0000/events",
+            "/nobody0000/version",
+            "/nobody0000/documents",
+            "/nobody0000/doc1/svg",
+        ):
+            status, _, body = site.get(path, **HTML)
+            assert status == 404, path
+            bodies.add(body)
+        assert len(bodies) == 1
+
+    def test_an_unknown_document_matches_an_unknown_token(self, site: _Preview) -> None:
+        missing_doc = site.get(f"/{TOKEN}/doc9/svg")
+        missing_token = site.get("/nobody0000/doc1/svg")
+        bad_format = site.get(f"/{TOKEN}/doc1/export.bmp")
+        assert missing_doc[0] == missing_token[0] == bad_format[0] == 404
+        assert missing_doc[2] == missing_token[2] == bad_format[2]
+
+    def test_a_known_tokens_page_still_loads_for_a_closed_document(self, site: _Preview) -> None:
+        assert site.get(f"/{TOKEN}/doc9/", **HTML)[0] == 200
+
+    def test_an_ended_session_404s(self, site: _Preview) -> None:
+        site.server.forget(TOKEN)
+        assert site.get(f"/{TOKEN}/version")[0] == 404
+        assert site.get(f"/{TOKEN}/doc1/", **HTML)[0] == 404

@@ -185,6 +185,16 @@ class PreviewServer:
                 return None
             return bucket.sources.get(doc_id)
 
+    def known(self, token: str) -> bool:
+        """Whether a session has published to this token (and not ended since).
+
+        A bucket only a watcher created (generation 0) does not count: the HTTP layer answers
+        an unknown token exactly like a missing page, so known and unknown tokens can't be
+        told apart by anyone who doesn't already hold one."""
+        with self._lock:
+            bucket = self._buckets.get(token)
+            return bucket is not None and bucket.gen > 0
+
     def state(self, token: str) -> tuple[int, str, str]:
         with self._lock:
             bucket = self._buckets.get(token)
@@ -261,6 +271,10 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
 
         def _text(self, body: str, mime: str = "text/plain; charset=utf-8") -> None:
             self._bytes(body.encode("utf-8"), mime)
+
+        def _not_found(self) -> None:
+            """The one 404 every refused preview route returns, byte for byte."""
+            self._status(404, "not found")
 
         def _status(self, code: int, message: str) -> None:
             data = message.encode("utf-8")
@@ -352,8 +366,15 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
                 return self._text(_INDEX_PAGE, "text/html; charset=utf-8")
 
             token, sub = parts[0], parts[1:]
+            # An unknown (or ended) token gets the SAME 404 on every route, the page included,
+            # and so does an unknown document's data under a known token: nothing here tells
+            # an existing token or document apart from a made-up one.
+            if not self.preview.known(token):
+                return self._not_found()
             # /<token>/ (the session's index) or /<token>/<document_id>/ (one document): the
-            # same static page, which reads its token and document from the URL.
+            # same static page, which reads its token and document from the URL. A known
+            # token's page for a document that isn't open says so; the token holder can list
+            # the session's documents anyway, so that reveals nothing.
             if not sub:
                 return self._text(_PAGE, "text/html; charset=utf-8")
             if sub == ["events"]:
@@ -375,19 +396,19 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
                 doc_id, leaf = sub
                 source = self.preview.resolve(token, doc_id)
                 if source is None:
-                    return self._status(404, "no such document")
+                    return self._not_found()
                 if leaf == "svg":
                     return self._bytes(source.encode("utf-8"), _MIME["svg"])
                 if leaf == "render":
                     return self._export(source, "png")
                 if leaf.startswith("export."):
                     return self._export(source, leaf.split(".", 1)[1], download=True)
-            return self._status(404, "not found")
+            return self._not_found()
 
         def _export(self, source: str, fmt: str, *, download: bool = False) -> None:
             fmt = fmt.lower()
             if fmt not in SUPPORTED_FORMATS:
-                return self._status(404, f"unsupported format: {fmt}")
+                return self._not_found()
             try:
                 body = export_bytes(source, fmt)
             except Exception as exc:  # render/convert failure -> let the page keep the old frame
@@ -638,8 +659,20 @@ function buildSaveMenu(){
 
 let gen = -1;
 let lastServerBackdrop = null;
+let es = null;
+let ended = false;
+function showEnded(){
+  // The session ended (or never existed): its routes now 404. Stop listening and say so.
+  ended = true;
+  if (es) es.close();
+  dot.classList.remove('live');
+  meta.textContent = 'session ended';
+  stage.replaceChildren();
+}
 async function refresh(){
+  if (ended) return;
   const r = await fetch(base + '/version', {cache:'no-store'});
+  if (r.status === 404) { showEnded(); return; }
   if (!r.ok) return;
   const v = await r.json();
   gen = v.gen;
@@ -692,10 +725,11 @@ function showIndex(docs){
 }
 
 function connect(){
-  const es = new EventSource(base + '/events');
+  es = new EventSource(base + '/events');
   es.onopen = () => dot.classList.add('live');
   es.addEventListener('change', refresh);
-  es.onerror = () => { dot.classList.remove('live'); };
+  // A dropped stream may mean the session ended: refresh() checks, and stops if so.
+  es.onerror = () => { dot.classList.remove('live'); refresh(); };
 }
 // The index page shows links, not a drawing: hide the drawing controls there.
 if (!docId) {
