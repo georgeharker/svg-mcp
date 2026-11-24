@@ -30,6 +30,13 @@ released together under one version. The format follows
   hides the drawing controls. Preview watchers of unknown tokens leave no state behind.
 - The widget's resource URI is shared by every session, so it is now sent only on the
   caller's own stream, not the listen bus.
+- `session_id` is a required, non-null argument in every session-state tool's schema, so
+  clients see it as mandatory. The `X-Svg-Mcp-Session` header is removed (nothing used it).
+  Tools that touch no session state (`list_fonts`, `render_svg`, `render_backends`,
+  `export_formats`, `measure_text`) no longer take a `session_id`.
+- The live preview answers an unknown or ended token, an unknown document's data and an
+  unsupported export format with one identical 404, so existing tokens and documents can't
+  be told apart from made-up ones. A page whose session ended shows "session ended".
 - `list_documents` returns `{document_ids, index}`; `current_context` returns the session and
   its open documents, without an outline.
 

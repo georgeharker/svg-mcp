@@ -1,7 +1,7 @@
 """e2e tests for per-session document persistence on fastmcp 4 / mcp 2 (streamable HTTP).
 
-Every MCP request names its session: a ``session_id`` minted by ``create_session`` (or a
-bespoke proxy's ``X-Svg-Mcp-Session`` header). There is no per-connection fallback and no
+Every MCP request names its session: a ``session_id`` minted by ``create_session``, a
+required, non-null argument of every session-state tool. There is no per-connection fallback and no
 active document (design 01M85RZ1N75F3VW2NMWKRPVA30). These tests prove, over real HTTP and
 on both protocol eras:
 
@@ -163,7 +163,7 @@ def test_stateful_call_without_a_session_is_rejected(server: _Server) -> None:
 
     async def scenario() -> None:
         async with await _legacy_client(server.url) as client:
-            with pytest.raises(ToolError, match="create_session"):
+            with pytest.raises(ToolError, match="session_id"):
                 await client.call_tool("create_document", {"width": 100, "height": 100})
 
     asyncio.run(scenario())
@@ -297,7 +297,7 @@ async def _raw_session(
     - legacy reattach (combiner handover): ``seeded_session_id`` — same Mcp-Session-Id,
       skip initialize, re-send notifications/initialized to restart the GET stream;
     - stateless era: ``protocol_version="2026-07-28"`` — no initialize, no Mcp-Session-Id,
-      identity carried only by the caller (tool argument or ambient ``extra_headers``).
+      identity carried only by the caller's ``session_id`` tool argument.
     """
     transport = StreamableHTTPTransport(url)
     reattach = seeded_session_id is not None
@@ -408,8 +408,7 @@ def test_combiner_forget_delete_releases_store(server: _Server) -> None:
 # --- 2026-era (stateless) identity -------------------------------------------
 # A 2026-era connection has no durable wire identity: every request is its own
 # Connection, born and discarded. Per-session documents there ride a *minted* session
-# id — explicit `session_id` argument or the ambient `X-Svg-Mcp-Session` header (an
-# alternative carrier for bespoke proxies; the combiner passes tool arguments through,
+# id — the required `session_id` argument (the combiner passes tool arguments through,
 # so the model supplies the id itself) —
 # validated through fastmcp's session framework on every resolve.
 
@@ -451,7 +450,7 @@ def test_2026_no_identity_tool_call_is_guided_error(server: _Server) -> None:
 
     async def scenario() -> None:
         async with await _legacy_client_auto(server.url) as client:
-            with pytest.raises(ToolError, match="create_session"):
+            with pytest.raises(ToolError, match="session_id"):
                 await client.call_tool("create_document", {"width": 100, "height": 100})
 
     asyncio.run(scenario())
@@ -466,7 +465,7 @@ def test_2026_auto_client_sessions_do_not_bleed(server: _Server) -> None:
         async with await _legacy_client_auto(server.url) as first:
             async with await _legacy_client_auto(server.url) as second:
                 for attacker, _victim_name in ((first, "first"), (second, "second")):
-                    with pytest.raises(ToolError, match="create_session"):
+                    with pytest.raises(ToolError, match="session_id"):
                         await attacker.call_tool("create_document", {"width": 100, "height": 100})
                 assert len(_MINTED_SESSION_STORES) == 0
             # The first client mints and now persists across its own requests:
@@ -524,30 +523,35 @@ def test_2026_sessions_are_isolated(server: _Server) -> None:
     asyncio.run(scenario())
 
 
-def test_2026_ambient_header_carries_session(server: _Server) -> None:
-    """On ONE connection whose every request carries the ambient header (a bespoke
-    proxy's transport-level carrier), tools need NO session_id argument."""
+def test_session_id_is_required_and_never_null_in_the_schema(server: _Server) -> None:
+    """Every session-state tool requires a non-null session_id in its schema; tools that
+    touch no session state take none at all."""
 
     async def scenario() -> None:
-        # Mint over an auto client (stateless link → unbound mint).
-        async with await _legacy_client_auto(server.url) as alice:
-            minted = await alice.call_tool("create_session", {})
-            session_id = minted.data["session_id"]
+        async with await _legacy_client(server.url) as client:
+            tools = {t.name: t for t in await client.list_tools()}
+        pure = {"list_fonts", "render_svg", "render_backends", "export_formats", "measure_text"}
+        lifecycle = {"create_session", "end_session"}
+        for name, t in tools.items():
+            schema = t.input_schema
+            props = schema.get("properties", {})
+            if name in pure or name == "create_session":
+                assert "session_id" not in props, name
+                continue
+            assert "session_id" in schema.get("required", []), name
+            assert props["session_id"].get("type") == "string", name  # no null allowed
+        assert lifecycle <= set(tools)
 
-        headers = {"X-Svg-Mcp-Session": session_id}
-        async with _raw_session(server.url, extra_headers=headers, terminate_on_close=False) as (
-            t,
-            session,
-        ):
-            created = await session.call_tool("create_document", {"width": 400, "height": 200})
-            assert not created.is_error
-            document_id = created.structured_content["document_id"]
-            # A second header-only request mutates the persisted drawing.
-            drawn = await session.call_tool(
-                "add_rect",
-                {"x": 1, "y": 1, "width": 5, "height": 5, "document_id": document_id},
-            )
-            assert not drawn.is_error
+    asyncio.run(scenario())
+
+
+def test_a_null_session_id_is_rejected(server: _Server) -> None:
+    async def scenario() -> None:
+        async with await _legacy_client(server.url) as client:
+            with pytest.raises(ToolError, match="session_id"):
+                await client.call_tool(
+                    "create_document", {"width": 1, "height": 1, "session_id": None}
+                )
 
     asyncio.run(scenario())
 
@@ -803,7 +807,7 @@ def test_ending_a_session_drops_its_preview_snapshot(server: _Server) -> None:
 def test_set_preview_backdrop_needs_a_session(server: _Server) -> None:
     async def scenario() -> None:
         async with await _legacy_client(server.url) as client:
-            with pytest.raises(ToolError, match="create_session"):
+            with pytest.raises(ToolError, match="session_id"):
                 await client.call_tool("set_preview_backdrop", {"backdrop": "white"})
 
     asyncio.run(scenario())

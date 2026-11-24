@@ -24,12 +24,11 @@ class InvalidArgument(SvgMcpError):
 
 
 class NoSession(SvgMcpError):
-    """A 2026-era (stateless) request supplied no session identity.
+    """A request that touches session state supplied no session id.
 
-    Stateless-era requests carry no durable wire identity (each request is its own
-    connection), so per-session state needs a minted session id — from `create_session`
-    passed back per call, or sent ambigently as the `X-Svg-Mcp-Session` header by the
-    client/proxy. The error's guidance is what an agent needs to recover on its own.
+    Every session-state tool requires the `session_id` minted by `create_session`, on every
+    protocol era (the schema rejects a missing one; this guards any path that skipped it).
+    The error's guidance is what an agent needs to recover on its own.
     """
 
 

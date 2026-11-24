@@ -18,6 +18,8 @@ A session_id-less call fails with this same guidance: that's the cue you skipped
 mint, not a bug to route around — run create_session, retry with the id.
 The same goes for documents: there is no "current" one, so pass the `document_id` you got
 from `create_document` on every call that acts on it, even when only one is open.
+The calls shown below omit `session_id` and `document_id` for brevity; every real call
+passes both.
 
 ### 1. About to write `<svg`, or hand-edit XML inside one? That's the cue.
 

@@ -16,7 +16,7 @@ import json
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Literal, Optional, Protocol, overload
+from typing import Literal, Protocol, overload
 from weakref import WeakKeyDictionary
 
 from fastmcp import Context, FastMCP
@@ -118,6 +118,9 @@ _INSTRUCTIONS = """\
 svg-mcp authors SVG vector graphics as a structured, hierarchical document you build up with
 tool calls and **see** by rendering to an image. Work in a tight loop: make a change, call
 `render_document` to look at it, then adjust.
+
+Example calls in this guide omit `session_id` and `document_id` for brevity: every real
+call passes `session_id`, and every call that acts on a document passes `document_id`.
 
 WORKFLOW
 0. `create_session()` once per drawing task → a `session_id`. Pass it on EVERY svg-mcp call
@@ -420,15 +423,14 @@ _DEFAULT_STORE = DocumentStore()
 # born and discarded with it — so per-session state there is keyed on a *minted* session id
 # instead: the MODEL calls `create_session` once and passes the id back on every call
 # (validated via fastmcp's session framework `get_session`, so an id ends/forgot/expires
-# through the same channel it was created through). A few bespoke proxies MAY carry it
-# ambiently per request via the `X-Svg-Mcp-Session` header; the mcp-combiner deliberately
-# does NOT — it passes tool arguments through unchanged, so the model supplies session_id
-# itself. Validation runs on EVERY resolve — the fastmcp session record is the source of
+# through the same channel it was created through). The id is a REQUIRED argument of every
+# session-state tool (the schema rejects a missing or null one); there is no ambient carrier
+# — the mcp-combiner passes tool arguments through unchanged, so the model supplies it.
+# Validation runs on EVERY resolve — the fastmcp session record is the source of
 # truth, so a store whose session was ended/forgot-expired is popped and cannot resurrect.
 # This registry is in-process: it survives all combiner restarts
 # (svg-mcp doesn't restart), dies with svg-mcp itself. A session never `end_session`ed
 # holds its documents until then (the same trade the stateful path makes at disconnect).
-_MINTED_SESSION_HEADER = "x-svg-mcp-session"
 _CURRENT_MINTED_SESSION: ContextVar[str | None] = ContextVar("svg_mcp_minted_session", default=None)
 _MINTED_SESSION_STORES: dict[str, DocumentStore] = {}
 #: Preview/resource token -> minted session id, so a resource URI (which carries no
@@ -540,9 +542,9 @@ def _mint_ownership(sid: str, owner: str | None) -> None:
 # runtime VALUE, not just a type expression: fastmcp resolves parameter annotations via
 # `get_type_hints`, which reads the function's `__annotations__` dict, NOT the Parameter
 # objects in a `__signature__` override — so the wrapper assigns this into its
-# `__annotations__` at construction. `SessionId | None` is valid in annotation position, but
-# pyright rejects `|` on Annotated in the runtime-expression position — hence `Optional`.
-_SESSION_ID_ARG = Optional[SessionId]  # noqa: UP045 — runtime value, not an annotation; see comment above
+# `__annotations__` at construction. Plain `SessionId` (a str), never Optional: the schema
+# must reject a missing or null session_id.
+_SESSION_ID_ARG = SessionId
 
 # HTTP-session idle bound: "never" was tempting (stateful sessions hold a chat's drawing while
 # it pauses) but means a crashed or vanished combiner leaves every parked per-chat session —
@@ -575,18 +577,6 @@ def _apply_default_idle_bound() -> None:
         _settings.http_session_idle_timeout = _DEFAULT_IDLE_TIMEOUT_S  # type: ignore[attr-defined,unused-ignore]
 
 
-def _ambient_session_id() -> str | None:
-    """The ambient minted-session id for the current request, when a bespoke client or
-    proxy carries it on every request via the `X-Svg-Mcp-Session` header. The
-    mcp-combiner does NOT do this — the model passes `session_id` itself there. None
-    when no header is present.
-    """
-    try:
-        return get_http_headers().get(_MINTED_SESSION_HEADER)
-    except Exception:
-        return None
-
-
 async def _resolve_minted_session(session_id: str) -> None:
     """Validate a minted id and lazily register its live DocumentStore (call from wrappers).
 
@@ -611,13 +601,15 @@ async def _resolve_minted_session(session_id: str) -> None:
 
 
 def _session_bound(fn: Callable[..., object]) -> Callable[..., Awaitable[object]]:
-    """Make a tool session-aware: an optional validated `session_id`, resolved to state.
+    """Make a tool session-aware: a REQUIRED validated `session_id`, resolved to state.
 
-    Appends a kw-only `session_id: SessionId | None` parameter (schema-visible, default None,
-    auto-described by fastmcp's SessionId marker with the create-then-pass contract),
-    validates it against fastmcp's session framework on every use, and publishes it to
-    `_store()` via a contextvar so the lower layers never need explicit plumbing. Precedence:
-    explicit argument > ambient header. Typed loosely on purpose (Callable[..., object]): a
+    Appends a required kw-only `session_id: SessionId` parameter (schema-visible and in the
+    schema's `required`, a plain string — never null — auto-described by fastmcp's SessionId
+    marker with the create-then-pass contract), validates it against fastmcp's session
+    framework on every use, and publishes it to `_store()` via a contextvar so the lower
+    layers never need explicit plumbing. The schema makes MCP callers pass it; a direct
+    Python call outside any request may omit it and gets the shared default store (that is
+    how tests and scripts drive tools). Typed loosely on purpose (Callable[..., object]): a
     ParamSpec wrapper can't survive pruning a key from **kwargs structurally, and the
     schema/type-hint surfaces are built from the `__signature__` override + `__annotations__`
     assignment below (the `__signature__` surgery is the same as `emits_change`; fastmcp
@@ -628,8 +620,7 @@ def _session_bound(fn: Callable[..., object]) -> Callable[..., Awaitable[object]
     param = inspect.Parameter(
         "session_id",
         inspect.Parameter.KEYWORD_ONLY,
-        default=None,
-        annotation=SessionId | None,
+        annotation=SessionId,
     )
     new_signature = inner_sig.replace(parameters=[*inner_sig.parameters.values(), param])
 
@@ -638,8 +629,12 @@ def _session_bound(fn: Callable[..., object]) -> Callable[..., Awaitable[object]
         arg = kwargs.pop("session_id", None)
         # Values of **kwargs are `object` to the checker; only a real str is session-able.
         session_id: str | None = arg if isinstance(arg, str) else None
-        if session_id is None:
-            session_id = _ambient_session_id()
+        if session_id is None and _connection() is not None:
+            # The schema already requires it; this guards any path that skipped validation.
+            raise NoSession(
+                "no session_id: call create_session once, then pass its id as the "
+                "session_id argument on every svg-mcp call"
+            )
         token = _CURRENT_MINTED_SESSION.set(session_id)
         touched_token = _TOUCHED.set([])
         try:
@@ -811,10 +806,10 @@ def _store() -> DocumentStore:
     """Resolve the DocumentStore of the current call's session (per-session isolation).
 
     Inside a request the session is ALWAYS named: a minted id from `create_session`, passed
-    as the `session_id` argument (or a bespoke proxy's `X-Svg-Mcp-Session` header) and
-    validated by the tool wrapper into the contextvar. A request without one raises
-    `NoSession` on every protocol era — there is no per-connection fallback. Outside a
-    request (direct/programmatic use) the shared default store is used.
+    as the required `session_id` argument and validated by the tool wrapper into the
+    contextvar. The schema rejects a request without one on every protocol era (and
+    `NoSession` guards any path that skipped it) — there is no per-connection fallback.
+    Outside a request (direct/programmatic use) the shared default store is used.
     """
     minted = _CURRENT_MINTED_SESSION.get()
     if minted is not None:
@@ -5474,7 +5469,7 @@ def list_resources(*, document_id: str) -> dict[str, list[dict[str, str | None]]
     return _list_resources(_doc(document_id))
 
 
-@tool
+@mcp.tool  # touches no session state: no session_id
 def list_fonts() -> list[str]:
     """List the font families installed on this system, usable as a text style's font-family.
 
@@ -6698,7 +6693,7 @@ def render_document(
     return [summary, feedback.image]
 
 
-@tool
+@mcp.tool  # touches no session state: no session_id
 def render_svg(
     svg: str,
     scale: float = 1.0,
@@ -6730,7 +6725,7 @@ def render_svg(
     return [feedback.summary, feedback.image]
 
 
-@tool
+@mcp.tool  # touches no session state: no session_id
 def render_backends() -> dict[str, bool]:
     """Report which render backends are installed and usable in this environment.
 
@@ -6775,7 +6770,7 @@ def export_render(
     return {"path": str(resolved), "format": format.lower(), "bytes": len(data)}
 
 
-@tool
+@mcp.tool  # touches no session state: no session_id
 def export_formats() -> dict[str, list[str] | bool]:
     """List the file formats ``export_render`` can write, and whether vector export is available.
 
@@ -6786,7 +6781,7 @@ def export_formats() -> dict[str, list[str] | bool]:
     return {"formats": list(SUPPORTED_FORMATS), "vector_available": rsvg_available()}
 
 
-@tool
+@mcp.tool  # touches no session state: no session_id
 def measure_text(content: str, style: ShapeStyle | None = None) -> dict[str, float]:
     """Measure a single text run without rendering — its advance width and line height.
 
