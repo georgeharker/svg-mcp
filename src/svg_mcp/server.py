@@ -16,7 +16,7 @@ import json
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Literal, Optional, cast, overload
+from typing import Literal, Optional, Protocol, overload
 from weakref import WeakKeyDictionary
 
 from fastmcp import Context, FastMCP
@@ -45,7 +45,7 @@ from fastmcp.server.sessions import (
 from fastmcp.server.sessions import (
     end_session as end_minted_session,
 )
-from fastmcp.tools import FunctionTool, ToolResult
+from fastmcp.tools import ToolResult
 from mcp.server.connection import Connection
 from mcp.server.subscriptions import (  # type: ignore[import-not-found,unused-ignore]  # noqa: I001 — mcp-2-only (svg-mcp's floor); mypy's ignore_missing_imports + this comment cover older editor envs
     InMemorySubscriptionBus,
@@ -607,7 +607,7 @@ async def _resolve_minted_session(session_id: str) -> None:
     _TOKEN_SESSIONS[_token_for(session_id)] = session_id
 
 
-def _session_bound(fn: Callable[..., object]) -> Callable[..., object]:
+def _session_bound(fn: Callable[..., object]) -> Callable[..., Awaitable[object]]:
     """Make a tool session-aware: an optional validated `session_id`, resolved to state.
 
     Appends a kw-only `session_id: SessionId | None` parameter (schema-visible, default None,
@@ -658,37 +658,68 @@ def _session_bound(fn: Callable[..., object]) -> Callable[..., object]:
     return wrapper
 
 
-@overload
-def tool(fn: Callable[..., object], /, *, app: AppConfig | None = None) -> FunctionTool: ...
+class _Register(Protocol):
+    """`tool(app=...)`'s decorator: the same result typing as the direct form."""
+
+    @overload
+    def __call__[R](self, fn: Callable[..., Awaitable[R]], /) -> Callable[..., Awaitable[R]]: ...
+
+    @overload
+    def __call__[R](self, fn: Callable[..., R], /) -> Callable[..., Awaitable[R]]: ...
 
 
 @overload
-def tool(
-    fn: None = None, /, *, app: AppConfig | None = None
-) -> Callable[[Callable[..., object]], FunctionTool]: ...
+def tool[R](
+    fn: Callable[..., Awaitable[R]], /, *, app: AppConfig | None = None
+) -> Callable[..., Awaitable[R]]: ...
+
+
+@overload
+def tool[R](
+    fn: Callable[..., R], /, *, app: AppConfig | None = None
+) -> Callable[..., Awaitable[R]]: ...
+
+
+@overload
+def tool(fn: None = None, /, *, app: AppConfig | None = None) -> _Register: ...
 
 
 def tool(
     fn: Callable[..., object] | None = None,
     *,
     app: AppConfig | None = None,
-) -> Callable[[Callable[..., object]], FunctionTool] | FunctionTool:
+) -> Callable[..., Awaitable[object]] | _Register:
     """Registration alias for `@mcp.tool` / `@mcp.tool(app=...)` — session-aware tools.
 
     Every svg-mcp tool except the session-lifecycle pair is registered through these
-    overloads, which pre-wrap the function with `_session_bound` (the optional validated
+    overloads, which pre-wrap the function with `_session_bound` (the validated
     `session_id` argument + contextvar publishing) before handing it to FastMCP. Plain
     module functions rather than a FastMCP subclass override deliberately: an override's
     return type had to fight pyright's compatibility checks across FastMCP.tool's three
     contract shapes (decorator / direct registration / partial), while overloads make both
-    used forms exact and composable — the call-surface change is a mechanical rename at the
-    181 stateful decorators.
+    used forms exact and composable.
+
+    What a caller gets back is what fastmcp's decorator returns — the function it was given,
+    here the `_session_bound` async wrapper — NOT a `FunctionTool` (fastmcp registers that
+    internally). The overloads type it as an async callable resolving to the tool body's own
+    result: the wrapper awaits an awaitable body (`emits_change`), so an async body's
+    `Awaitable[R]` and a sync body's `R` both come back as `Awaitable[R]`. Direct calls from
+    tests/scripts (outside a request) therefore type-check as `await server.add_rect(...)`.
     """
 
-    def register(function: Callable[..., object]) -> FunctionTool:
+    # `register` carries the same overloads as `_Register`, so the decorator form type-checks
+    # as that protocol with no suppression.
+    @overload
+    def register[R](function: Callable[..., Awaitable[R]], /) -> Callable[..., Awaitable[R]]: ...
+
+    @overload
+    def register[R](function: Callable[..., R], /) -> Callable[..., Awaitable[R]]: ...
+
+    def register(function: Callable[..., object], /) -> Callable[..., Awaitable[object]]:
         # `app` is the only non-default registration kwarg svg-mcp uses; passing it through
-        # explicitly keeps mcp.tool's overload resolvable for both checkers.
-        return cast("FunctionTool", mcp.tool(_session_bound(function), app=app))
+        # explicitly keeps mcp.tool's overload resolvable for both checkers. mcp.tool's
+        # decorator overloads return their argument's own type, so no cast is needed.
+        return mcp.tool(_session_bound(function), app=app)
 
     return register if fn is None else register(fn)
 

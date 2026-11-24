@@ -58,7 +58,8 @@ def test_edit_shape_rejects_wrong_tag() -> None:
 def test_edit_path_edits_path_and_validates() -> None:
     doc = _doc()
     ops.edit_path(doc, "pa", "M0,0 L20,0 L20,20 Z")
-    assert doc.resolve("pa").get("d").startswith("M0,0 L20,0")
+    d = doc.resolve("pa").get("d")
+    assert d is not None and d.startswith("M0,0 L20,0")
     with pytest.raises(InvalidArgument):
         ops.edit_path(doc, "bx", "M0 0")  # rect has no path data
 
