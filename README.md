@@ -262,8 +262,9 @@ facade families (diagrams, charts, annotations), with ruff/mypy clean and the te
   extraction; metadata (title/desc/RDF); guides & pages.
 - **Render-and-see loop**: serialize-then-rasterize via the **resvg** engine — in-process by
   default (bundled `resvg-py`), or the CLI when present; the image is handed back directly as
-  base64 image content. Documents are also published as readable MCP **resources**
-  (`svg://documents`, `svg://{id}/svg`, `svg://{id}/render`) with change notifications.
+  base64 image content. Documents are also published as readable MCP **resources**, scoped to
+  the session (`svg://<token>/documents`, `svg://<token>/<id>/svg`, `svg://<token>/<id>/render`)
+  with change notifications.
 - **File export** (`export_render`): faithful raster (png/jpeg/webp via resvg) and **true vector**
   (pdf/ps/eps via librsvg). cairo is intentionally avoided — it silently drops SVG filters (a drop
   shadow renders blank), so it is not faithful to the document.
@@ -618,14 +619,19 @@ build in a browser while the model keeps working, with no render bytes spent on 
 - **Start it:** the model is instructed to open a preview and hand you the URL up front on any
   non-trivial drawing, so you can watch (and redirect) as it builds. You can also ask for it
   outright — *"show me"*, *"open a preview"* — or set `preview = true` (`SVG_MCP_PREVIEW=1`) to auto-start on boot.
+- **One page per document:** `start_preview(document_id)` returns that document's page,
+  `/<token>/<document_id>/`. It stays on that document; a new document gets its own page, and
+  `/<token>/` lists every document in the chat.
 - **Watch it:** open the URL once and leave it — it repaints on each change. Toggle **PNG**
   (faithful resvg output) vs **SVG** (crisp vector), zoom, drag to pan, and **Save** the current
   frame as PNG/SVG/WebP/JPEG/PDF straight from the page.
-- **Per-chat:** the URL carries a session token (`/<token>/`), so each chat gets its own isolated
-  preview even though they share one server and port — one chat's edits never appear in another's.
+- **Per-chat:** the URL carries the session's token (`/<token>/…`), so each chat gets its own
+  isolated preview even though they share one server and port — one chat's edits never appear in
+  another's. The token is a hash of the session id: the URL lets someone watch, never edit.
 
-The page just mirrors the read-only [`svg://` resources](#resources): `GET /<token>/active/render`
-is the same render as the `svg://{id}/render` resource, refreshed by the same change signal.
+The page just mirrors the read-only [`svg://` resources](#resources):
+`GET /<token>/<document_id>/render` is the same render as the `svg://<token>/<document_id>/render`
+resource, refreshed by the same change signal.
 
 ### Web login
 
@@ -706,7 +712,7 @@ preview. `/mcp` keeps its bearer ([Authentication](#authentication)).
 ## Inline widget (`show_widget`)
 
 `show_widget` is the in-chat companion to the live preview: instead of a browser page, it renders
-the active document **inside the conversation** as an interactive card — zoom, pan, backdrop,
+a document **inside the conversation** as an interactive card — zoom, pan, backdrop,
 refresh, and a jump to the full browser preview — on Claude surfaces that render MCP-Apps widgets
 (**Claude Desktop chat**, claude.ai). The rendered PNG also rides in the tool result, so on surfaces
 that *don't* render widgets (**Claude Code**, and the model's own render-and-see loop) you still get
@@ -750,7 +756,7 @@ claude mcp add svg-mcp -- /Users/geohar/Development/svg-mcp/.venv/bin/svg-mcp
 uv run fastmcp dev src/svg_mcp/server.py:mcp
 ```
 
-The model's loop is: `create_document` → add nodes / resources → `render_document` to see the
+The model's loop is: `create_session` → `create_document` → add nodes / resources → `render_document` to see the
 result inline → iterate → `export_svg`. The server's `instructions` describe the full workflow
 and conventions; each tool carries its own description.
 
@@ -759,28 +765,33 @@ and conventions; each tool carries its own description.
 The tools are called by an LLM over MCP. The core loop is **create → build → render-and-see →
 iterate → export**. A minimal session (arguments shown as the JSON each tool receives):
 
+Every call also carries `session_id` (from `create_session`), and every call that acts on a
+document carries `document_id`. They're shown once here and elided after:
+
 ```text
-create_document(width=320, height=120)                 # → {document_id:"doc1", active:true}
+create_session()                                       # → {session_id:"…"}
+create_document(session_id, width=320, height=120)     # → {document_id:"doc1", resources:{…}}
 
 # define a reusable gradient, then paint with it by name (@name) or url(#id)
-define_linear_gradient(x1=0, y1=0, x2=1, y2=0,
+define_linear_gradient(document_id="doc1", x1=0, y1=0, x2=1, y2=0,
     stops=[{offset:0, color:"#7dd3fc"}, {offset:1, color:"#1e3a8a"}], name="brand")
-add_rect(x=0, y=0, width=320, height=120, rx=16, style={fill:"@brand"})
+add_rect(document_id="doc1", x=0, y=0, width=320, height=120, rx=16, style={fill:"@brand"})
 
-add_text(x=160, y=72, content="svg-mcp", name="title",
+add_text(…, x=160, y=72, content="svg-mcp", name="title",
     style={font_family:"Helvetica", font_size:"40px", font_weight:"bold",
            text_anchor:"middle", fill:"#ffffff"})
-apply_drop_shadow(target="title", dx=0, dy=2, blur=3, color="#000", opacity=0.4)
+apply_drop_shadow(…, target="title", dx=0, dy=2, blur=3, color="#000", opacity=0.4)
 
-render_document(scale=2)        # returns the rendered PNG inline — look, then adjust
-export_svg()                    # final SVG source string
+render_document(…, scale=2)     # returns the rendered PNG inline — look, then adjust
+export_svg(…)                   # final SVG source string
 ```
 
 ### Conventions
 
-- **Active document.** `create_document` returns a `document_id` and makes it active; you may
-  **omit `document_id`** on later calls to target it. Pass it explicitly to switch, or use
-  `set_active_document`. Call `current_context()` to re-anchor (active id, open docs, outline).
+- **Always named.** Every call needs a `session_id` from `create_session`, on every client and
+  transport; there is no per-connection fallback. Every call that acts on a document needs its
+  `document_id`; there is no active or current document. Missing either is an error, not a guess.
+  Call `current_context()` or `list_documents()` to re-anchor (the session's open documents).
 - **Targets by id or name.** Every `target`/`parent`/`content` arg takes a node's returned id
   **or** the friendly `name` you gave it. Name things you'll revisit; reason via `find(name=…)`
   and `outline`. A bare handle is an **id**, else an **exact name** — never a hierarchy query, so
@@ -811,9 +822,12 @@ export_svg()                    # final SVG source string
 
 ### Resources
 
-Open documents are also exposed as readable MCP resources, so a host can surface live state:
-`svg://documents` (index + which is active), `svg://{id}/svg` (source), `svg://{id}/render`
-(PNG). Mutations emit `resources/updated` notifications.
+Open documents are also exposed as readable MCP resources, so a host can surface live state.
+They're scoped to the session by its token: `svg://<token>/documents` (index),
+`svg://<token>/<id>/svg` (source), `svg://<token>/<id>/render` (PNG). The token is a hash of the
+session id, so tools return the URIs (`create_document`'s `resources`, `list_documents`' `index`).
+A session owned by its connection only reads from that connection. Mutations emit
+`resources/updated` notifications for the documents they touched.
 
 ### Example: the logo
 

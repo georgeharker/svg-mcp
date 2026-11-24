@@ -5,6 +5,27 @@ released together under one version. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Breaking:** every tool that touches session state needs a `session_id` from
+  `create_session`, on every client and transport. Stdio and handshake-era HTTP clients no
+  longer get documents tied to their connection implicitly; a call without a `session_id` is
+  rejected with guidance. A session created over a stateful connection still belongs to that
+  connection: only it can use the id, and the session ends when it disconnects.
+- **Breaking:** there is no active document. Every tool that acts on a document takes a
+  required `document_id`. `set_active_document` is removed, and `import_svg`'s `into_active`
+  is replaced by `document_id` (replace that document's content).
+- **Breaking:** resources are scoped to the session by a token (a hash of the session id):
+  `svg://<token>/documents`, `svg://<token>/<document_id>/svg` and `/render`. Tools return
+  them (`create_document` and `import_svg` give `resources`; `list_documents` and
+  `current_context` give `index`). A session owned by its connection only reads from it.
+- **Breaking:** the live preview has one page per document, `/<token>/<document_id>/`, and an
+  index at `/<token>/`. `start_preview` takes a `document_id` and returns that page's `url` plus
+  the `index`. A page stays on its document.
+- `list_documents` returns `{document_ids, index}`; `current_context` returns the session and
+  its open documents, without an outline.
+
 ## [0.10.7] - 2026-11-09
 
 ### Added

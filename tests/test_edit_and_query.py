@@ -198,8 +198,8 @@ def test_document_store_replace_keeps_id() -> None:
     new_doc = ops.load_svg_document(
         svg='<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50"></svg>'
     )
-    rid = store.replace(None, new_doc)  # import-into-active: same id, new content
-    assert rid == did and store.active_id == did
+    rid = store.replace(did, new_doc)  # import into a named document: same id, new content
+    assert rid == did
     assert store.get(did) is new_doc  # the document behind the id was swapped
 
 

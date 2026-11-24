@@ -324,11 +324,11 @@ def _run[T](call: Awaitable[T]) -> T:
 
 
 def test_tool_response_reports_the_classes_attached() -> None:
-    _run(server.create_document(width=100, height=100))
-    _run(server.load_theme(name="house", search_paths=[str(FIXTURES)]))
-    response = _run(server.add_pill(x=0, y=0, width=40, height=20))
+    did = _run(server.create_document(width=100, height=100))["document_id"]
+    _run(server.load_theme(document_id=did, name="house", search_paths=[str(FIXTURES)]))
+    response = _run(server.add_pill(document_id=did, x=0, y=0, width=40, height=20))
     assert response["auto_styles"] == ["house-shape", "house-shape--pill"]
-    plain = _run(server.add_rect(x=0, y=0, width=10, height=10, themed=False))
+    plain = _run(server.add_rect(document_id=did, x=0, y=0, width=10, height=10, themed=False))
     assert plain["auto_styles"] == []
 
 

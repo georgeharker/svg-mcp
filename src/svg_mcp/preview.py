@@ -6,13 +6,15 @@ isn't drawn inline by terminal clients anyway). This module runs a tiny stdlib H
 bound to loopback, that serves an HTML page the user opens once and leaves open: it auto-refreshes
 on every document change via Server-Sent Events.
 
-The HTTP routes deliberately mirror the published resource refs so the two share one identity:
+The HTTP routes deliberately mirror the published resource refs so the two share one identity
+(``token`` is the session's preview token):
 
-    svg://{document_id}/svg     <->  GET /{document_id}/svg
-    svg://{document_id}/render  <->  GET /{document_id}/render
-    svg://documents             <->  GET /documents
+    svg://{token}/{document_id}/svg     <->  GET /{token}/{document_id}/svg
+    svg://{token}/{document_id}/render  <->  GET /{token}/{document_id}/render
+    svg://{token}/documents             <->  GET /{token}/documents
 
-``document_id`` may be the literal ``active`` to always follow the active document.
+Pages: ``/{token}/{document_id}/`` shows one document and stays on it; ``/{token}/`` lists the
+session's documents. There is no "active document" to follow.
 
 The server never touches the live document tree: callers (running inside the MCP request, where
 the document is consistent) hand it an immutable serialized SVG *string* via
@@ -50,19 +52,18 @@ _MIME: dict[str, str] = {
 _DEFAULT_PORT = 8808
 
 
-_EMPTY_INDEX = '{"active": null, "documents": []}'
+_EMPTY_INDEX = '{"documents": []}'
 
 
 class _Bucket:
     """Per-session preview state — the snapshot one chat sees.
 
-    Holds the serialized-SVG sources, which document is active, a monotonic generation counter,
-    and the set of SSE client queues currently watching this session.
+    Holds the serialized-SVG sources of the session's documents, a monotonic generation
+    counter, and the set of SSE client queues currently watching this session.
     """
 
     def __init__(self) -> None:
         self.gen = 0
-        self.active: str | None = None
         self.sources: dict[str, str] = {}
         self.index_json = _EMPTY_INDEX
         self.backdrop = "checker"  # page backdrop: "checker" | "white" | "black" | any CSS color
@@ -72,11 +73,11 @@ class _Bucket:
 class PreviewServer:
     """One shared HTTP+SSE server, partitioned by session token so each chat is isolated.
 
-    svg-mcp documents are per-session (see ``_SESSION_STORES`` in the server module). A single
-    global preview would let one chat's edits clobber another's, since every session's
-    ``_emit_change`` publishes its active document. So state lives in a per-token :class:`_Bucket`
-    and every URL carries the token as its first path segment (``/<token>/render`` …). The HTML
-    page reads its own token from ``location.pathname``, so the page itself stays static.
+    svg-mcp documents are per-session (minted sessions in the server module). A single global
+    preview would let one chat's edits clobber another's, so state lives in a per-token
+    :class:`_Bucket` and every URL carries the token as its first path segment
+    (``/<token>/<document_id>/render`` …). The HTML page reads its token and document from
+    ``location.pathname``, so the page itself stays static.
 
     State is pushed in via :meth:`publish` from MCP-request context; HTTP handlers only read it.
     """
@@ -139,9 +140,10 @@ class PreviewServer:
             with contextlib.suppress(Exception):
                 httpd.server_close()
 
-    def url_for(self, token: str) -> str:
-        """The page URL a given session should open."""
-        return f"http://{self._host}:{self._port}/{token}/"
+    def url_for(self, token: str, document_id: str | None = None) -> str:
+        """The page URL for one document of a session, or the session's index page."""
+        base = f"http://{self._host}:{self._port}/{token}/"
+        return f"{base}{document_id}/" if document_id else base
 
     # -- snapshot publishing (one bucket per session) -----------------------
 
@@ -152,9 +154,7 @@ class PreviewServer:
             self._buckets[token] = bucket
         return bucket
 
-    def publish(
-        self, token: str, *, active_id: str | None, sources: dict[str, str], index_json: str
-    ) -> None:
+    def publish(self, token: str, *, sources: dict[str, str], index_json: str) -> None:
         """Replace the snapshot for one session and nudge its browsers to refresh.
 
         ``sources`` maps document_id -> serialized SVG; it is merged into the session's bucket (so
@@ -162,7 +162,6 @@ class PreviewServer:
         """
         with self._lock:
             bucket = self._bucket(token)
-            bucket.active = active_id
             bucket.sources.update(sources)
             bucket.index_json = index_json
             try:
@@ -184,16 +183,14 @@ class PreviewServer:
             bucket = self._buckets.get(token)
             if bucket is None:
                 return None
-            if doc_id == "active":
-                doc_id = bucket.active or ""
             return bucket.sources.get(doc_id)
 
-    def state(self, token: str) -> tuple[int, str | None, str, str]:
+    def state(self, token: str) -> tuple[int, str, str]:
         with self._lock:
             bucket = self._buckets.get(token)
             if bucket is None:
-                return 0, None, _EMPTY_INDEX, "checker"
-            return bucket.gen, bucket.active, bucket.index_json, bucket.backdrop
+                return 0, _EMPTY_INDEX, "checker"
+            return bucket.gen, bucket.index_json, bucket.backdrop
 
     def set_backdrop(self, token: str, backdrop: str) -> None:
         """Set a session's preview backdrop and nudge its browsers (MCP-side control)."""
@@ -337,26 +334,23 @@ def _make_handler(owner: PreviewServer) -> type[BaseHTTPRequestHandler]:
                 return self._text(_INDEX_PAGE, "text/html; charset=utf-8")
 
             token, sub = parts[0], parts[1:]
-            if not sub:  # /<token> or /<token>/ — the page (it reads its own token from the URL)
+            # /<token>/ (the session's index) or /<token>/<document_id>/ (one document): the
+            # same static page, which reads its token and document from the URL.
+            if not sub:
                 return self._text(_PAGE, "text/html; charset=utf-8")
             if sub == ["events"]:
                 return self._sse(token)
             if sub == ["version"]:
-                gen, active, _, backdrop = self.preview.state(token)
+                gen, _, backdrop = self.preview.state(token)
                 return self._text(
-                    json.dumps(
-                        {
-                            "gen": gen,
-                            "active": active,
-                            "vector": rsvg_available(),
-                            "backdrop": backdrop,
-                        }
-                    ),
+                    json.dumps({"gen": gen, "vector": rsvg_available(), "backdrop": backdrop}),
                     "application/json",
                 )
             if sub == ["documents"]:
-                index_json = self.preview.state(token)[2]
+                index_json = self.preview.state(token)[1]
                 return self._text(index_json, "application/json")
+            if len(sub) == 1:
+                return self._text(_PAGE, "text/html; charset=utf-8")
 
             # /<token>/{doc}/svg | /render | /export.{fmt}
             if len(sub) == 2:
@@ -429,7 +423,8 @@ _INDEX_PAGE = (
     "<body style='font:14px system-ui;background:#1a1b1e;color:#e6e6e6;padding:40px'>"
     "<h2>svg-mcp live preview</h2>"
     "<p>This URL needs a session token. Call the <code>start_preview</code> tool in your chat "
-    "and open the URL it returns (<code>/&lt;token&gt;/</code>) — each chat gets its own.</p>"
+    "and open the URL it returns (<code>/&lt;token&gt;/&lt;document&gt;/</code>) — each chat "
+    "gets its own.</p>"
 )
 
 
@@ -484,6 +479,9 @@ _PAGE = """<!doctype html>
            box-shadow: 0 8px 40px rgba(0,0,0,.5); background: #fff; }
   #stage img, #stage svg { display: block; max-width: none; -webkit-user-drag: none;
            user-select: none; }
+  .doc-index { list-style: none; margin: 0; padding: 24px; font: 15px system-ui; }
+  .doc-index li { margin: 8px 0; }
+  .doc-index a { color: #e6e6e6; }
 </style>
 </head>
 <body>
@@ -521,9 +519,13 @@ const stage = document.getElementById('stage');
 const view = document.querySelector('main');
 const dot = document.getElementById('dot');
 const meta = document.getElementById('meta');
-// This page is served at /<token>/ — every API call is scoped to that session token, so two
-// chats sharing the server never see each other's documents.
-const base = '/' + (location.pathname.split('/').filter(Boolean)[0] || '');
+// Served at /<token>/<document_id>/ (one document) or /<token>/ (the session's index). Every
+// API call is scoped to the session token, so two chats sharing the server never see each
+// other's documents; a document page stays on its document.
+const segs = location.pathname.split('/').filter(Boolean);
+const base = '/' + (segs[0] || '');
+const docId = segs[1] || null;
+const docBase = docId ? base + '/' + encodeURIComponent(docId) : null;
 let mode = 'png';      // 'png' | 'svg'
 let scale = 1;
 let vector = false;
@@ -611,7 +613,8 @@ function buildSaveMenu(){
   const formats = [['png','PNG'],['svg','SVG'],['webp','WebP'],['jpeg','JPEG']];
   if (vector) formats.push(['pdf','PDF']);
   document.getElementById('save-menu').innerHTML = formats.map(([f,label]) =>
-    '<a href="' + base + '/active/export.' + f + '" download="drawing.' + f + '">' + label + '</a>'
+    '<a href="' + docBase + '/export.' + f + '" download="' + docId + '.' + f + '">'
+      + label + '</a>'
   ).join('');
 }
 
@@ -628,23 +631,46 @@ async function refresh(){
     lastServerBackdrop = v.backdrop;
     applyBackdrop(v.backdrop);
   }
-  if (!v.active) { meta.textContent = 'no active document'; stage.replaceChildren(); return; }
+  let docs = [];
   try {
-    const idx = await (await fetch(base + '/documents', {cache:'no-store'})).json();
-    const d = (idx.documents || []).find(x => x.active) || {};
-    const size = d.width ? '  ·  ' + Math.round(d.width) + '×' + Math.round(d.height) : '';
-    meta.textContent = (d.id || v.active) + size;
+    docs = (await (await fetch(base + '/documents', {cache:'no-store'})).json()).documents || [];
   } catch (_e) {}
+  if (!docId) { showIndex(docs); return; }
+  const d = docs.find(x => x.id === docId);
+  if (!d) {
+    meta.textContent = docId + ' — not open in this session';
+    stage.replaceChildren();
+    return;
+  }
+  const size = d.width ? '  ·  ' + Math.round(d.width) + '×' + Math.round(d.height) : '';
+  meta.textContent = d.id + size;
   if (mode === 'png') {
     const img = new Image();
     img.draggable = false;
     img.onload = () => { stage.replaceChildren(img); applyScale(); };
-    img.src = base + '/active/render?v=' + gen;
+    img.src = docBase + '/render?v=' + gen;
   } else {
-    const svg = await (await fetch(base + '/active/svg?v=' + gen, {cache:'no-store'})).text();
+    const svg = await (await fetch(docBase + '/svg?v=' + gen, {cache:'no-store'})).text();
     stage.innerHTML = svg;  // innerHTML does not execute scripts embedded in the SVG
     applyScale();
   }
+}
+
+// The session index (/<token>/): one link per open document, opening its own page.
+function showIndex(docs){
+  meta.textContent = docs.length ? 'documents in this session' : 'no documents yet';
+  const list = document.createElement('ul');
+  list.className = 'doc-index';
+  for (const d of docs) {
+    const li = document.createElement('li');
+    const a = document.createElement('a');
+    a.href = base + '/' + encodeURIComponent(d.id) + '/';
+    const dims = d.width ? '  ·  ' + Math.round(d.width) + '×' + Math.round(d.height) : '';
+    a.textContent = d.id + dims;
+    li.appendChild(a);
+    list.appendChild(li);
+  }
+  stage.replaceChildren(list);
 }
 
 function connect(){

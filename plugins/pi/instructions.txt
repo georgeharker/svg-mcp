@@ -16,6 +16,8 @@ topic you have to remember to think about. That's deliberate: you will not remem
 Keep the id in the conversation — drawings persist under it, and another chat can pick the
 drawing up with it. A session_id-less call fails with this same guidance: that's the cue
 you skipped the mint, not a bug to route around — run create_session, retry with the id.
+The same goes for documents: there is no "current" one, so pass the `document_id` you got
+from `create_document` on every call that acts on it, even when only one is open.
 
 ### 1. About to write `<svg`, or hand-edit XML inside one? That's the cue.
 
