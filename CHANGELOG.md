@@ -5,6 +5,12 @@ released together under one version. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- Requires fastmcp 4.2.6 or later (was 4.1.5). fastmcp 4.2 adds the MCP skills extension
+  (SEP-2640), which svg-mcp's guidance will move to.
+
 ## [0.11.2] - 2026-11-24
 
 ### Fixed

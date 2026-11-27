@@ -567,7 +567,7 @@ def _apply_default_idle_bound() -> None:
     tests can exercise it against the settings singleton without starting a transport.
 
     Suppression reasoning: `_settings` is fastmcp's real singleton. The floor here is
-    fastmcp>=4.1.5, whose Settings HAS `http_session_idle_timeout`, so both attribute
+    fastmcp>=4.2.6, whose Settings HAS `http_session_idle_timeout`, so both attribute
     accesses are runtime-correct. The ignore is transient editor-armor for environments
     still resolving fastmcp 3.4.11 (the shared ~/.venv, until cribsheet's port lands the
     joint upgrade): old Settings lacks the field (attr-defined), while on fastmcp 4 the same
