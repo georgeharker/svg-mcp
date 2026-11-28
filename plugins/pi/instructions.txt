@@ -66,3 +66,12 @@ Cue: you can tell the build will take more than two or three calls. Call `start_
 The reason is timing, not courtesy. Someone watching the drawing take shape can redirect
 you mid-build; the same person handed a finished image can only accept it or ask for the
 whole thing again. A preview URL shared at the end has none of that value.
+
+### The full guide is a skill
+
+Before a non-trivial drawing, load the **`svg-authoring`** skill: the authoring guide with
+references for diagrams, charts, themes, styling, text, effects, editing and export. It is
+installed as a skill (mcp-combiner syncs it; without the combiner, `/svg-mcp:skill` in
+Claude Code or `/svg-mcp skill` in Pi installs it) and served by svg-mcp itself as the
+resource `skill://svg-authoring/SKILL.md` (`skill://svg-mcp/svg-authoring/SKILL.md` behind
+mcp-combiner).

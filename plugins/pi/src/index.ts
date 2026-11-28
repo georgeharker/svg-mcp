@@ -187,7 +187,7 @@ export default function svgMcp(pi: ExtensionAPI): void {
     // ── /svg-mcp command: inspect the extension (verb: system-prompt) ──
     pi.registerCommand("svg-mcp", {
         description:
-            "svg-mcp extension — verbs: system-prompt (show the injected directive), install-config [path] (write mcp.json)",
+            "svg-mcp extension — verbs: system-prompt (show the injected directive), install-config [path] (write mcp.json), skill [install|uninstall|status] (the svg-authoring skill in ~/.agents/skills)",
         getArgumentCompletions: (prefix) => completeVerbs(prefix),
         handler: (args, ctx) => {
             const [verb, ...rest] = args.trim().split(/\s+/)
@@ -199,7 +199,11 @@ export default function svgMcp(pi: ExtensionAPI): void {
                 installConfig(ctx, rest.join(" ") || undefined)
                 return
             }
-            ctx.ui?.notify?.(`svg-mcp: unknown verb "${verb}". Try: system-prompt, install-config`, "warn")
+            if (verb === "skill") {
+                runSkills(ctx, rest[0] ?? "install")
+                return
+            }
+            ctx.ui?.notify?.(`svg-mcp: unknown verb "${verb}". Try: system-prompt, install-config, skill`, "warn")
         },
     })
 
@@ -279,11 +283,48 @@ export default function svgMcp(pi: ExtensionAPI): void {
 // directive this extension injects — the show-command pattern from pi-custom-system-prompt,
 // since `before_agent_start` injections are per-turn and never appear in Pi's own
 // `/system-prompt` (which reports the base prompt only).
-const COMMAND_VERBS = ["system-prompt", "install-config"]
+const COMMAND_VERBS = ["system-prompt", "install-config", "skill"]
 function completeVerbs(prefix: string): AutocompleteItem[] | null {
     const p = prefix.trim()
     const matches = COMMAND_VERBS.filter((v) => v.startsWith(p))
     return matches.length ? matches.map((v) => ({ value: v, label: v })) : null
+}
+
+// ── /svg-mcp skill [install|uninstall|status]: the svg-authoring skill on disk ──
+// Pi reads ~/.agents/skills, the contract's `agents` target. Runs the server's own CLI
+// (`svg-mcp skills <action> --target agents`), resolved like the server launch: a checkout
+// under SVG_MCP_DEV, else `uvx svg-mcp@<pinned version>`.
+const SKILL_ACTIONS = ["install", "uninstall", "status"]
+
+function skillsArgv(action: string): { argv: string[]; missing?: string } {
+    const tail = ["skills", action, "--target", "agents"]
+    const dev = env("SVG_MCP_DEV")
+    if (dev) {
+        if (!onPath("uv")) return { argv: [], missing: "uv" }
+        const project = dev !== "1" && existsSync(dev) ? dev : inRepoSource()
+        if (project) return { argv: ["uv", "run", "--project", project, "svg-mcp", ...tail] }
+    }
+    if (!onPath("uvx")) return { argv: [], missing: "uvx" }
+    const ver = env("SVG_MCP_VERSION") ?? SVG_MCP_TOOL_VERSION
+    return { argv: ["uvx", ver ? `svg-mcp@${ver}` : "svg-mcp", ...tail] }
+}
+
+function runSkills(ctx: ExtensionCommandContext, action: string): void {
+    const notify = (msg: string, level: "info" | "warn" | "error") => ctx.ui?.notify?.(msg, level)
+    if (!SKILL_ACTIONS.includes(action)) {
+        notify(`svg-mcp skill: unknown action "${action}". Try: ${SKILL_ACTIONS.join(", ")}`, "warn")
+        return
+    }
+    const { argv, missing } = skillsArgv(action)
+    if (missing) {
+        notify(`svg-mcp skill: \`${missing}\` not on PATH; install uv (https://docs.astral.sh/uv/)`, "error")
+        return
+    }
+    const [cmd, ...args] = argv
+    const result = spawnSync(cmd, args, { stdio: "pipe", env: process.env, encoding: "utf8" })
+    const out = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim()
+    if (result.error) notify(`svg-mcp skill: ${result.error.message}`, "error")
+    else notify(out || `svg-mcp skill ${action}: done`, result.status === 0 ? "info" : "warn")
 }
 
 // ── /svg-mcp install-config: write the pi-mcp-adapter mcp.json entry ──

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Run `svg-mcp skills <args>` (the /svg-mcp:skill command). Uses an svg-mcp on PATH when it is
+# at least this plugin's version, else `uvx svg-mcp@<plugin version>`, the same rule the
+# SessionStart hook uses to launch the server. SVG_MCP_DEV points at a checkout to use instead.
+set -euo pipefail
+dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+version_ge() { # version_ge A B -> success when the dotted-numeric prefix of A >= B
+  local a b i x y
+  local IFS=.
+  read -r -a a <<<"${1%%[!0-9.]*}"
+  read -r -a b <<<"${2%%[!0-9.]*}"
+  for i in 0 1 2; do
+    x="${a[i]:-0}"; y="${b[i]:-0}"
+    ((10#${x:-0} > 10#${y:-0})) && return 0
+    ((10#${x:-0} < 10#${y:-0})) && return 1
+  done
+  return 0
+}
+
+if [ -n "${SVG_MCP_DEV:-}" ]; then
+  project="$SVG_MCP_DEV"; [ -d "$project" ] || project="$dir/../.."
+  exec uv run --project "$project" svg-mcp skills "$@"
+fi
+
+want=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+  "$dir/.claude-plugin/plugin.json" 2>/dev/null || true)
+if command -v svg-mcp >/dev/null 2>&1; then
+  have="$(svg-mcp --version 2>/dev/null | awk '{print $NF}')"
+  if [ -n "$have" ] && { [ -z "$want" ] || version_ge "$have" "$want"; }; then
+    exec svg-mcp skills "$@"
+  fi
+fi
+if ! command -v uvx >/dev/null 2>&1; then
+  echo "svg-mcp: neither a current svg-mcp nor uvx is on PATH; install uv: https://docs.astral.sh/uv/" >&2
+  exit 1
+fi
+exec uvx "svg-mcp${want:+@$want}" skills "$@"

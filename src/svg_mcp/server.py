@@ -45,6 +45,7 @@ from fastmcp.server.sessions import (
 from fastmcp.server.sessions import (
     end_session as end_minted_session,
 )
+from fastmcp.skills.provider import SkillsDirectoryProvider
 from fastmcp.tools import ToolResult
 from mcp.server.connection import Connection
 from mcp.server.subscriptions import (  # type: ignore[import-not-found,unused-ignore]  # noqa: I001 — mcp-2-only (svg-mcp's floor); mypy's ignore_missing_imports + this comment cover older editor envs
@@ -117,304 +118,31 @@ def _to_fe(primitive: FilterPrimitive) -> ops.FePrimitive:
 
 
 _INSTRUCTIONS = """\
-svg-mcp authors SVG vector graphics as a structured, hierarchical document you build up with
-tool calls and **see** by rendering to an image. Work in a tight loop: make a change, call
-`render_document` to look at it, then adjust.
+svg-mcp builds SVG as a structured document through tool calls, and lets you see it by
+rendering. Use it instead of writing SVG markup by hand or placing shapes by coordinate.
 
-Example calls in this guide omit `session_id` and `document_id` for brevity: every real
-call passes `session_id`, and every call that acts on a document passes `document_id`.
+- Call `create_session()` once per drawing task and pass its `session_id` on EVERY call.
+  `create_document(width, height)` returns a `document_id`: pass it on every call that acts on
+  that document. Nothing defaults; a call missing either is rejected.
+- Diagrams, charts and tables have their own tools (`add_diagram_node`/`add_diagram_edge` +
+  `layout_diagram`, `add_chart`, `add_table`). Say what things are with `load_theme` and
+  `role=`/`kind=`; style keys are CSS names (`stroke-width`, `font-size`).
+- Build, `render_document`, look at the image, adjust. Never hand over SVG you haven't seen.
+- For anything beyond a couple of calls, `start_preview(document_id)` early and give the user
+  the exact `url` it returns.
 
-WORKFLOW
-0. `create_session()` once per drawing task → a `session_id`. Pass it on EVERY svg-mcp call
-   (see SESSIONS below).
-1. `create_document(width, height)` → returns a `document_id`. Pass it on EVERY call that
-   acts on that document: nothing defaults to "the current one".
-2. Add content: `add_rect`/`add_circle`/`add_path`/`add_text`/… Each returns the new node's
-   `{id, tag, name}` — keep the `id` (or give it a `name`) to refer back to the node.
-   Drawing a box-arrow diagram? Use the DIAGRAM facades below, not raw shapes. Plotting
-   numbers? `add_chart` (CHARTS below). Want a consistent look? `load_theme` first
-   (THEMES below).
-3. Organize with `create_layer` / `create_group`; nest by passing a parent id.
-4. `outline(document_id)` shows the current tree; `render_document(document_id)` returns the
-   rendered PNG so you can visually verify. Iterate.
-5. `export_svg(document_id)` returns the final SVG source.
-6. WHEN THE ARTWORK IS COMPLETE (after you've iterated and verified it): if the user hasn't
-   already said what they want done with the result, ASK before finishing — e.g. save to a file
-   and where (`export_render` → png/jpeg/webp/pdf/ps/eps/svg), hand back the SVG source, or just
-   leave it as the live document. Don't assume; don't silently stop with only an inline preview.
-
-DOCUMENTS ARE ALWAYS NAMED
-- There is no active or current document. Every tool that acts on a document takes a required
-  `document_id`; a call without one is rejected rather than guessing. Several documents can be
-  open in one session; each call says which it means.
-
-ORIENTING (contextualize queries)
-- `current_context()` / `list_documents()` — the session's open document ids. Call one to
-  re-anchor after a long conversation when you may have lost track, then `outline` the one you
-  mean.
-- `outline` — the document tree (names, kinds, ids); `describe_node(target)` — everything about
-  one node (kind, world bbox, computed style, local + composed transform, parent) in one call.
-- `list_resources()` — the gradients/patterns/filters/clips/masks/markers/symbols and named
-  styles already defined, so you know what you can reference/reuse before defining new ones.
-- `list_styles()` — every attachable style: each resident theme's classes (with descriptions)
-  plus doc-local ones. `describe_document` also reports resident themes and their routing.
-- `find(name=…)` to locate nodes, `get_subtree(target)` to read a branch, `get_bbox`/
-  `get_transform`/`get_computed_style` for focused lookups.
-
-TARGETING NODES & NAMING
-- Every `target`/`parent`/`content` argument accepts a node's **id** (returned on creation) or
-  its **friendly name** (the `name`/label you gave it).
-- **Name the things you'll refer back to.** Give meaningful nodes and every group/layer a
-  `name`, and reason in terms of names via `find(name=…)` / `outline`. Names are stable and
-  legible; random ids (`rect_8f3a`) are easy to lose track of across a long session.
-- **Keep names unique.** A name that matches more than one node is rejected (it won't silently
-  pick one) — e.g. don't name a gradient and a shape the same thing.
-- **A handle says which namespace it means.** A bare `target` is an id, else an EXACT name —
-  never a hierarchy query, so a name containing `/` (graph imports name nodes `src/ops/x.py`)
-  just works. Be explicit when you must: `id:x`, `name:x` (verbatim, slashes and all), or
-  `path:ancestor/name` for the ancestor-chain query that disambiguates a duplicated name. The
-  prefix is stripped once, so any literal name is expressible (`name:name:foo`).
-- Omitting `parent` places a node at the document root. Pass a group/layer id to nest it.
-- **Stacking:** later siblings paint on top. To order a node relative to another, use
-  `reparent(target, above=<node>)` / `below=<node>` instead of counting child indices.
-
-COORDINATES
-- User units, origin at top-left, x→right, y→down. The viewBox defaults to `0 0 width height`.
-
-STYLING & PAINT
-- `style` is a structured object keyed by CSS property names: `fill`, `stroke`, `stroke-width`,
-  `opacity`, `fill-opacity`, `stroke-opacity`, `stroke-dasharray`, `stroke-linecap`,
-  `stroke-linejoin`, plus typography (`font-family`, `font-size`, `font-weight`, `font-style`,
-  `text-anchor`, `letter-spacing`, …). Use the hyphenated CSS names: they are what the schema
-  accepts. `font-size` also takes a bare number (px). Unknown/misspelled keys are REJECTED with
-  an error (not dropped), so set the whole style in one call and trust it stuck.
-- Colors accept hex (`#ff0000`), `rgb()/rgba()`, CSS names (`tomato`), or `none`.
-- A fill/stroke may also reference a defined resource by id `url(#<id>)`, the shorthand `@<name>`,
-  or `url(#<name>)` — all resolve to the defined gradient/pattern. Define the resource first.
-- `add_line`/`add_polyline` (and bulk `add_lines`) auto-get a 1px black stroke when none is set,
-  so they're never invisible; pass `stroke` (or `stroke:"none"`) to override. `fill` defaults to
-  black, so closed shapes show — but an unstyled OPEN `add_path`/`add_paths` (no fill region) can
-  still be invisible; give it a stroke.
-- `restyle` MERGES by default — it only changes the properties you pass, keeping the rest. Pass
-  `replace=true` to discard the node's current style and set exactly what you provide.
-
-THEMES (design language)
-- A theme is a document-wide design language: named styles, tokens, and house rules, authored
-  as CSS in `.svg-mcp/themes/`. `load_theme(name)` makes it resident — new nodes then pick up
-  its look automatically, and the response includes the theme's GUIDANCE: **read it and follow
-  it; it is the house style speaking.**
-- Say what things ARE, not how they look: pass `role=` ("title", "label", "service") and let
-  the theme decide paint. `list_styles()` is the menu of everything attachable; attach extras
-  via `styles=["@name"]` at creation or `apply_styles` later.
-- A node's inline `style` is EXPLICIT and pinned — it beats every theme rule and deliberately
-  does NOT follow theme/variant switches. If you typed it, it sticks; if the theme supplied it,
-  it stays linked. Prefer roles/classes; reach for inline `style` only for one-off intent.
-- `set_theme_variant("dark")` reskins every resident theme in one call (themes without that
-  variant keep base). After a variant switch, `reflow()` re-bakes diagram edge-label halos.
-- `themed=false` on any constructor opts a node out of automatic hooks. `apply_theme(target,
-  theme)` restyles ONE subtree without changing residency; `clear_theme` undoes it.
-
-DIAGRAMS (box-arrow)
-- For ANY box-and-arrow diagram — architecture, flowchart, pipeline — use the diagram facades,
-  NOT hand-placed rects and lines: `add_diagram_node(kind, label)`, `add_diagram_edge(source,
-  target, kind)`, `add_diagram_container(members)`. Nodes size themselves to their labels;
-  edges pick sides, fan out across a face, route at right angles, and carry haloed labels;
-  containers draw behind their members and re-fit as they move. The bundled default theme
-  styles all of it with no setup.
-- Edges store WHAT they connect, not where they run. **After moving, resizing, or deleting
-  diagram nodes, call `reflow()`** — that one call re-routes every edge and re-fits containers
-  from current positions.
-- Skip coordinates entirely: add nodes and edges, then `layout_diagram(algorithm="layered",
-  direction="LR")` (or "tree"/"grid"). Fine-tune with `translate_node` + `reflow` afterwards —
-  layout is opt-in and won't run again behind your back.
-- Have a graph already (service map, dependency tree, state machine, call graph)? One
-  `add_diagram_graph` call ingests `{nodes, edges}` — the producer's own shape, `from`/`to` and
-  extra keys and all — and lays it out. Don't hand-write N `add_diagram_node` calls.
-- **It never decides what matters — you do**, and a raw graph is usually too big to read as-is.
-  Say which of the three you mean: *graph it all* (then read `bounds` and `resize_document`);
-  *graph it all except* (`exclude=[ids or globs]`); or *group it this way*
-  (`collapse=[{id, members}]`, drawing several nodes as one). Judge that from what the diagram is
-  FOR — no score can. Everything dropped or folded is counted in the response.
-- Edit in place: `edit_diagram_node`/`edit_diagram_edge`/`edit_diagram_container` patch
-  label/kind/route/members; `get_params` reads any facade's spec back.
-
-CHARTS
-- For ANY plot of numbers — bar, line, donut, scatter, histogram, sparkline, radar — use
-  `add_chart(kind, data)`,
-  NOT hand-placed rects and polylines. It picks round tick values, MEASURES the margins from
-  the tick labels so nothing is clipped, and paints each series from the theme's palette in
-  series order. It works with no theme loaded: charts are the one category the bundled default
-  styles outright.
-- `axes=` frames the plot when the defaults won't do: `y_min`/`y_max` (and `x_min`/`x_max` on a
-  numeric x) pin the scale so two charts compare honestly — data outside a pinned range is
-  clipped to the plot, never drawn over the axis; `ticks`/`x_ticks` take a target count or an
-  explicit list; `tick_format` writes the labels as plain/percent/currency/si/fixed (a closed
-  vocabulary, no format strings); `gridlines` and `tick_marks` and `x_tick_rotate` do the rest.
-- `scale="log"` is available on the value axis, for strictly positive data. Bars on it measure
-  from the axis minimum rather than from zero, because a log axis has no zero to measure from.
-- `axes.reference_lines=[{value, label, to, axis, kind}]` draws the thresholds the data is READ
-  AGAINST — a target, a budget, a tolerance band (`to` makes it a band). Lines are drawn over the
-  data, bands behind it; one off the axis is dropped, a band clamps to it.
-- Per-kind, in `data`: `value_labels` writes each number on its mark (bars flip the label inside
-  when the plot edge is close; nothing is ever clipped); `stacked` sums the series per category
-  (negatives stack DOWNWARD from zero, the axis follows the TOTALS, `stack_total_labels` writes
-  them); `orientation="horizontal"` swaps the axes so long category names get the left margin —
-  which is then measured from THEM; `order` = "value_desc"/"value_asc"/"label"/an explicit list;
-  `step="post"|"pre"|"mid"` on a line draws a staircase; a donut takes `center_text`/
-  `center_subtext` (the KPI-in-the-hole idiom), `slice_labels` and `start_angle`.
-- The parity batch, in one line each: marks are circle/square/diamond/triangle/tri_down/plus/
-  cross/star (`open` draws them hollow, `markevery` thins them, `sizes` + `marker_scale` makes
-  them bubbles sized by AREA); `axes.minor`/`minor_gridlines` subdivide the ruler (2..9 mantissas
-  on a log axis) and `tick_direction`/`y_tick_rotate` finish it; `invert_x`/`invert_y` turn a
-  scale round and `zero_spine` stands the axis line at 0 with the labels left at the edge;
-  `bands=[{between:[a,b], label}]` on a line fills between two identically-sampled series;
-  `waterfall` (+ `total_label`) walks a running total with dashed connectors and `normalized`
-  turns a stack into shares of 100; `kind="histogram"` takes RAW values and bins them itself
-  (`bins` = a count or explicit edges) into contiguous bars.
-- `kind="radar"` compares PROFILES over three or more named `axes` (clockwise from 12 o'clock,
-  one shared radial scale, so only commensurable spokes belong on one wheel): `fill` washes each
-  polygon, `rings`/`r_max` are the ruler (`r_max` pins it so two radars compare), `ring_labels`
-  writes it up the 12 o'clock spoke. Negative values are REFUSED — a radius has no other
-  direction to run in; that data is a bar chart. `axes=` (the cartesian frame) is ignored here.
-- Still out of scope: statistical transforms, a second y axis, colormaps. If you need one, the
-  answer is a different picture, not a hack.
-- `edit_chart(target, data=…)` re-derives the whole plot in place, keeping the group's id,
-  classes and position. `get_params` hands the data back exactly as it went in.
-
-LEGENDS & CALLOUTS
-- Finished a diagram or a chart? `add_legend()` with NO entries generates the key from what the
-  document actually draws — every node/edge/container kind and chart series in use, each swatch
-  wearing that kind's real class, so a variant switch recolours the key too. Add a kind later
-  and `edit_legend(target, regenerate=true)` picks it up.
-- To annotate a node, `add_callout(target, text, kind)` — "note"/"info"/"warning"/"success"/
-  "danger". It wraps the text, places the card off the roomiest side, and draws a LEADER that
-  `reflow`/`layout_diagram` re-anchor, so the note stays attached however far the node moves.
-  Do NOT hand-place a text box beside a node: that annotation dies at the next layout pass.
-- To annotate ONE number of a chart, add `datum={series, index}` and target the chart: the leader
-  lands on that bar/point/slice and is re-derived from the spec, so it follows the mark through
-  an `edit_chart` that changes the data.
-- For a note about the PICTURE rather than about one node — a takeaway, a caveat, a status —
-  `add_callout_card(title, body, kind)`: the same card, no leader, height derived from the words.
-
-TABLES
-- For ANY grid of values use `add_table(rows, header)`, NOT hand-placed text. It measures every
-  column to the widest cell in it, wraps a cell past `max_col_width` and grows its row, and
-  right-aligns a column whose every body cell is a number. Guessed x positions are how a
-  generated table ends up with one column written over the next.
-- `edit_table(target, rows=…)` re-derives it in place, keeping the group's id and position.
-
-EDITING GEOMETRY IN PLACE
-- To change an existing node, edit it IN PLACE — do NOT delete + re-add (that drops its clip,
-  mask, filters, and z-order). Each `edit_*` mirrors its `add_*` twin (same params + inline
-  `style`/`transform`, only what you pass is changed): `edit_rect`/`edit_circle`/`edit_ellipse`/
-  `edit_line`/`edit_polyline`/`edit_polygon`/`edit_path`. For a star/arc, `edit_star`/`edit_arc`
-  re-derive the shape from its parameters; editing such a node's raw `d` (via `edit_path`) demotes
-  it to a plain path. To reshape a clipPath/mask outline, target the shape inside it by id.
-- To read a node, `get_params(target)` returns its current settings under the same names the
-  `add_*`/`edit_*` tools use (a circle's cx/cy/r, a star's sides/outer_radius/…). `get_geometry(
-  target, relative_to=...)` gives x/y/width/height in a chosen frame — `world` (default), `local`,
-  `parent`, or another node's id/name — and `get_transform` adds the per-ancestor transform `stack`.
-
-REUSABLE RESOURCES (defs)
-- `define_linear_gradient`/`define_radial_gradient`/`define_pattern` return an id — use it as a
-  fill: `style={"fill": "url(#<id>)"}` or `@<name>`.
-- `define_style(name, style)` creates a named CSS class; `apply_styles(target, [name])` APPENDS it
-  to the node's ordered class list (`remove_styles` unlinks). A node's inline `style` is its
-  EXPLICIT style and beats every class rule.
-- `define_clip`/`define_mask`/`define_symbol`/`define_marker` take `content`: a list of EXISTING
-  node ids, which are MOVED into the new resource. So: create the shapes first, then define the
-  resource from them, then `apply_clip`/`apply_mask`/`apply_marker` (or `add_use` for a symbol).
-
-TRANSFORMS
-- Prefer the primitives, which compose onto a node's existing transform: `translate_node`,
-  `rotate_node` (optional center point), `scale_node` (optional anchor point), `skew_node`.
-- `apply_transform(target, "rotate(45 100 100)")` accepts any raw SVG transform string.
-- Most construction tools also take a `transform` string applied at creation time.
-
-FILTERS & EFFECTS
-- Convenience: `apply_blur`, `apply_drop_shadow`, `apply_color_matrix`, `apply_color_overlay`,
-  `apply_blend`, `apply_morphology`, `apply_turbulence`, `apply_displacement_map`.
-- Composite effects (synthesized, no native equivalent — for icons/slides): `apply_inner_shadow`,
-  `apply_outer_glow`, `apply_inner_glow`, `apply_outline` (sticker stroke), `apply_bevel`,
-  `apply_gloss` (edge shine, gradient roll-off at the light angle), `apply_front_light` (broad
-  3D front-face light), `apply_grain` (noise overlay). All stack and have a light `angle`.
-- `get_filter(target)` describes the filter on a node — `{id, kind, params}` under the same param
-  names — and `edit_filter(target, {param: value, …})` changes them ONE BY ONE in place (works for
-  built-ins and composites; reads/edits without re-applying). Custom `define_filter` graphs report
-  `kind="custom"` and aren't editable via `edit_filter` (rebuild them with `define_filter`).
-- Each `apply_*` filter REPLACES the node's filter — a node has ONE `filter`, so the last apply
-  wins (re-applying a drop shadow swaps it, it does not stack). To COMBINE effects (e.g. blur +
-  drop shadow) on one node, build a single filter with `define_filter` (one `fe*` graph) and attach
-  it with `apply_filter` — not by stacking convenience calls.
-- For full control, `define_filter` builds an arbitrary `fe*` primitive graph; attach with
-  `apply_filter`. (SVG has no native feDropShadow — `apply_drop_shadow` synthesizes one.)
-
-TEXT
-- `add_text(x, y, content)` for a text block; `add_text_run` appends `<tspan>` runs. For multiple
-  LINES, append runs with an absolute `x` and an incremental `dy` (e.g. `dy="1.2em"`) per line.
-  `add_text_on_path` flows text along an existing path (pass the path's id).
-- To change wording/position/style of EXISTING text, use `edit_text(target, content=…)` IN PLACE —
-  do not delete + re-add (that drops the node's id/clip/filters/z-order).
-- Do NOT estimate text width by chars × size — call `measure_text` (below); it's why it exists.
-- Fonts: `list_fonts()` returns the family names installed on this machine — pick one and set it
-  via `style["font-family"]`. `font-size`, `font-weight` (`bold`/`700`), `font-style`
-  (`italic`), `text-anchor` (start/middle/end), `letter-spacing`, `word-spacing`,
-  `text-decoration`, `dominant-baseline` (vertical align), and `paint-order` are all settable on
-  `style`.
-- `measure_text(content, style)` returns `{width, height}` in user units from the font's own
-  metrics — use it to fit/center text and size boxes BEFORE rendering (no render round-trip).
-  inkex does not shape glyphs, so geometric bbox queries return empty for text; `measure_text`
-  fills that gap (Latin-accurate; no kerning/complex shaping).
-- `text_to_path(target)` converts a text/textPath node into a real outlined `<path>` (pure-Python
-  via fontTools, honoring family/weight/italic/anchor and text-on-path). Use it to make output
-  font-independent (renders identically anywhere) or to then manipulate the glyph geometry.
-
-RENDERING & EXPORT
-- `render_document` returns a short summary plus the rendered image (base64), via the resvg
-  engine. Flowed text (`add_flowed_text`) and mesh gradients have limited/no rendering support;
-  prefer `add_text`+`add_text_run` and linear/radial gradients for reliable output.
-- `export_render(format, path)` writes a FILE: png/jpeg/webp (faithful raster via resvg),
-  pdf/ps/eps (true vector via librsvg), or svg (source). `export_formats()` lists them and reports
-  whether vector export is available. cairo is intentionally unused (it drops SVG filters).
-
-RESOURCES
-- The server also publishes read-only resources the host may surface as context, scoped to
-  the session by a token: `svg://<token>/documents` (index of open docs),
-  `svg://<token>/<document_id>/svg` (live SVG source) and `svg://<token>/<document_id>/render`
-  (a PNG preview). Tools return these URIs (`create_document`'s `resources`, `list_documents`'
-  `index`); use them as given. Reading them never changes state.
-
-LIVE PREVIEW
-- **Offer the preview URL early — don't wait to be asked.** As soon as you start any drawing
-  that will take more than a couple of calls, call `start_preview` and give the user the EXACT
-  `url` it returns, up front in your reply (e.g. "Live preview: <url> — it refreshes on every
-  change, so you can watch as I build"). Watching the work take shape lets them redirect you
-  early instead of waiting for a finished result they may not want.
-- Also do this whenever they ask to *see* the work — "show me", "let me see it", "open a
-  preview", "can I watch", "I want to see that".
-- `start_preview(document_id)` returns that document's page (`/<token>/<document_id>/`) plus
-  the session's `index` page. Always surface the value returned by the tool rather than a
-  guessed address. The page stays on its document: when you start another document, call
-  `start_preview` with its id and give the user the new URL.
-- The page refreshes automatically on each edit to its document, so you do NOT
-  need to call `render_document` for the user's benefit — keep building and let the preview update.
-  Reserve `render_document` for when YOU need to inspect the result, and prefer batching the
-  primitives you already know you need before you stop to look.
-
-SESSIONS (MINTED DOCUMENTS)
-- Mint a session per drawing task: call `create_session` FIRST, then pass its `session_id`
-  on EVERY svg-mcp call — each tool's schema marks the argument, and passing it yourself is
-  the contract on every client and transport (no client injects it, and there is no
-  per-connection fallback). Documents persist under it, across connection churn. A call
-  without a session is rejected with that same guidance — run create_session and retry with
-  the id it returned.
-- A session minted over a handshake-era HTTP connection is owned by that connection (it
-  dies with the connection). One minted on a stateless (2026-07-28) link cannot be bound —
-  the unguessable id is its capability. Over stdio the server serves only you.
-- `end_session` invalidates a session and discards its documents. Never call it mid-task.
+The full guide is the `svg-authoring` skill: read `skill://svg-authoring/SKILL.md` (behind
+mcp-combiner, `skill://svg-mcp/svg-authoring/SKILL.md`) before a non-trivial drawing. It
+indexes references for diagrams, charts, themes, styling, text, effects, editing and export.
 """
 
 mcp: FastMCP = FastMCP(name="svg-mcp", instructions=_INSTRUCTIONS)
+
+#: The packaged guidance skill (SEP-2640 / Agent Skills): served as skill://svg-authoring/...
+#: resources, plus skills/list and skills/get on 2026-era sessions. The installers in
+#: svg_mcp.skill_install copy the same folder to a client's skills directory.
+SKILLS_ROOT = Path(__file__).parent / "skills"
+mcp.add_provider(SkillsDirectoryProvider(SKILLS_ROOT))
 
 # Out-of-request (direct/programmatic) use only: every MCP request must name a session.
 # There is deliberately no per-connection store: implicit state let a call land on a
@@ -7022,6 +6750,7 @@ def main() -> None:
     The http / streamable-http transports serve streamable HTTP at ``/mcp``.
 
     ``svg-mcp hash-password`` prints a ``web_auth.password_hash`` for the live preview's login.
+    ``svg-mcp skills install|uninstall|status`` manages the svg-authoring skill on disk.
     """
     import argparse
     import atexit
@@ -7034,6 +6763,11 @@ def main() -> None:
     from .config import get_settings
 
     parser = argparse.ArgumentParser(prog="svg-mcp", description="svg-mcp MCP server")
+    from . import __version__  # noqa: PLC0415 — CLI-only
+
+    # The plugins' launchers compare this against their own version to decide whether an
+    # svg-mcp already on PATH is new enough to use instead of `uvx svg-mcp@<version>`.
+    parser.add_argument("--version", action="version", version=f"svg-mcp {__version__}")
     # Flag defaults are None so "not given" falls through to the settings (env, config file).
     parser.add_argument(
         "--transport",
@@ -7046,6 +6780,17 @@ def main() -> None:
     commands.add_parser(
         "hash-password", help="Print a password hash for web_auth (the live preview's login)"
     )
+    commands.add_parser(
+        "skills",
+        help="install|uninstall|status [--target claude|agents|all]: copy the svg-authoring "
+        "skill into a client's skills directory",
+        add_help=False,
+    )
+    # `skills` takes its own arguments (svg_mcp.skill_install.cli); hand them over verbatim.
+    if sys.argv[1:2] == ["skills"]:
+        from .skill_install import cli as _skills_cli  # noqa: PLC0415 — CLI-only
+
+        sys.exit(_skills_cli(sys.argv[2:]))
     args = parser.parse_args()
     if args.command == "hash-password":
         sys.exit(_hash_password_cli())

@@ -7,9 +7,22 @@ released together under one version. The format follows
 
 ## [Unreleased]
 
+### Added
+- The authoring guide is now the **`svg-authoring`** skill, shipped in the package and served
+  under the MCP skills extension (SEP-2640): `skill://svg-authoring/SKILL.md` plus one reference
+  file per topic, and `skills/list` / `skills/get` on 2026-era sessions.
+- `svg-mcp skills install|uninstall|status [--target claude|agents|all]`, and the slash
+  commands `/svg-mcp:skill` (Claude Code) and `/svg-mcp skill` (Pi), install it into a client's
+  skills folder with a `.installed-by` marker, following mcp-combiner's skills-distribution
+  contract: a copy mcp-combiner manages is left alone, and an unmarked or foreign one is skipped.
+- `svg-mcp --version`. The Claude plugin already relied on it to decide whether an `svg-mcp`
+  on PATH is new enough; without it, the plugin always fell back to `uvx`.
+
 ### Changed
-- Requires fastmcp 4.2.6 or later (was 4.1.5). fastmcp 4.2 adds the MCP skills extension
-  (SEP-2640), which svg-mcp's guidance will move to.
+- The server's MCP instructions shrink from about 22,000 characters to a short preamble (the
+  session and document contract, render-and-look, the preview) that points at the skill.
+  The always-on directive (`CLAUDE.md.example`) gains a pointer to the skill.
+- Requires fastmcp 4.2.6 or later (was 4.1.5), for the MCP skills extension.
 
 ## [0.11.2] - 2026-11-24
 

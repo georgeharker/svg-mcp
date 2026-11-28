@@ -314,6 +314,31 @@ variants, residency, precedence) and [`docs/diagrams.md`](./docs/diagrams.md) (d
 chart, and annotation facades). Regenerate the images with
 [`examples/generate.py`](./examples/generate.py).
 
+## The authoring guide is a skill
+
+The full guide for the model (diagrams, charts, themes, styling, text, effects, editing,
+export) ships inside the package as the **`svg-authoring`** [Agent Skill](https://agentskills.io/),
+so it loads only when a task needs it instead of filling every session's context. The server's
+own MCP instructions are a short preamble that points at it.
+
+- **Served by svg-mcp** under the MCP skills extension ([SEP-2640](https://modelcontextprotocol.io/seps/2640-skills-extension)):
+  resources `skill://svg-authoring/SKILL.md` and `skill://svg-authoring/references/*.md`, plus
+  `skills/list` / `skills/get` on 2026-era sessions. Behind mcp-combiner the URIs gain the
+  server's prefix: `skill://svg-mcp/svg-authoring/SKILL.md`.
+- **Installed on disk** for clients that load skills from a folder. mcp-combiner syncs it
+  for every enabled server. Without the combiner, install it yourself:
+
+  ```bash
+  svg-mcp skills install                  # both targets
+  svg-mcp skills install --target claude  # $CLAUDE_CONFIG_DIR/skills, else ~/.claude/skills
+  svg-mcp skills install --target agents  # ~/.agents/skills (Pi, OpenCode)
+  svg-mcp skills status | uninstall
+  ```
+
+  or `/svg-mcp:skill` in Claude Code and `/svg-mcp skill` in Pi. Each installed copy carries a
+  `.installed-by` marker; the installer leaves a copy managed by mcp-combiner alone, and
+  skips any folder it didn't install.
+
 ## Install as a Claude Code plugin
 
 The repo doubles as a [Claude Code](https://code.claude.com) plugin marketplace. The plugin
